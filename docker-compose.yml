@@ -1,0 +1,15 @@
+services:
+  mc-bot:
+    build: .
+    restart: unless-stopped
+    environment:
+      MC_BOT_DISCORD_TOKEN: "${MC_BOT_DISCORD_TOKEN:?Set the Discord bot token}"
+    volumes:
+      - minecraft-data:/minecraft:ro
+      - mc-bot-data:/data
+
+volumes:
+  minecraft-data:
+    external: true
+    name: "${MINECRAFT_DATA_VOLUME:?Set the Minecraft Docker volume name}"
+  mc-bot-data:

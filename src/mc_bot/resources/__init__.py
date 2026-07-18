@@ -1,0 +1,1 @@
+"""Bundled Minecraft translation resources."""
