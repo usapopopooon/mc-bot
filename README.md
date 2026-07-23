@@ -97,8 +97,8 @@ Discordコマンドで設定します。
 
 Minecraftアプリを作り直した場合は、ホスト上の `docker volume ls` で新しい名前を確認し、
 `MINECRAFT_DATA_VOLUME` を上書きします。Coolifyによる別プロジェクトの名前付き
-ボリューム書き換えを避けるため、Dockerのボリュームデータディレクトリをmc-bot側の
-`/minecraft` へbind mountします。マウントは読み取り専用です。
+ボリューム書き換えを避けるため、`driver_opts` でDockerのボリュームデータディレクトリを
+参照します。mc-bot側の `/minecraft` へのマウントは読み取り専用です。
 
 Docker Compose location:
 

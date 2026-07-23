@@ -6,10 +6,7 @@ services:
       DISCORD_TOKEN: "${DISCORD_TOKEN:?Set the Discord bot token}"
       MINECRAFT_DATA_VOLUME: "${MINECRAFT_DATA_VOLUME:?Set the Minecraft Docker volume name}"
     volumes:
-      - type: bind
-        source: "/var/lib/docker/volumes/${MINECRAFT_DATA_VOLUME:?Set the Minecraft Docker volume name}/_data"
-        target: /minecraft
-        read_only: true
+      - minecraft-source:/minecraft:ro
       - mc-bot-data:/data
     deploy:
       resources:
@@ -18,4 +15,9 @@ services:
           memory: 128M
 
 volumes:
+  minecraft-source:
+    driver_opts:
+      type: none
+      o: bind
+      device: "/var/lib/docker/volumes/${MINECRAFT_DATA_VOLUME:?Set the Minecraft Docker volume name}/_data"
   mc-bot-data:
