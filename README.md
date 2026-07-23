@@ -71,7 +71,6 @@ mc-botコンテナ
 ```text
 /mc-config channel              今いるチャンネルを通知先にする
 /mc-config channel channel:#ログ 任意のテキストチャンネルを通知先にする
-/mc-config label name:Chill Cafe 通知に表示するサーバー名を変更する
 /mc-config show                 現在の設定と転送状態を確認する
 ```
 
@@ -95,8 +94,8 @@ Botトークンは秘密情報として扱い、Git、README、Issue、ログへ
 
 `MINECRAFT_DATA_VOLUME` はBotの動作設定ではなく、コンテナ起動前に外部ボリュームを
 解決するDocker Compose側のインフラ設定です。Coolifyの変数一覧に表示されるよう、
-サービスの `environment` にも必須変数として宣言しています。通知先と表示名は
-Discordコマンドで設定します。
+サービスの `environment` にも必須変数として宣言しています。通知先はDiscordコマンドで
+設定します。
 
 Minecraftアプリを作り直した場合は、ホスト上の `docker volume ls` で新しい名前を確認し、
 `MINECRAFT_DATA_VOLUME` を上書きします。Raw Compose Deploymentにより、この外部

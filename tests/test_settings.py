@@ -14,15 +14,22 @@ def test_missing_file_uses_defaults(tmp_path) -> None:
 def test_saves_and_loads_settings(tmp_path) -> None:
     path = tmp_path / "nested" / "settings.json"
     store = SettingsStore(path)
-    settings = RuntimeSettings(channel_id=123456789, server_label="うさぽサーバー")
+    settings = RuntimeSettings(channel_id=123456789)
 
     store.save(settings)
 
     assert store.load() == settings
-    assert json.loads(path.read_text(encoding="utf-8")) == {
-        "channel_id": 123456789,
-        "server_label": "うさぽサーバー",
-    }
+    assert json.loads(path.read_text(encoding="utf-8")) == {"channel_id": 123456789}
+
+
+def test_ignores_legacy_server_label(tmp_path) -> None:
+    path = tmp_path / "settings.json"
+    path.write_text(
+        '{"channel_id": 123456789, "server_label": "Chill Cafe"}',
+        encoding="utf-8",
+    )
+
+    assert SettingsStore(path).load() == RuntimeSettings(channel_id=123456789)
 
 
 @pytest.mark.parametrize(
@@ -31,7 +38,6 @@ def test_saves_and_loads_settings(tmp_path) -> None:
         "[]",
         '{"channel_id": "general"}',
         '{"channel_id": -1}',
-        '{"server_label": ""}',
     ],
 )
 def test_rejects_invalid_settings(tmp_path, payload: str) -> None:

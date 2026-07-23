@@ -9,7 +9,6 @@ from pathlib import Path
 @dataclass(frozen=True, slots=True)
 class RuntimeSettings:
     channel_id: int | None = None
-    server_label: str = "Chill Cafe"
 
 
 class SettingsStore:
@@ -28,16 +27,11 @@ class SettingsStore:
             raise ValueError("Settings file must contain a JSON object")
 
         channel_id = data.get("channel_id")
-        server_label = data.get("server_label", "Chill Cafe")
         if channel_id is not None and (
             not isinstance(channel_id, int) or isinstance(channel_id, bool) or channel_id <= 0
         ):
             raise ValueError("channel_id must be a positive integer or null")
-        if not isinstance(server_label, str) or not server_label.strip():
-            raise ValueError("server_label must be a non-empty string")
-        if len(server_label) > 64:
-            raise ValueError("server_label must be at most 64 characters")
-        return RuntimeSettings(channel_id=channel_id, server_label=server_label.strip())
+        return RuntimeSettings(channel_id=channel_id)
 
     def save(self, settings: RuntimeSettings) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)

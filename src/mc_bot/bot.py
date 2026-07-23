@@ -56,10 +56,6 @@ class MinecraftDiscordBot(discord.Client):
             description="ログの通知先チャンネルを設定します",
         )(self._configure_channel)
         group.command(
-            name="label",
-            description="通知に表示するサーバー名を設定します",
-        )(self._configure_label)
-        group.command(
             name="show",
             description="現在のBot設定と稼働状態を表示します",
         )(self._show_configuration)
@@ -145,32 +141,6 @@ class MinecraftDiscordBot(discord.Client):
             ephemeral=True,
         )
 
-    @app_commands.describe(name="通知の先頭に表示するサーバー名 (1〜64文字)")
-    async def _configure_label(self, interaction: discord.Interaction, name: str) -> None:
-        if not await self._require_server_manager(interaction):
-            return
-        label = name.strip()
-        if not label or len(label) > 64:
-            await interaction.response.send_message(
-                "表示名は1〜64文字で指定してください。", ephemeral=True
-            )
-            return
-
-        try:
-            async with self._settings_lock:
-                updated = replace(self._settings, server_label=label)
-                await asyncio.to_thread(self._settings_store.save, updated)
-                self._settings = updated
-        except OSError as error:
-            LOGGER.warning("Could not save server label: %s", error)
-            await interaction.response.send_message(
-                f"設定を保存できませんでした: {error}", ephemeral=True
-            )
-            return
-        await interaction.response.send_message(
-            f"通知の表示名を「{label}」に設定しました。", ephemeral=True
-        )
-
     async def _show_configuration(self, interaction: discord.Interaction) -> None:
         if not await self._require_server_manager(interaction):
             return
@@ -188,7 +158,6 @@ class MinecraftDiscordBot(discord.Client):
             "\n".join(
                 (
                     f"通知先: {channel_text}",
-                    f"表示名: {self._settings.server_label}",
                     f"ログ転送: {'稼働中' if forwarding else '停止中'}",
                 )
             ),
@@ -224,7 +193,7 @@ class MinecraftDiscordBot(discord.Client):
             if event is None:
                 await asyncio.to_thread(self._tailer.acknowledge, pending_line)
                 continue
-            content = format_event(event, self._settings.server_label, self._translator)
+            content = format_event(event, self._translator)
             retry_delay = 1
             while not self.is_closed():
                 await self.wait_until_ready()
