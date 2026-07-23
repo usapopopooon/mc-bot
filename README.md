@@ -96,8 +96,9 @@ Botトークンは秘密情報として扱い、Git、README、Issue、ログへ
 Discordコマンドで設定します。
 
 Minecraftアプリを作り直した場合は、ホスト上の `docker volume ls` で新しい名前を確認し、
-`MINECRAFT_DATA_VOLUME` を上書きします。ボリュームはmc-bot側では `/minecraft` へ
-読み取り専用でマウントされます。
+`MINECRAFT_DATA_VOLUME` を上書きします。Coolifyによる別プロジェクトの名前付き
+ボリューム書き換えを避けるため、Dockerのボリュームデータディレクトリをmc-bot側の
+`/minecraft` へbind mountします。マウントは読み取り専用です。
 
 Docker Compose location:
 
