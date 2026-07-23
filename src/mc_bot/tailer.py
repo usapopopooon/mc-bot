@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import stat
 from collections.abc import AsyncIterator
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -37,28 +38,36 @@ class LogTailer:
             await asyncio.sleep(_POLL_INTERVAL_SECONDS)
 
     def validate(self) -> None:
-        if not self._log_path.is_file():
-            raise FileNotFoundError(f"Minecraft log does not exist: {self._log_path}")
+        try:
+            log_stat = self._log_path.stat()
+        except FileNotFoundError:
+            raise FileNotFoundError(f"Minecraft log does not exist: {self._log_path}") from None
+        except PermissionError as error:
+            raise PermissionError(
+                f"Minecraft log is not readable by the bot user: {self._log_path}"
+            ) from error
+        if not stat.S_ISREG(log_stat.st_mode):
+            raise FileNotFoundError(f"Minecraft log is not a regular file: {self._log_path}")
         with self._log_path.open("rb"):
             pass
         self._cursor_path.parent.mkdir(parents=True, exist_ok=True)
 
     def poll(self) -> list[PendingLine]:
         try:
-            stat = self._log_path.stat()
+            log_stat = self._log_path.stat()
         except FileNotFoundError:
             return []
-        if not self._log_path.is_file():
+        if not stat.S_ISREG(log_stat.st_mode):
             return []
 
-        identity = f"{stat.st_dev}:{stat.st_ino}"
+        identity = f"{log_stat.st_dev}:{log_stat.st_ino}"
         if self._cursor is None:
-            self._cursor = self._initial_cursor(identity, stat.st_size)
+            self._cursor = self._initial_cursor(identity, log_stat.st_size)
             self._save_cursor(self._cursor)
-            if self._cursor.offset >= stat.st_size:
+            if self._cursor.offset >= log_stat.st_size:
                 return []
 
-        if self._cursor.file_identity != identity or stat.st_size < self._cursor.offset:
+        if self._cursor.file_identity != identity or log_stat.st_size < self._cursor.offset:
             self._cursor = Cursor(identity, 0)
             self._save_cursor(self._cursor)
 

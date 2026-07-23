@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 from mc_bot.tailer import LogTailer
 
 
@@ -15,6 +17,22 @@ def test_starts_at_end_then_reads_appended_lines(tmp_path: Path) -> None:
     pending = tailer.poll()
     assert [line.text for line in pending] == ["new line"]
     tailer.acknowledge(pending[0])
+
+
+def test_validate_rejects_missing_log(tmp_path: Path) -> None:
+    tailer = LogTailer(tmp_path / "missing.log", tmp_path / "cursor.json")
+
+    with pytest.raises(FileNotFoundError, match="Minecraft log does not exist"):
+        tailer.validate()
+
+
+def test_validate_rejects_directory_as_log(tmp_path: Path) -> None:
+    log = tmp_path / "latest.log"
+    log.mkdir()
+    tailer = LogTailer(log, tmp_path / "cursor.json")
+
+    with pytest.raises(FileNotFoundError, match="is not a regular file"):
+        tailer.validate()
 
 
 def test_resumes_from_saved_cursor(tmp_path: Path) -> None:

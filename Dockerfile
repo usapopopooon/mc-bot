@@ -21,15 +21,19 @@ RUN uv sync --locked \
 
 FROM python:3.14.6-slim AS runtime
 ENV PATH="/app/.venv/bin:$PATH" \
+    HOME="/home/mc-bot" \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
-RUN useradd --system --uid 10001 --create-home mc-bot
+RUN groupadd --gid 1000 mc-bot \
+    && useradd --uid 1000 --gid mc-bot --create-home mc-bot
 WORKDIR /app
 COPY --from=dependencies /app/.venv /app/.venv
 COPY --from=dependencies /app/src /app/src
 COPY --from=test /tmp/tests-passed /tmp/tests-passed
-RUN mkdir -p /data && chown mc-bot:mc-bot /data
-USER mc-bot
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN mkdir -p /data \
+    && chown mc-bot:mc-bot /data \
+    && chmod 755 /usr/local/bin/docker-entrypoint.sh
 HEALTHCHECK --interval=30s --timeout=3s --start-period=45s --retries=3 \
     CMD ["python", "-c", "import os,time,sys; p='/tmp/mc-bot-healthy'; sys.exit(0 if os.path.exists(p) and time.time()-os.path.getmtime(p)<45 else 1)"]
-ENTRYPOINT ["mc-bot"]
+ENTRYPOINT ["docker-entrypoint.sh"]
