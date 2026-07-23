@@ -84,7 +84,9 @@ Botトークンは秘密情報として扱い、Git、README、Issue、ログへ
 ## Coolifyへのデプロイ
 
 このリポジトリをMinecraftとは別のDocker Composeアプリとして登録します。同じ
-`usapo-server_2` に配置し、次の変数をCoolifyで設定します。
+`usapo-server_2` に配置します。別プロジェクトのMinecraftボリューム名をCoolifyに
+書き換えさせないため、mc-botのAdvanced設定で **Raw Compose Deployment** を有効にします。
+そのうえで次の変数をCoolifyに設定します。
 
 | 変数 | 必須 | 値 |
 | --- | --- | --- |
@@ -97,9 +99,8 @@ Botトークンは秘密情報として扱い、Git、README、Issue、ログへ
 Discordコマンドで設定します。
 
 Minecraftアプリを作り直した場合は、ホスト上の `docker volume ls` で新しい名前を確認し、
-`MINECRAFT_DATA_VOLUME` を上書きします。Coolifyによる別プロジェクトの名前付き
-ボリューム書き換えを避けるため、`driver_opts` でDockerのボリュームデータディレクトリを
-参照します。mc-bot側の `/minecraft` へのマウントは読み取り専用です。
+`MINECRAFT_DATA_VOLUME` を上書きします。Raw Compose Deploymentにより、この外部
+ボリュームをmc-bot側の `/minecraft` へ読み取り専用で直接マウントします。
 
 Docker Compose location:
 
