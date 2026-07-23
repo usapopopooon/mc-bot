@@ -3,7 +3,7 @@ services:
     build: .
     restart: unless-stopped
     environment:
-      MC_BOT_DISCORD_TOKEN: "${MC_BOT_DISCORD_TOKEN:?Set the Discord bot token}"
+      DISCORD_TOKEN: "${DISCORD_TOKEN:?Set the Discord bot token}"
     volumes:
       - minecraft-data:/minecraft:ro
       - mc-bot-data:/data

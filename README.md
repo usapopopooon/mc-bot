@@ -17,7 +17,7 @@ Minecraftサーバーのログを監視し、Discord Botとして指定チャン
 | 対応Minecraftログ | チャット、進捗・達成、参加、退出 |
 | 通知方向 | MinecraftからDiscordへの一方向 |
 | 設定方法 | Discordスラッシュコマンド |
-| 秘密情報 | `MC_BOT_DISCORD_TOKEN` 環境変数 |
+| 秘密情報 | `DISCORD_TOKEN` 環境変数 |
 | 永続データ | `/data/settings.json`、`/data/cursor.json` |
 
 Geyser/Floodgate経由のBedrockプレイヤーを含む次のログを扱います。
@@ -85,7 +85,7 @@ Botトークンは秘密情報として扱い、Git、README、Issue、ログへ
 
 | 変数 | 必須 | 値 |
 | --- | --- | --- |
-| `MC_BOT_DISCORD_TOKEN` | はい | Discord Botトークン。Secret扱いにする |
+| `DISCORD_TOKEN` | はい | Discord Botトークン。Secret扱いにする |
 | `MINECRAFT_DATA_VOLUME` | はい | Minecraftの実際のDockerボリューム名 |
 
 Botコンテナ内へ渡す環境変数はトークンだけです。`MINECRAFT_DATA_VOLUME` はBotの

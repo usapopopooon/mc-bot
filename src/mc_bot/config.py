@@ -16,7 +16,7 @@ class Config:
     @classmethod
     def from_environment(cls, environment: Mapping[str, str] | None = None) -> Config:
         values = os.environ if environment is None else environment
-        token = _required(values, "MC_BOT_DISCORD_TOKEN")
+        token = _required(values, "DISCORD_TOKEN")
         return cls(discord_token=token)
 
 
