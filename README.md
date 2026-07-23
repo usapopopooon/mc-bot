@@ -88,13 +88,14 @@ Botトークンは秘密情報として扱い、Git、README、Issue、ログへ
 | `DISCORD_TOKEN` | はい | Discord Botトークン。Secret扱いにする |
 | `MINECRAFT_DATA_VOLUME` | はい | Minecraftの実際のDockerボリューム名 |
 
-Botコンテナ内へ渡す環境変数はトークンだけです。`MINECRAFT_DATA_VOLUME` はBotの
-動作設定ではなく、コンテナ起動前に外部ボリュームを解決するDocker Compose側の
-インフラ設定です。通知先と表示名はDiscordコマンドで設定します。
+`MINECRAFT_DATA_VOLUME` はBotの動作設定ではなく、コンテナ起動前に外部ボリュームを
+解決するDocker Compose側のインフラ設定です。Coolifyの変数一覧に表示されるよう、
+サービスの `environment` にも必須変数として宣言しています。通知先と表示名は
+Discordコマンドで設定します。
 
-現在のMinecraft運用資料に記録されている実ボリューム名は、Coolifyのリソース接頭辞が
-付いたものです。デプロイ前にホスト上の `docker volume ls` と照合してください。
-ボリュームはmc-bot側では `/minecraft` へ読み取り専用でマウントされます。
+Minecraftアプリを作り直した場合は、ホスト上の `docker volume ls` で新しい名前を確認し、
+`MINECRAFT_DATA_VOLUME` を上書きします。ボリュームはmc-bot側では `/minecraft` へ
+読み取り専用でマウントされます。
 
 Docker Compose location:
 

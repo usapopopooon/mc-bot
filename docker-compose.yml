@@ -4,6 +4,7 @@ services:
     restart: unless-stopped
     environment:
       DISCORD_TOKEN: "${DISCORD_TOKEN:?Set the Discord bot token}"
+      MINECRAFT_DATA_VOLUME: "${MINECRAFT_DATA_VOLUME:?Set the Minecraft Docker volume name}"
     volumes:
       - minecraft-data:/minecraft:ro
       - mc-bot-data:/data
