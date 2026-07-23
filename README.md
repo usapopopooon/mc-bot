@@ -19,6 +19,8 @@ Minecraftサーバーのログを監視し、Discord Botとして指定チャン
 | 設定方法 | Discordスラッシュコマンド |
 | 秘密情報 | `DISCORD_TOKEN` 環境変数 |
 | 永続データ | `/data/settings.json`、`/data/cursor.json` |
+| CPU上限 | 0.25 CPU |
+| メモリ上限 | 128 MiB |
 
 Geyser/Floodgate経由のBedrockプレイヤーを含む次のログを扱います。
 

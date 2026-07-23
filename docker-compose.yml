@@ -8,6 +8,11 @@ services:
     volumes:
       - minecraft-data:/minecraft:ro
       - mc-bot-data:/data
+    deploy:
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: 128M
 
 volumes:
   minecraft-data:
