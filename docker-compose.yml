@@ -5,6 +5,10 @@ services:
     environment:
       DISCORD_TOKEN: "${DISCORD_TOKEN:?Set the Discord bot token}"
       MINECRAFT_DATA_VOLUME: "${MINECRAFT_DATA_VOLUME:?Set the Minecraft Docker volume name}"
+      MINECRAFT_RCON_HOST: minecraft
+      MINECRAFT_RCON_PORT: "25575"
+      MINECRAFT_RCON_PASSWORD: "${MINECRAFT_RCON_PASSWORD:?Set the Minecraft RCON password}"
+      FLOODGATE_USERNAME_PREFIX: "${FLOODGATE_USERNAME_PREFIX:-.}"
     volumes:
       - minecraft-data:/minecraft:ro
       - mc-bot-data:/data
@@ -13,9 +17,17 @@ services:
         limits:
           cpus: "0.25"
           memory: 128M
+    networks:
+      - default
+      - minecraft-control
 
 volumes:
   minecraft-data:
     external: true
     name: "${MINECRAFT_DATA_VOLUME:?Set the Minecraft Docker volume name}"
   mc-bot-data:
+
+networks:
+  minecraft-control:
+    external: true
+    name: "${MINECRAFT_CONTROL_NETWORK:-minecraft-control}"

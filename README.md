@@ -13,12 +13,12 @@ Minecraftサーバーのログを監視し、Discord Botとして指定チャン
 | パッケージ管理 | uv 0.11.8 |
 | デプロイ方式 | Docker Compose |
 | Discord接続方式 | BotアカウントによるGateway接続（Webhook不使用） |
-| Gateway Intents | Guildsのみ。Privileged Gateway Intents不使用 |
+| Gateway Intents | Guilds、Guild Members |
 | 対応Minecraftログ | チャット、進捗・達成、参加、退出 |
-| 通知方向 | MinecraftからDiscordへの一方向 |
+| 通知方向 | Minecraftログ通知、Discordからwhitelist管理 |
 | 設定方法 | Discordスラッシュコマンド |
-| 秘密情報 | `DISCORD_TOKEN` 環境変数 |
-| 永続データ | `/data/settings.json`、`/data/cursor.json` |
+| 秘密情報 | `DISCORD_TOKEN`、`MINECRAFT_RCON_PASSWORD` |
+| 永続データ | `/data/settings.json`、`/data/cursor.json`、`/data/accounts.db` |
 | CPU上限 | 0.25 CPU |
 | メモリ上限 | 128 MiB |
 | 実行ユーザー | UID/GID 1000（Minecraftデータの読み取り権限と一致） |
@@ -50,9 +50,12 @@ Minecraftコンテナ
                     ▼
 mc-botコンテナ
   ├─ /minecraft/logs/latest.log を監視
+  ├─ /minecraft/whitelist.json から既存登録を保護対象として取り込み
   ├─ /data/cursor.json に送信済み位置を保存
   ├─ /data/settings.json にDiscord上で行った設定を保存
-  └─ Discord Gateway → 指定チャンネル
+  ├─ /data/accounts.db にDiscordとMinecraftアカウントの紐付けを保存
+  ├─ Discord Gateway → 指定チャンネルへEmbed通知
+  └─ 内部DockerネットワークのRCON → whitelist/fwhitelist
 ```
 
 初回起動時は既存ログを再送せず、ファイル末尾から監視します。Botの再起動後は保存した
@@ -65,14 +68,24 @@ mc-botコンテナ
 
 1. [Discord Developer Portal](https://discord.com/developers/applications) でApplicationとBotを作ります。
 2. OAuth2のスコープ `bot` と `applications.commands` を付けて、Botを対象サーバーへ招待します。
-3. 通知先チャンネルで「チャンネルを見る」「メッセージを送信」の権限を与えます。
-4. mc-botをデプロイした後、「サーバーの管理」権限を持つユーザーがDiscordで次のコマンドを実行します。
+3. Developer PortalのBot設定で **Server Members Intent** を有効にします。
+4. 使用するチャンネルで「チャンネルを見る」「メッセージを送信」
+   「埋め込みリンク」の権限を与えます。
+5. mc-botをデプロイした後、「サーバーの管理」権限を持つユーザーがDiscordで設定します。
 
 ```text
-/mc-config channel              今いるチャンネルを通知先にする
-/mc-config channel channel:#ログ 任意のテキストチャンネルを通知先にする
-/mc-config show                 現在の設定と転送状態を確認する
+/mc-config channel channel:#ログ
+/mc-config panel channel:#minecraft参加
+/mc-config admin-panel channel:#minecraft管理
+/mc-config approval mode:自動承認
+/mc-config approval mode:管理者承認 channel:#minecraft申請
+/mc-config show
 ```
+
+一般ユーザーは参加パネルのボタンと入力画面だけで、Java版・Bedrock版を問わず
+複数アカウントを登録できます。管理パネルでは代理登録と、既存whitelistをDiscord
+アカウントへ紐付けできます。取り込まれた既存登録は初期状態で保護され、Botが
+自動削除することはありません。
 
 コマンドの応答と設定表示は実行者だけに見えます。コマンドはグローバル登録のため、
 Botの初回起動直後はDiscordへの反映に少し時間がかかる場合があります。通知先が未設定、
@@ -91,6 +104,9 @@ Botトークンは秘密情報として扱い、Git、README、Issue、ログへ
 | --- | --- | --- |
 | `DISCORD_TOKEN` | はい | Discord Botトークン。Secret扱いにする |
 | `MINECRAFT_DATA_VOLUME` | はい | Minecraftの実際のDockerボリューム名 |
+| `MINECRAFT_RCON_PASSWORD` | はい | Minecraft側と同じ強いRCONパスワード |
+| `MINECRAFT_CONTROL_NETWORK` | いいえ | 事前作成した内部Dockerネットワーク名 |
+| `FLOODGATE_USERNAME_PREFIX` | いいえ | Bedrock名のprefix。既定値は `.` |
 
 `MINECRAFT_DATA_VOLUME` はBotの動作設定ではなく、コンテナ起動前に外部ボリュームを
 解決するDocker Compose側のインフラ設定です。Coolifyの変数一覧に表示されるよう、
@@ -100,6 +116,15 @@ Botトークンは秘密情報として扱い、Git、README、Issue、ログへ
 Minecraftアプリを作り直した場合は、ホスト上の `docker volume ls` で新しい名前を確認し、
 `MINECRAFT_DATA_VOLUME` を上書きします。Raw Compose Deploymentにより、この外部
 ボリュームをmc-bot側の `/minecraft` へ読み取り専用で直接マウントします。
+
+Minecraftアプリとmc-botアプリをデプロイする前に、Dockerホストで制御用ネットワークを
+一度だけ作成します。
+
+```sh
+docker network create minecraft-control
+```
+
+両アプリを同じネットワークへ接続します。RCONのTCP/25575はホストへ公開しません。
 
 Docker Compose location:
 
@@ -129,5 +154,7 @@ Dockerでイメージ全体を検証する場合:
 docker build -t mc-bot:local .
 ```
 
-通知ではDiscordのメンションを無効化しているため、Minecraftチャットから
-`@everyone` やロールを通知することはできません。
+通知はイベント種別ごとに色分けしたDiscord Embedです。紐付け済みプレイヤーは
+`**.hoge** (@hoge)` の形式でDiscordユーザー名も表示します。Embedに加えて
+Discordのメンションも無効化しているため、Minecraftチャットから `@everyone` や
+ロールを通知することはできません。

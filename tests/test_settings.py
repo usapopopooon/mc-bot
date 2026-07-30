@@ -19,7 +19,16 @@ def test_saves_and_loads_settings(tmp_path) -> None:
     store.save(settings)
 
     assert store.load() == settings
-    assert json.loads(path.read_text(encoding="utf-8")) == {"channel_id": 123456789}
+    assert json.loads(path.read_text(encoding="utf-8")) == {
+        "channel_id": 123456789,
+        "guild_id": None,
+        "panel_channel_id": None,
+        "panel_message_id": None,
+        "admin_panel_channel_id": None,
+        "admin_panel_message_id": None,
+        "approval_mode": "automatic",
+        "approval_channel_id": None,
+    }
 
 
 def test_ignores_legacy_server_label(tmp_path) -> None:

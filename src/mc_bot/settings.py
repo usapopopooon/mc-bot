@@ -9,6 +9,13 @@ from pathlib import Path
 @dataclass(frozen=True, slots=True)
 class RuntimeSettings:
     channel_id: int | None = None
+    guild_id: int | None = None
+    panel_channel_id: int | None = None
+    panel_message_id: int | None = None
+    admin_panel_channel_id: int | None = None
+    admin_panel_message_id: int | None = None
+    approval_mode: str = "automatic"
+    approval_channel_id: int | None = None
 
 
 class SettingsStore:
@@ -26,12 +33,27 @@ class SettingsStore:
         if not isinstance(data, dict):
             raise ValueError("Settings file must contain a JSON object")
 
-        channel_id = data.get("channel_id")
-        if channel_id is not None and (
-            not isinstance(channel_id, int) or isinstance(channel_id, bool) or channel_id <= 0
+        identifiers = {}
+        for name in (
+            "channel_id",
+            "guild_id",
+            "panel_channel_id",
+            "panel_message_id",
+            "admin_panel_channel_id",
+            "admin_panel_message_id",
+            "approval_channel_id",
         ):
-            raise ValueError("channel_id must be a positive integer or null")
-        return RuntimeSettings(channel_id=channel_id)
+            value = data.get(name)
+            if value is not None and (
+                not isinstance(value, int) or isinstance(value, bool) or value <= 0
+            ):
+                raise ValueError(f"{name} must be a positive integer or null")
+            identifiers[name] = value
+
+        approval_mode = data.get("approval_mode", "automatic")
+        if approval_mode not in {"automatic", "manual"}:
+            raise ValueError("approval_mode must be automatic or manual")
+        return RuntimeSettings(**identifiers, approval_mode=approval_mode)
 
     def save(self, settings: RuntimeSettings) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)

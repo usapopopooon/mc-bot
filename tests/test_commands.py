@@ -13,4 +13,10 @@ def test_registers_manager_only_configuration_commands() -> None:
     assert isinstance(group, app_commands.Group)
     assert group.guild_only
     assert group.default_permissions == discord.Permissions(manage_guild=True)
-    assert {command.name for command in group.commands} == {"channel", "show"}
+    assert {command.name for command in group.commands} == {
+        "admin-panel",
+        "approval",
+        "channel",
+        "panel",
+        "show",
+    }
