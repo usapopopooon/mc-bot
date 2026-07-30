@@ -79,6 +79,7 @@ mc-botコンテナ
 /mc-config admin-panel channel:#minecraft管理
 /mc-config approval mode:自動承認
 /mc-config approval mode:管理者承認 channel:#minecraft申請
+/mc-config player-count action:有効化
 /mc-config show
 ```
 
@@ -86,6 +87,13 @@ mc-botコンテナ
 複数アカウントを登録できます。管理パネルでは代理登録と、既存whitelistをDiscord
 アカウントへ紐付けできます。取り込まれた既存登録は初期状態で保護され、Botが
 自動削除することはありません。
+
+`/mc-config player-count action:有効化` は、コマンドを実行したチャンネルと同じ
+カテゴリーに閲覧専用ボイスチャンネルを自動作成し、Java版・Bedrock版を合わせた
+オンライン人数を `🟢｜マイクラ 2人` のように表示します。参加・退出時と1分ごとの
+再確認で更新し、RCONでサーバーへ接続できない間は `🔴｜マイクラ停止中` と表示します。
+同じコマンドの「更新停止」でチャンネルを残したまま停止、「チャンネル削除」で作成した
+チャンネルごと削除できます。この機能にはBotの「チャンネルの管理」権限が必要です。
 
 コマンドの応答と設定表示は実行者だけに見えます。コマンドはグローバル登録のため、
 Botの初回起動直後はDiscordへの反映に少し時間がかかる場合があります。通知先が未設定、

@@ -18,5 +18,13 @@ def test_registers_manager_only_configuration_commands() -> None:
         "approval",
         "channel",
         "panel",
+        "player-count",
         "show",
+    }
+    player_count = group.get_command("player-count")
+    assert isinstance(player_count, app_commands.Command)
+    assert {choice.value for choice in player_count.parameters[0].choices} == {
+        "enable",
+        "disable",
+        "remove",
     }

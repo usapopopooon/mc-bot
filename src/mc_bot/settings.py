@@ -16,6 +16,8 @@ class RuntimeSettings:
     admin_panel_message_id: int | None = None
     approval_mode: str = "automatic"
     approval_channel_id: int | None = None
+    player_count_channel_id: int | None = None
+    player_count_enabled: bool = False
 
 
 class SettingsStore:
@@ -42,6 +44,7 @@ class SettingsStore:
             "admin_panel_channel_id",
             "admin_panel_message_id",
             "approval_channel_id",
+            "player_count_channel_id",
         ):
             value = data.get(name)
             if value is not None and (
@@ -53,7 +56,14 @@ class SettingsStore:
         approval_mode = data.get("approval_mode", "automatic")
         if approval_mode not in {"automatic", "manual"}:
             raise ValueError("approval_mode must be automatic or manual")
-        return RuntimeSettings(**identifiers, approval_mode=approval_mode)
+        player_count_enabled = data.get("player_count_enabled", False)
+        if not isinstance(player_count_enabled, bool):
+            raise ValueError("player_count_enabled must be a boolean")
+        return RuntimeSettings(
+            **identifiers,
+            approval_mode=approval_mode,
+            player_count_enabled=player_count_enabled,
+        )
 
     def save(self, settings: RuntimeSettings) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)

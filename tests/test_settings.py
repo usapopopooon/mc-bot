@@ -28,6 +28,8 @@ def test_saves_and_loads_settings(tmp_path) -> None:
         "admin_panel_message_id": None,
         "approval_mode": "automatic",
         "approval_channel_id": None,
+        "player_count_channel_id": None,
+        "player_count_enabled": False,
     }
 
 
@@ -47,6 +49,8 @@ def test_ignores_legacy_server_label(tmp_path) -> None:
         "[]",
         '{"channel_id": "general"}',
         '{"channel_id": -1}',
+        '{"player_count_channel_id": true}',
+        '{"player_count_enabled": "yes"}',
     ],
 )
 def test_rejects_invalid_settings(tmp_path, payload: str) -> None:
