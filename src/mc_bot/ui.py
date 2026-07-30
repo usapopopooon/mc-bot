@@ -12,7 +12,7 @@ if TYPE_CHECKING:
 
 def access_panel_embed(approval_mode: str) -> discord.Embed:
     description = (
-        "Discordメンバーは、Java版またはBedrock版のアカウントを登録できます。\n"
+        "このDiscordサーバーの参加者は、Java版またはBedrock版のアカウントを登録できます。\n"
         "複数のMinecraftアカウントを登録できます。"
     )
     if approval_mode == "automatic":
