@@ -14,9 +14,10 @@ from mc_bot.config import Config
 from mc_bot.events import EventType, parse_log_line
 from mc_bot.formatting import format_event
 from mc_bot.player_count import (
-    PLAYER_COUNT_DISABLED_CHANNEL_NAME,
+    PLAYER_COUNT_CHANNEL_NAME,
+    PLAYER_COUNT_DISABLED_STATUS,
     parse_online_player_count,
-    player_count_channel_name,
+    player_count_status,
 )
 from mc_bot.rcon import RconClient, RconError
 from mc_bot.settings import RuntimeSettings, SettingsStore
@@ -69,6 +70,9 @@ class MinecraftDiscordBot(discord.Client):
         self._tailer_task: asyncio.Task[None] | None = None
         self._health_task: asyncio.Task[None] | None = None
         self._player_count_task: asyncio.Task[None] | None = None
+        self._player_count_name_task: asyncio.Task[None] | None = None
+        self._player_count_update_lock = asyncio.Lock()
+        self._last_player_count_status: str | None = None
         self._channel: discord.TextChannel | None = None
         self._delivery_healthy = True
         self._closing = False
@@ -146,7 +150,8 @@ class MinecraftDiscordBot(discord.Client):
                 )
 
         if self._settings.player_count_enabled:
-            await self._refresh_player_count_channel_safely()
+            self._schedule_player_count_refresh(delay=0)
+            self._schedule_player_count_name_normalization()
 
         LOGGER.info(
             "Discord connected as %s; loaded %d advancement translations",
@@ -180,6 +185,10 @@ class MinecraftDiscordBot(discord.Client):
             self._player_count_task.cancel()
             await asyncio.gather(self._player_count_task, return_exceptions=True)
             self._player_count_task = None
+        if self._player_count_name_task is not None:
+            self._player_count_name_task.cancel()
+            await asyncio.gather(self._player_count_name_task, return_exceptions=True)
+            self._player_count_name_task = None
         if self._tailer_task is not None:
             self._tailer_task.cancel()
             await asyncio.gather(self._tailer_task, return_exceptions=True)
@@ -333,11 +342,13 @@ class MinecraftDiscordBot(discord.Client):
                     player_count_enabled=False,
                 )
                 await self._save_settings(updated)
-                if channel is not None and channel.name != PLAYER_COUNT_DISABLED_CHANNEL_NAME:
-                    await channel.edit(
-                        name=PLAYER_COUNT_DISABLED_CHANNEL_NAME,
-                        reason="Minecraftオンライン人数表示を停止",
-                    )
+                if channel is not None:
+                    async with self._player_count_update_lock:
+                        await channel.edit(
+                            status=PLAYER_COUNT_DISABLED_STATUS,
+                            reason="Minecraftオンライン人数表示を停止",
+                        )
+                        self._last_player_count_status = PLAYER_COUNT_DISABLED_STATUS
                 await interaction.followup.send(
                     "オンライン人数の更新を停止しました。",
                     ephemeral=True,
@@ -994,7 +1005,7 @@ class MinecraftDiscordBot(discord.Client):
                 self._sync_ticks = 0
                 await self._import_whitelist()
                 await self._reconcile_pending_actions()
-                await self._refresh_player_count_channel_safely()
+            self._schedule_player_count_refresh(delay=0)
             await asyncio.sleep(10)
 
     async def _enable_player_count_channel(
@@ -1004,8 +1015,14 @@ class MinecraftDiscordBot(discord.Client):
     ) -> discord.VoiceChannel:
         self._require_rcon()
         member = guild.me
-        if member is None or not member.guild_permissions.manage_channels:
-            raise RuntimeError("Botに「チャンネルの管理」権限が必要です")
+        if (
+            member is None
+            or not member.guild_permissions.manage_channels
+            or not member.guild_permissions.set_voice_channel_status
+        ):
+            raise RuntimeError(
+                "Botに「チャンネルの管理」と「ボイスチャンネルステータスの設定」権限が必要です"
+            )
 
         channel = await self._get_player_count_channel(guild)
         if channel is None:
@@ -1013,7 +1030,7 @@ class MinecraftDiscordBot(discord.Client):
             if not isinstance(category, discord.CategoryChannel):
                 category = None
             channel = await guild.create_voice_channel(
-                player_count_channel_name(None),
+                PLAYER_COUNT_CHANNEL_NAME,
                 category=category,
                 overwrites={
                     guild.default_role: discord.PermissionOverwrite(
@@ -1042,6 +1059,7 @@ class MinecraftDiscordBot(discord.Client):
         )
         await self._save_settings(updated)
         await self._refresh_player_count_channel(channel)
+        self._schedule_player_count_name_normalization()
         return channel
 
     async def _get_player_count_channel(
@@ -1063,29 +1081,32 @@ class MinecraftDiscordBot(discord.Client):
         self,
         channel: discord.VoiceChannel | None = None,
     ) -> None:
-        if not self._settings.player_count_enabled:
-            return
-        guild = self.get_guild(self._settings.guild_id or 0)
-        if channel is None:
-            if guild is None:
-                raise RuntimeError("設定したDiscordサーバーを取得できません")
-            channel = await self._get_player_count_channel(guild)
-        if channel is None:
-            raise RuntimeError("オンライン人数チャンネルが見つかりません")
+        async with self._player_count_update_lock:
+            if not self._settings.player_count_enabled:
+                return
+            guild = self.get_guild(self._settings.guild_id or 0)
+            if channel is None:
+                if guild is None:
+                    raise RuntimeError("設定したDiscordサーバーを取得できません")
+                channel = await self._get_player_count_channel(guild)
+            if channel is None:
+                raise RuntimeError("オンライン人数チャンネルが見つかりません")
 
-        count: int | None = None
-        try:
-            response = await asyncio.to_thread(self._require_rcon().execute, "list")
-            count = parse_online_player_count(response)
-        except (OSError, RconError, RuntimeError, ValueError) as error:
-            LOGGER.warning("Could not read Minecraft online player count: %s", error)
+            count: int | None = None
+            try:
+                response = await asyncio.to_thread(self._require_rcon().execute, "list")
+                count = parse_online_player_count(response)
+            except (OSError, RconError, RuntimeError, ValueError) as error:
+                LOGGER.warning("Could not read Minecraft online player count: %s", error)
 
-        name = player_count_channel_name(count)
-        if channel.name != name:
+            status = player_count_status(count)
+            if status == self._last_player_count_status:
+                return
             await channel.edit(
-                name=name,
-                reason="Minecraftオンライン人数を更新",
+                status=status,
+                reason="Minecraftオンライン人数ステータスを更新",
             )
+            self._last_player_count_status = status
 
     async def _refresh_player_count_channel_safely(self) -> None:
         if not self._settings.player_count_enabled:
@@ -1095,19 +1116,42 @@ class MinecraftDiscordBot(discord.Client):
         except (RuntimeError, discord.DiscordException) as error:
             LOGGER.warning("Could not update player count channel: %s", error)
 
-    def _schedule_player_count_refresh(self) -> None:
+    def _schedule_player_count_refresh(self, *, delay: float = 1) -> None:
         if not self._settings.player_count_enabled:
             return
         if self._player_count_task is not None and not self._player_count_task.done():
             return
         self._player_count_task = asyncio.create_task(
-            self._refresh_player_count_after_delay(),
+            self._refresh_player_count_after_delay(delay),
             name="player-count-refresh",
         )
 
-    async def _refresh_player_count_after_delay(self) -> None:
-        await asyncio.sleep(5)
+    async def _refresh_player_count_after_delay(self, delay: float) -> None:
+        if delay:
+            await asyncio.sleep(delay)
         await self._refresh_player_count_channel_safely()
+
+    def _schedule_player_count_name_normalization(self) -> None:
+        if self._player_count_name_task is not None and not self._player_count_name_task.done():
+            return
+        self._player_count_name_task = asyncio.create_task(
+            self._normalize_player_count_channel_name(),
+            name="player-count-name-normalization",
+        )
+
+    async def _normalize_player_count_channel_name(self) -> None:
+        try:
+            guild = self.get_guild(self._settings.guild_id or 0)
+            if guild is None:
+                return
+            channel = await self._get_player_count_channel(guild)
+            if channel is not None and channel.name != PLAYER_COUNT_CHANNEL_NAME:
+                await channel.edit(
+                    name=PLAYER_COUNT_CHANNEL_NAME,
+                    reason="Minecraftオンライン人数をボイスチャンネルステータスへ移行",
+                )
+        except discord.DiscordException as error:
+            LOGGER.warning("Could not normalize player count channel name: %s", error)
 
     async def _reconcile_pending_actions(self) -> None:
         for account in await asyncio.to_thread(self._accounts.list_pending_actions):

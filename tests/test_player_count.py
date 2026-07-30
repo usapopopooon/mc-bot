@@ -4,7 +4,7 @@ import pytest
 
 from mc_bot.bot import MinecraftDiscordBot
 from mc_bot.config import Config
-from mc_bot.player_count import parse_online_player_count, player_count_channel_name
+from mc_bot.player_count import parse_online_player_count, player_count_status
 from mc_bot.settings import RuntimeSettings
 
 
@@ -33,8 +33,8 @@ def test_rejects_unexpected_rcon_response() -> None:
         (3, "🟢マイクラ 3人"),
     ],
 )
-def test_formats_player_count_channel_name(count: int | None, expected: str) -> None:
-    assert player_count_channel_name(count) == expected
+def test_formats_player_count_status(count: int | None, expected: str) -> None:
+    assert player_count_status(count) == expected
 
 
 class FakeRcon:
@@ -56,10 +56,11 @@ class FakeVoiceChannel:
 
     async def edit(self, **options: str) -> None:
         self.edits.append(options)
-        self.name = options["name"]
+        if "name" in options:
+            self.name = options["name"]
 
 
-def test_refreshes_channel_from_rcon_only_when_name_changes() -> None:
+def test_refreshes_status_from_rcon_only_when_count_changes() -> None:
     bot = MinecraftDiscordBot(Config(discord_token="secret"))
     bot._settings = RuntimeSettings(
         guild_id=1,
@@ -68,13 +69,13 @@ def test_refreshes_channel_from_rcon_only_when_name_changes() -> None:
     )
     rcon = FakeRcon("There are 2 of a max of 20 players online: Steve, Alex")
     bot._rcon = rcon  # type: ignore[assignment]
-    channel = FakeVoiceChannel("⚪マイクラ 0人")
+    channel = FakeVoiceChannel("マイクラ オンライン人数")
 
     asyncio.run(bot._refresh_player_count_channel(channel))  # type: ignore[arg-type]
     asyncio.run(bot._refresh_player_count_channel(channel))  # type: ignore[arg-type]
 
     assert rcon.commands == ["list", "list"]
-    assert [edit["name"] for edit in channel.edits] == ["🟢マイクラ 2人"]
+    assert [edit["status"] for edit in channel.edits] == ["🟢マイクラ 2人"]
 
 
 def test_marks_channel_stopped_when_rcon_is_unavailable() -> None:
@@ -85,8 +86,8 @@ def test_marks_channel_stopped_when_rcon_is_unavailable() -> None:
         player_count_enabled=True,
     )
     bot._rcon = FakeRcon(OSError("offline"))  # type: ignore[assignment]
-    channel = FakeVoiceChannel("🟢マイクラ 2人")
+    channel = FakeVoiceChannel("マイクラ オンライン人数")
 
     asyncio.run(bot._refresh_player_count_channel(channel))  # type: ignore[arg-type]
 
-    assert channel.name == "🔴マイクラ停止中"
+    assert [edit["status"] for edit in channel.edits] == ["🔴マイクラ停止中"]
