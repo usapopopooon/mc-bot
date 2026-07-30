@@ -28,9 +28,9 @@ def test_rejects_unexpected_rcon_response() -> None:
 @pytest.mark.parametrize(
     ("count", "expected"),
     [
-        (None, "🔴\N{FULLWIDTH VERTICAL LINE}マイクラ停止中"),
-        (0, "⚪\N{FULLWIDTH VERTICAL LINE}マイクラ 0人"),
-        (3, "🟢\N{FULLWIDTH VERTICAL LINE}マイクラ 3人"),
+        (None, "🔴マイクラ停止中"),
+        (0, "⚪マイクラ 0人"),
+        (3, "🟢マイクラ 3人"),
     ],
 )
 def test_formats_player_count_channel_name(count: int | None, expected: str) -> None:
@@ -68,13 +68,13 @@ def test_refreshes_channel_from_rcon_only_when_name_changes() -> None:
     )
     rcon = FakeRcon("There are 2 of a max of 20 players online: Steve, Alex")
     bot._rcon = rcon  # type: ignore[assignment]
-    channel = FakeVoiceChannel("⚪\N{FULLWIDTH VERTICAL LINE}マイクラ 0人")
+    channel = FakeVoiceChannel("⚪マイクラ 0人")
 
     asyncio.run(bot._refresh_player_count_channel(channel))  # type: ignore[arg-type]
     asyncio.run(bot._refresh_player_count_channel(channel))  # type: ignore[arg-type]
 
     assert rcon.commands == ["list", "list"]
-    assert [edit["name"] for edit in channel.edits] == ["🟢\N{FULLWIDTH VERTICAL LINE}マイクラ 2人"]
+    assert [edit["name"] for edit in channel.edits] == ["🟢マイクラ 2人"]
 
 
 def test_marks_channel_stopped_when_rcon_is_unavailable() -> None:
@@ -85,8 +85,8 @@ def test_marks_channel_stopped_when_rcon_is_unavailable() -> None:
         player_count_enabled=True,
     )
     bot._rcon = FakeRcon(OSError("offline"))  # type: ignore[assignment]
-    channel = FakeVoiceChannel("🟢\N{FULLWIDTH VERTICAL LINE}マイクラ 2人")
+    channel = FakeVoiceChannel("🟢マイクラ 2人")
 
     asyncio.run(bot._refresh_player_count_channel(channel))  # type: ignore[arg-type]
 
-    assert channel.name == "🔴\N{FULLWIDTH VERTICAL LINE}マイクラ停止中"
+    assert channel.name == "🔴マイクラ停止中"
