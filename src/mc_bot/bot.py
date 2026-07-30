@@ -837,8 +837,8 @@ class MinecraftDiscordBot(discord.Client):
                 await asyncio.to_thread(self._tailer.acknowledge, pending_line)
                 continue
             account = await asyncio.to_thread(self._accounts.find_by_player_name, event.player_name)
-            discord_username = await self._discord_username(account)
-            embed = format_event(event, self._translator, discord_username)
+            discord_user_id = await self._discord_user_id(account)
+            embed = format_event(event, self._translator, discord_user_id)
             retry_delay = 1
             while not self.is_closed():
                 await self.wait_until_ready()
@@ -858,18 +858,14 @@ class MinecraftDiscordBot(discord.Client):
                 self._delivery_healthy = True
                 break
 
-    async def _discord_username(self, account: MinecraftAccount | None) -> str | None:
+    async def _discord_user_id(self, account: MinecraftAccount | None) -> int | None:
         if account is None or account.discord_user_id is None:
             return None
         guild = self.get_guild(self._settings.guild_id or 0)
         member = guild.get_member(account.discord_user_id) if guild is not None else None
-        if member is not None:
-            if member.name != account.discord_username:
-                await asyncio.to_thread(
-                    self._accounts.update_discord_username, member.id, member.name
-                )
-            return member.name
-        return account.discord_username
+        if member is not None and member.name != account.discord_username:
+            await asyncio.to_thread(self._accounts.update_discord_username, member.id, member.name)
+        return account.discord_user_id
 
     async def _send(self, embed: discord.Embed) -> None:
         if self._channel is None:

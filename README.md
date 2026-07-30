@@ -155,6 +155,7 @@ docker build -t mc-bot:local .
 ```
 
 通知はイベント種別ごとに色分けしたDiscord Embedです。紐付け済みプレイヤーは
-`**.hoge** (@hoge)` の形式でDiscordユーザー名も表示します。Embedに加えて
-Discordのメンションも無効化しているため、Minecraftチャットから `@everyone` や
-ロールを通知することはできません。
+`**.hoge (<@DiscordユーザーID>)**` の形式で、クリック可能なDiscordメンションを
+表示します。通知はEmbedで送り、さらに `AllowedMentions.none()` を指定しているため、
+この表示によるメンション通知や、Minecraftチャットからの `@everyone`・ロール通知は
+発生しません。

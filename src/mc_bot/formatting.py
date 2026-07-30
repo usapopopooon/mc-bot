@@ -11,12 +11,13 @@ _DISCORD_EMBED_DESCRIPTION_LIMIT = 4_096
 def format_event(
     event: LogEvent,
     translator: AdvancementTranslator,
-    discord_username: str | None = None,
+    discord_user_id: int | None = None,
 ) -> discord.Embed:
     player = _escape_markdown(event.player_name)
-    identity = f"**{player}**"
-    if discord_username:
-        identity += f" (@{_escape_markdown(discord_username)})"
+    if discord_user_id is not None:
+        identity = f"**{player} (<@{discord_user_id}>)**"
+    else:
+        identity = f"**{player}**"
 
     match event.type:
         case EventType.CHAT:

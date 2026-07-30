@@ -31,11 +31,11 @@ def test_escapes_player_markdown_and_limits_length() -> None:
     assert embed.description.endswith("…")
 
 
-def test_includes_linked_discord_username_without_mention_syntax() -> None:
+def test_includes_linked_discord_user_as_clickable_mention() -> None:
     embed = format_event(
         LogEvent(EventType.LEAVE, ".hoge"),
         AdvancementTranslator.load(),
-        "hoge",
+        123456789,
     )
 
-    assert embed.description == "🔴 **.hoge** (@hoge) が退出しました"
+    assert embed.description == "🔴 **.hoge (<@123456789>)** が退出しました"
