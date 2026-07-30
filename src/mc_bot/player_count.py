@@ -7,7 +7,7 @@ _ONLINE_COUNT = re.compile(
     re.IGNORECASE,
 )
 PLAYER_COUNT_CHANNEL_NAME = "マイクラ オンライン人数"
-PLAYER_COUNT_DISABLED_STATUS = "⚫マイクラ 人数表示停止"
+PLAYER_COUNT_DISABLED_STATUS = "人数表示停止"
 
 
 def parse_online_player_count(response: str) -> int:
@@ -19,7 +19,5 @@ def parse_online_player_count(response: str) -> int:
 
 def player_count_status(count: int | None) -> str:
     if count is None:
-        return "🔴マイクラ停止中"
-    if count == 0:
-        return "⚪マイクラ 0人"
-    return f"🟢マイクラ {count}人"
+        return "サーバー停止中"
+    return f"オンライン{count}人"

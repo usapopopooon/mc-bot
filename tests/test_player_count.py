@@ -28,9 +28,9 @@ def test_rejects_unexpected_rcon_response() -> None:
 @pytest.mark.parametrize(
     ("count", "expected"),
     [
-        (None, "🔴マイクラ停止中"),
-        (0, "⚪マイクラ 0人"),
-        (3, "🟢マイクラ 3人"),
+        (None, "サーバー停止中"),
+        (0, "オンライン0人"),
+        (3, "オンライン3人"),
     ],
 )
 def test_formats_player_count_status(count: int | None, expected: str) -> None:
@@ -75,7 +75,7 @@ def test_refreshes_status_from_rcon_only_when_count_changes() -> None:
     asyncio.run(bot._refresh_player_count_channel(channel))  # type: ignore[arg-type]
 
     assert rcon.commands == ["list", "list"]
-    assert [edit["status"] for edit in channel.edits] == ["🟢マイクラ 2人"]
+    assert [edit["status"] for edit in channel.edits] == ["オンライン2人"]
 
 
 def test_marks_channel_stopped_when_rcon_is_unavailable() -> None:
@@ -90,4 +90,4 @@ def test_marks_channel_stopped_when_rcon_is_unavailable() -> None:
 
     asyncio.run(bot._refresh_player_count_channel(channel))  # type: ignore[arg-type]
 
-    assert [edit["status"] for edit in channel.edits] == ["🔴マイクラ停止中"]
+    assert [edit["status"] for edit in channel.edits] == ["サーバー停止中"]
