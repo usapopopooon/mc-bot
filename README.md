@@ -102,8 +102,9 @@ Bedrock版とDiscord連携状況を表示し、実行した管理者だけに見
 - sparkのローカルヘルスレポートによるTPS、MSPT、CPU、メモリ状況の確認
 - 専用VCでのMinecraftチャット、参加・退出、進捗のVOICEVOX読み上げ
 
-Discordへ送るゲーム参加・退出のEmbedでは、Minecraft名に「さん」を付けて
-表示します。連携済みのDiscordユーザー表示は通知なしのクリック可能なメンションのままです。
+Discordへ送るゲーム参加・退出・進捗のEmbedでは、Minecraft名に「さん」を
+付けて表示します。コロンで発言に続くチャットには付けません。連携済みの
+Discordユーザー表示は通知なしのクリック可能なメンションのままです。
 
 Whitelistの再開予定時刻は永続化され、mc-botの再起動後も引き継がれます。
 Minecraftへのアカウント追加・削除は、RCON応答だけでなく実際の `whitelist.json` への

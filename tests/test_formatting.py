@@ -8,7 +8,7 @@ def test_formats_japanese_advancement() -> None:
         LogEvent(EventType.ADVANCEMENT, "Steve", "Stone Age"),
         AdvancementTranslator.load(),
     )
-    assert embed.description == "🏆 **Steve** が進捗「石器時代」を達成しました"
+    assert embed.description == "🏆 **Steveさん** が進捗「石器時代」を達成しました"
     assert embed.color.value == 0xF1C40F
 
 
@@ -17,7 +17,7 @@ def test_preserves_unknown_advancement() -> None:
         LogEvent(EventType.ADVANCEMENT, "Steve", "Custom Advancement"),
         AdvancementTranslator.load(),
     )
-    assert embed.description == "🏆 **Steve** が進捗「Custom Advancement」を達成しました"
+    assert embed.description == "🏆 **Steveさん** が進捗「Custom Advancement」を達成しました"
 
 
 def test_escapes_player_markdown_and_limits_length() -> None:
