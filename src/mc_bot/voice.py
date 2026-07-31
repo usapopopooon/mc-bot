@@ -37,16 +37,17 @@ def event_speech_text(
     player_name = linked_name or event.player_name
     if not linked_name and floodgate_prefix and player_name.startswith(floodgate_prefix):
         player_name = player_name.removeprefix(floodgate_prefix)
+    honored_name = player_name if player_name.endswith("さん") else f"{player_name}さん"
     match event.type:
         case EventType.CHAT:
             text = " ".join(event.detail.split())
         case EventType.ADVANCEMENT:
             advancement = translator.translate(event.detail)
-            text = f"{player_name}が進捗、{advancement}、を達成しました"
+            text = f"{honored_name}が進捗、{advancement}、を達成しました"
         case EventType.JOIN:
-            text = f"{player_name}がゲームに参加しました"
+            text = f"{honored_name}がゲームに参加しました"
         case EventType.LEAVE:
-            text = f"{player_name}がゲームから退出しました"
+            text = f"{honored_name}がゲームから退出しました"
     if len(text) <= _MAX_SPEECH_LENGTH:
         return text
     return text[: _MAX_SPEECH_LENGTH - 1] + "…"

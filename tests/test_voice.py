@@ -55,15 +55,15 @@ def test_formats_minecraft_events_for_speech() -> None:
 
     assert (
         event_speech_text(LogEvent(EventType.JOIN, ".hoge"), translator)
-        == "hogeがゲームに参加しました"
+        == "hogeさんがゲームに参加しました"
     )
     assert (
         event_speech_text(LogEvent(EventType.LEAVE, "Steve"), translator)
-        == "Steveがゲームから退出しました"
+        == "Steveさんがゲームから退出しました"
     )
     assert (
         event_speech_text(LogEvent(EventType.ADVANCEMENT, "Steve", "Stone Age"), translator)
-        == "Steveが進捗、石器時代、を達成しました"
+        == "Steveさんが進捗、石器時代、を達成しました"
     )
     assert (
         event_speech_text(LogEvent(EventType.CHAT, "Steve", "こんにちは\n  世界"), translator)
@@ -89,7 +89,7 @@ def test_prefers_linked_discord_username_for_speech() -> None:
             translator,
             discord_username="discord_name",
         )
-        == "discord_nameがゲームから退出しました"
+        == "discord_nameさんがゲームから退出しました"
     )
     assert (
         event_speech_text(
@@ -98,6 +98,17 @@ def test_prefers_linked_discord_username_for_speech() -> None:
             discord_username="   ",
         )
         == "こんにちは"
+    )
+
+
+def test_does_not_duplicate_existing_honorific() -> None:
+    assert (
+        event_speech_text(
+            LogEvent(EventType.JOIN, "MinecraftName"),
+            AdvancementTranslator.load(),
+            discord_username="さよさん",
+        )
+        == "さよさんがゲームに参加しました"
     )
 
 
