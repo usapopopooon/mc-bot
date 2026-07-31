@@ -20,7 +20,7 @@ class Config:
     rcon_port: int = 25575
     rcon_password: str = ""
     floodgate_username_prefix: str = "."
-    voicevox_tts_api_url: str = "http://voicevox-discord-tts:8080"
+    voicevox_tts_api_url: str = ""
     voicevox_tts_api_token: str = ""
     voicevox_speaker_id: int = 46
     voicevox_speed: float = 1.0
@@ -36,12 +36,8 @@ class Config:
             raise ValueError("MINECRAFT_RCON_PORT must be an integer") from error
         if not 1 <= rcon_port <= 65535:
             raise ValueError("MINECRAFT_RCON_PORT must be between 1 and 65535")
-        tts_api_url = (
-            values.get("VOICEVOX_TTS_API_URL", "http://voicevox-discord-tts:8080")
-            .strip()
-            .rstrip("/")
-        )
-        if not tts_api_url.startswith(("http://", "https://")):
+        tts_api_url = values.get("VOICEVOX_TTS_API_URL", "").strip().rstrip("/")
+        if tts_api_url and not tts_api_url.startswith(("http://", "https://")):
             raise ValueError("VOICEVOX_TTS_API_URL must be an HTTP or HTTPS URL")
         speaker_text = values.get("VOICEVOX_SPEAKER_ID", "46").strip()
         try:

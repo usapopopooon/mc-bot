@@ -18,7 +18,7 @@ def test_loads_required_and_default_configuration() -> None:
     assert config.rcon_port == 25575
     assert config.rcon_password == ""
     assert config.floodgate_username_prefix == "."
-    assert config.voicevox_tts_api_url == "http://voicevox-discord-tts:8080"
+    assert config.voicevox_tts_api_url == ""
     assert config.voicevox_tts_api_token == ""
     assert config.voicevox_speaker_id == 46
     assert config.voicevox_speed == 1.0

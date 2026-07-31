@@ -144,11 +144,14 @@ mc-bot側では次を設定します。
 
 ```text
 VOICEVOX_TTS_API_TOKEN=<同じ共有トークン>
-VOICEVOX_TTS_API_URL=http://voicevox-discord-tts:8080
+VOICEVOX_TTS_API_URL=http://<voicevox-discordホストのLAN IP>:<公開ポート>
 ```
 
-両アプリを外部Dockerネットワーク `voicevox-discord-tts` へ接続します。mc-botには対象VCの
-「接続」「発言」権限が必要です。接続先は永続化され、mc-bot再デプロイ後に自動再接続します。
+同じDockerホストで運用する場合は、両アプリを共通ネットワークへ接続し、Docker DNS名を
+URLに指定する構成も利用できます。別ホストの場合、VOICEVOX側は内部APIをLANアドレスへ
+公開し、ファイアウォールでmc-botホストからの接続だけを許可してください。Bearerトークンが
+平文で流れるHTTPをインターネットへ公開してはいけません。mc-botには対象VCの「接続」
+「発言」権限が必要です。接続先は永続化され、mc-bot再デプロイ後に自動再接続します。
 Minecraftサーバーの再起動は必要ありません。
 
 ## Coolifyへのデプロイ
@@ -165,8 +168,7 @@ Minecraftサーバーの再起動は必要ありません。
 | `MINECRAFT_RCON_PASSWORD` | はい | Minecraft側と同じ強いRCONパスワード |
 | `MINECRAFT_CONTROL_NETWORK` | いいえ | 事前作成した内部Dockerネットワーク名 |
 | `FLOODGATE_USERNAME_PREFIX` | いいえ | Bedrock名のprefix。既定値は `.` |
-| `VOICEVOX_INTERNAL_TTS_NETWORK` | いいえ | VOICEVOX内部APIのDockerネットワーク名 |
-| `VOICEVOX_TTS_API_URL` | いいえ | VOICEVOX内部TTS API URL |
+| `VOICEVOX_TTS_API_URL` | 読み上げ時 | mc-botから到達可能なVOICEVOX内部TTS API URL |
 | `VOICEVOX_TTS_API_TOKEN` | 読み上げ時 | VOICEVOX側と共有するBearerトークン |
 | `VOICEVOX_SPEAKER_ID` | いいえ | 話者ID。既定値は `46` |
 | `VOICEVOX_SPEED` | いいえ | 読み上げ速度。既定値は `1.0` |
@@ -181,11 +183,10 @@ Minecraftアプリを作り直した場合は、ホスト上の `docker volume l
 ボリュームをmc-bot側の `/minecraft` へ読み取り専用で直接マウントします。
 
 Minecraftアプリとmc-botアプリをデプロイする前に、Dockerホストで制御用ネットワークを
-一度だけ作成します。
+一度だけ作成します。VOICEVOXが別ホストの場合、VOICEVOX用Dockerネットワークは不要です。
 
 ```sh
 docker network create minecraft-control
-docker network create voicevox-discord-tts
 ```
 
 両アプリを同じネットワークへ接続します。RCONのTCP/25575はホストへ公開しません。
