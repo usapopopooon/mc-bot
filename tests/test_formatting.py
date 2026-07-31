@@ -38,4 +38,22 @@ def test_includes_linked_discord_user_as_clickable_mention() -> None:
         123456789,
     )
 
-    assert embed.description == "🔴 **.hoge (<@123456789>)** が退出しました"
+    assert embed.description == "🔴 **.hogeさん (<@123456789>)** が退出しました"
+
+
+def test_adds_honorific_to_join_log_without_discord_link() -> None:
+    embed = format_event(
+        LogEvent(EventType.JOIN, "Steve"),
+        AdvancementTranslator.load(),
+    )
+
+    assert embed.description == "🟢 **Steveさん** が参加しました"
+
+
+def test_does_not_duplicate_honorific_in_join_or_leave_log() -> None:
+    embed = format_event(
+        LogEvent(EventType.LEAVE, "さよさん"),
+        AdvancementTranslator.load(),
+    )
+
+    assert embed.description == "🔴 **さよさん** が退出しました"
