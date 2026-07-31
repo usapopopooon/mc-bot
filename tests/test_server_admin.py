@@ -3,6 +3,7 @@ import json
 
 import pytest
 
+from mc_bot.accounts import AccountStore
 from mc_bot.bot import MinecraftDiscordBot
 from mc_bot.config import Config
 from mc_bot.server_admin import (
@@ -45,6 +46,44 @@ class RecordingSettingsStore(SettingsStore):
         state = "pause" if settings.whitelist_resume_at is not None else "clear"
         self.events.append(f"save:{state}")
         super().save(settings)
+
+
+class WhitelistRcon:
+    def __init__(self, whitelist_path, *, response="Added Steve to the whitelist") -> None:
+        self.whitelist_path = whitelist_path
+        self.response = response
+        self.commands: list[str] = []
+
+    def execute(self, command: str) -> str:
+        self.commands.append(command)
+        if self.response.startswith("Added"):
+            self.whitelist_path.write_text(
+                json.dumps([{"uuid": "uuid-1", "name": "Steve"}]),
+                encoding="utf-8",
+            )
+        return self.response
+
+
+class FakeInteractionResponse:
+    def __init__(self) -> None:
+        self.deferred = False
+
+    async def defer(self, *, ephemeral=False) -> None:
+        self.deferred = ephemeral
+
+
+class FakeInteractionFollowup:
+    def __init__(self) -> None:
+        self.messages: list[dict] = []
+
+    async def send(self, **kwargs) -> None:
+        self.messages.append(kwargs)
+
+
+class FakeInteraction:
+    def __init__(self) -> None:
+        self.response = FakeInteractionResponse()
+        self.followup = FakeInteractionFollowup()
 
 
 def test_parses_online_players_from_rcon_list() -> None:
@@ -215,3 +254,149 @@ def test_serializes_whitelist_pause_and_resume(tmp_path) -> None:
 
     assert maximum_active_operations == 1
     assert bot._settings.whitelist_resume_at is None
+
+
+def test_marks_registration_active_only_after_whitelist_file_is_updated(tmp_path) -> None:
+    whitelist_path = tmp_path / "whitelist.json"
+    whitelist_path.write_text("[]", encoding="utf-8")
+    accounts_path = tmp_path / "accounts.db"
+    store = AccountStore(accounts_path)
+    store.initialize()
+    account = store.create_registration(
+        edition="java",
+        minecraft_name="Steve",
+        server_player_name="Steve",
+        discord_user_id=123,
+        discord_username="hoge",
+        source="self",
+        status="pending_add",
+        created_by=123,
+    )
+    bot = MinecraftDiscordBot(
+        Config(
+            discord_token="secret",
+            accounts_path=accounts_path,
+            minecraft_whitelist_path=whitelist_path,
+            rcon_password="secret",
+        )
+    )
+    rcon = WhitelistRcon(whitelist_path)
+    bot._rcon = rcon  # type: ignore[assignment]
+
+    asyncio.run(bot._add_to_whitelist(account))
+
+    assert rcon.commands == ["whitelist add Steve"]
+    assert store.get(account.id).status == "active"  # type: ignore[union-attr]
+    assert read_whitelisted_players(whitelist_path) == ["Steve"]
+
+
+def test_keeps_registration_pending_when_rcon_command_fails(tmp_path) -> None:
+    whitelist_path = tmp_path / "whitelist.json"
+    whitelist_path.write_text("[]", encoding="utf-8")
+    accounts_path = tmp_path / "accounts.db"
+    store = AccountStore(accounts_path)
+    store.initialize()
+    account = store.create_registration(
+        edition="java",
+        minecraft_name="Steve",
+        server_player_name="Steve",
+        discord_user_id=123,
+        discord_username="hoge",
+        source="self",
+        status="pending_add",
+        created_by=123,
+    )
+    bot = MinecraftDiscordBot(
+        Config(
+            discord_token="secret",
+            accounts_path=accounts_path,
+            minecraft_whitelist_path=whitelist_path,
+            rcon_password="secret",
+        )
+    )
+    bot._rcon = WhitelistRcon(  # type: ignore[assignment]
+        whitelist_path,
+        response="Unknown command. Type /help for help.",
+    )
+
+    with pytest.raises(ValueError, match="Unknown command"):
+        asyncio.run(bot._add_to_whitelist(account))
+
+    assert store.get(account.id).status == "pending_add"  # type: ignore[union-attr]
+    assert read_whitelisted_players(whitelist_path) == []
+
+
+def test_sync_repairs_managed_registration_missing_from_whitelist(tmp_path) -> None:
+    whitelist_path = tmp_path / "whitelist.json"
+    whitelist_path.write_text("[]", encoding="utf-8")
+    accounts_path = tmp_path / "accounts.db"
+    store = AccountStore(accounts_path)
+    store.initialize()
+    account = store.create_registration(
+        edition="java",
+        minecraft_name="Steve",
+        server_player_name="Steve",
+        discord_user_id=123,
+        discord_username="hoge",
+        source="self",
+        status="pending_add",
+        created_by=123,
+    )
+    store.update_status(account.id, "active")
+    bot = MinecraftDiscordBot(
+        Config(
+            discord_token="secret",
+            accounts_path=accounts_path,
+            minecraft_whitelist_path=whitelist_path,
+            rcon_password="secret",
+        )
+    )
+    rcon = WhitelistRcon(whitelist_path)
+    bot._rcon = rcon  # type: ignore[assignment]
+
+    asyncio.run(bot._sync_whitelist_accounts())
+
+    assert rcon.commands == ["whitelist add Steve"]
+    assert store.get(account.id).status == "active"  # type: ignore[union-attr]
+    assert read_whitelisted_players(whitelist_path) == ["Steve"]
+
+
+def test_whitelist_overview_includes_unreflected_registrations(tmp_path) -> None:
+    whitelist_path = tmp_path / "whitelist.json"
+    whitelist_path.write_text(
+        json.dumps([{"uuid": "uuid-1", "name": "Steve"}]),
+        encoding="utf-8",
+    )
+    accounts_path = tmp_path / "accounts.db"
+    store = AccountStore(accounts_path)
+    store.initialize()
+    account = store.create_registration(
+        edition="bedrock",
+        minecraft_name="MissingUser",
+        server_player_name=".MissingUser",
+        discord_user_id=123,
+        discord_username="hoge",
+        source="self",
+        status="pending_add",
+        created_by=123,
+    )
+    store.update_status(account.id, "active")
+    bot = MinecraftDiscordBot(
+        Config(
+            discord_token="secret",
+            accounts_path=accounts_path,
+            minecraft_whitelist_path=whitelist_path,
+        )
+    )
+    interaction = FakeInteraction()
+
+    asyncio.run(bot.show_whitelist_entries(interaction))  # type: ignore[arg-type]
+
+    assert interaction.response.deferred
+    message = interaction.followup.messages[0]
+    assert message["ephemeral"] is True
+    assert message["allowed_mentions"].everyone is False
+    embed = message["embed"]
+    assert embed.title == "🛡️ Whitelist一覧 (実登録1件 / 登録情報1件)"
+    assert "**Steve** (未連携)" in embed.description
+    assert "**.MissingUser (<@123>)**  ⚠️ Whitelist未反映" in embed.description

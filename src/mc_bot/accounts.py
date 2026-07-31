@@ -244,6 +244,54 @@ class AccountStore:
             ).fetchall()
         return [_account(row) for row in rows]
 
+    def list_whitelist_registrations(self) -> list[MinecraftAccount]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM minecraft_accounts
+                WHERE status IN ('active', 'pending_add', 'pending_remove')
+                ORDER BY edition, minecraft_name COLLATE NOCASE
+                """
+            ).fetchall()
+        return [_account(row) for row in rows]
+
+    def reconcile_whitelist(self, player_names: list[str]) -> tuple[int, int, int]:
+        present = {name.casefold() for name in player_names}
+        queued_adds = 0
+        completed_adds = 0
+        completed_removals = 0
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT id, server_player_name, managed, status
+                FROM minecraft_accounts
+                WHERE status IN ('active', 'pending_add', 'pending_remove')
+                """
+            ).fetchall()
+            now = _now()
+            for row in rows:
+                is_present = row["server_player_name"].casefold() in present
+                new_status: str | None = None
+                if row["status"] == "active" and not is_present and row["managed"]:
+                    new_status = "pending_add"
+                    queued_adds += 1
+                elif row["status"] == "pending_add" and is_present:
+                    new_status = "active"
+                    completed_adds += 1
+                elif row["status"] == "pending_remove" and not is_present:
+                    new_status = "missing"
+                    completed_removals += 1
+                if new_status is not None:
+                    connection.execute(
+                        """
+                        UPDATE minecraft_accounts
+                        SET status = ?, updated_at = ?
+                        WHERE id = ?
+                        """,
+                        (new_status, now, row["id"]),
+                    )
+        return queued_adds, completed_adds, completed_removals
+
     def list_managed_for_discord_user(self, discord_user_id: int) -> list[MinecraftAccount]:
         with self._connect() as connection:
             rows = connection.execute(
@@ -351,7 +399,8 @@ class AccountStore:
             row = connection.execute(
                 """
                 SELECT
-                    SUM(CASE WHEN status = 'active' THEN 1 ELSE 0 END),
+                    SUM(CASE WHEN status IN ('active', 'pending_add', 'pending_remove')
+                        THEN 1 ELSE 0 END),
                     SUM(CASE WHEN discord_user_id IS NULL AND status = 'active' THEN 1 ELSE 0 END),
                     SUM(CASE WHEN status = 'pending_approval' THEN 1 ELSE 0 END)
                 FROM minecraft_accounts

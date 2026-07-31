@@ -140,10 +140,10 @@ class MinecraftDiscordBot(discord.Client):
         LOGGER.info("Synced %d global Discord application commands", len(synced))
 
     async def on_ready(self) -> None:
+        await self._sync_whitelist_accounts()
         if self._health_task is None or self._health_task.done():
             self._health_task = asyncio.create_task(self._health_loop(), name="health-monitor")
 
-        await self._import_whitelist()
         await self._refresh_admin_panel()
         channel_id = self._settings.channel_id
         if channel_id is None:
@@ -181,7 +181,7 @@ class MinecraftDiscordBot(discord.Client):
         for account in accounts:
             try:
                 await self._remove_from_whitelist(account)
-            except (OSError, RconError, RuntimeError) as error:
+            except (OSError, RconError, RuntimeError, ValueError) as error:
                 await asyncio.to_thread(self._accounts.update_status, account.id, "pending_remove")
                 LOGGER.error(
                     "Could not revoke Minecraft account %s after Discord departure: %s",
@@ -396,7 +396,7 @@ class MinecraftDiscordBot(discord.Client):
             and not self._tailer_task.done()
             and self._delivery_healthy
         )
-        active, unlinked, pending = await asyncio.to_thread(self._accounts.count_summary)
+        registered, unlinked, pending = await asyncio.to_thread(self._accounts.count_summary)
         mode = "自動承認" if self._settings.approval_mode == "automatic" else "管理者承認"
         await interaction.response.send_message(
             "\n".join(
@@ -410,7 +410,7 @@ class MinecraftDiscordBot(discord.Client):
                     f"{self._channel_text(self._settings.player_count_channel_id)} "
                     f"({'稼働中' if self._settings.player_count_enabled else '停止中'})",
                     f"ログ転送: {'稼働中' if forwarding else '停止中'}",
-                    f"登録: {active}件 (未連携 {unlinked}件、承認待ち {pending}件)",
+                    f"登録: {registered}件 (未連携 {unlinked}件、承認待ち {pending}件)",
                     f"RCON: {'設定済み' if self._rcon is not None else '未設定'}",
                 )
             ),
@@ -588,7 +588,7 @@ class MinecraftDiscordBot(discord.Client):
 
         try:
             await self._add_to_whitelist(account)
-        except (OSError, RconError, RuntimeError) as error:
+        except (OSError, RconError, RuntimeError, ValueError) as error:
             LOGGER.warning("Could not add account through RCON: %s", error)
             await interaction.followup.send(
                 "登録を保存しましたが、Minecraftへの反映待ちです。管理者に通知してください。",
@@ -697,14 +697,14 @@ class MinecraftDiscordBot(discord.Client):
                 view=None,
             )
             return
-        if account.status in {"pending_approval", "pending_add"}:
+        if account.status == "pending_approval":
             await asyncio.to_thread(self._accounts.delete_pending, account.id)
             await interaction.response.edit_message(content="申請を取り消しました。", view=None)
             return
         await interaction.response.defer()
         try:
             await self._remove_from_whitelist(account)
-        except (OSError, RconError, RuntimeError) as error:
+        except (OSError, RconError, RuntimeError, ValueError) as error:
             await asyncio.to_thread(self._accounts.update_status, account.id, "pending_remove")
             await interaction.edit_original_response(
                 content=f"解除を保存しましたが、Minecraftへの反映待ちです: {error}",
@@ -753,7 +753,7 @@ class MinecraftDiscordBot(discord.Client):
         await asyncio.to_thread(self._accounts.update_status, account.id, "pending_add")
         try:
             await self._add_to_whitelist(account)
-        except (OSError, RconError, RuntimeError) as error:
+        except (OSError, RconError, RuntimeError, ValueError) as error:
             await interaction.followup.send(
                 f"Minecraftへ反映できませんでした: {error}", ephemeral=True
             )
@@ -765,9 +765,25 @@ class MinecraftDiscordBot(discord.Client):
         await self._notify_target(target, account)
 
     async def show_admin_summary(self, interaction: discord.Interaction) -> None:
-        active, unlinked, pending = await asyncio.to_thread(self._accounts.count_summary)
+        registered, unlinked, pending = await asyncio.to_thread(self._accounts.count_summary)
+        registrations = await asyncio.to_thread(self._accounts.list_whitelist_registrations)
+        try:
+            player_names = await asyncio.to_thread(
+                read_whitelisted_players,
+                self._config.minecraft_whitelist_path,
+            )
+            present = {name.casefold() for name in player_names}
+            unreflected = sum(
+                account.status in {"active", "pending_add"}
+                and account.server_player_name.casefold() not in present
+                for account in registrations
+            )
+            actual_line = f"実Whitelist: **{len(player_names)}件**\n未反映: **{unreflected}件**\n"
+        except ValueError:
+            actual_line = "実Whitelist: **取得失敗**\n"
         await interaction.response.send_message(
-            f"有効なwhitelist: **{active}件**\n"
+            f"登録情報: **{registered}件**\n"
+            f"{actual_line}"
             f"未連携・保護: **{unlinked}件**\n"
             f"承認待ち: **{pending}件**",
             ephemeral=True,
@@ -787,7 +803,22 @@ class MinecraftDiscordBot(discord.Client):
             )
             return
 
-        if not player_names:
+        registrations = await asyncio.to_thread(self._accounts.list_whitelist_registrations)
+        actual_names = {name.casefold(): name for name in player_names}
+        registrations_by_name = {
+            account.server_player_name.casefold(): account for account in registrations
+        }
+
+        def display_name(key: str) -> str:
+            account = registrations_by_name.get(key)
+            return actual_names.get(key) or (account.server_player_name if account else key)
+
+        all_names = sorted(
+            actual_names.keys() | registrations_by_name.keys(),
+            key=lambda key: display_name(key).casefold(),
+        )
+
+        if not all_names:
             await interaction.followup.send(
                 embed=discord.Embed(
                     title="🛡️ Whitelist一覧",
@@ -799,8 +830,10 @@ class MinecraftDiscordBot(discord.Client):
             return
 
         lines: list[str] = []
-        for player_name in player_names:
-            account = await asyncio.to_thread(self._accounts.find_by_player_name, player_name)
+        for normalized_name in all_names:
+            account = registrations_by_name.get(normalized_name)
+            player_name = display_name(normalized_name)
+            is_present = normalized_name in actual_names
             edition = (
                 account.edition
                 if account is not None
@@ -817,14 +850,23 @@ class MinecraftDiscordBot(discord.Client):
                 account_text = f"**{escaped_name} (<@{account.discord_user_id}>)**"
             else:
                 account_text = f"**{escaped_name}** (未連携)"
-            lines.append(f"{edition_label}  {account_text}")
+            state = ""
+            if not is_present:
+                state = "  ⚠️ Whitelist未反映"
+            elif account is not None and account.status == "pending_remove":
+                state = "  ⚠️ 削除反映待ち"
+            lines.append(f"{edition_label}  {account_text}{state}")
 
         embeds: list[discord.Embed] = []
         total = len(lines)
+        actual_count = len(player_names)
+        registered_count = len(registrations)
         for offset in range(0, total, 20):
             page = discord.Embed(
                 title=(
-                    f"🛡️ Whitelist一覧 (全{total}件)" if offset == 0 else "🛡️ Whitelist一覧 (続き)"
+                    f"🛡️ Whitelist一覧 (実登録{actual_count}件 / 登録情報{registered_count}件)"
+                    if offset == 0
+                    else "🛡️ Whitelist一覧 (続き)"
                 ),
                 description="\n".join(lines[offset : offset + 20]),
                 color=discord.Color.blurple(),
@@ -1184,13 +1226,12 @@ class MinecraftDiscordBot(discord.Client):
         )
 
     async def _add_to_whitelist(self, account: MinecraftAccount) -> None:
-        rcon = self._require_rcon()
         command = (
             f"whitelist add {account.minecraft_name}"
             if account.edition == "java"
             else f'fwhitelist add "{account.minecraft_name}"'
         )
-        await asyncio.to_thread(rcon.execute, command)
+        await self._ensure_player_whitelist_state(account, expected=True, command=command)
         await asyncio.to_thread(self._accounts.update_status, account.id, "active")
 
     async def _remove_from_whitelist(self, account: MinecraftAccount) -> None:
@@ -1200,15 +1241,42 @@ class MinecraftDiscordBot(discord.Client):
             if account.edition == "java"
             else f'fwhitelist remove "{account.minecraft_name}"'
         )
-        await asyncio.to_thread(rcon.execute, command)
+        await self._ensure_player_whitelist_state(account, expected=False, command=command)
         try:
             await asyncio.to_thread(
                 rcon.execute,
                 f'kick "{account.server_player_name}" Discordの参加登録が解除されました',
             )
-        except RconError:
+        except OSError, RconError:
             LOGGER.debug("Could not kick %s; player may be offline", account.server_player_name)
         await asyncio.to_thread(self._accounts.update_status, account.id, "missing")
+
+    async def _ensure_player_whitelist_state(
+        self,
+        account: MinecraftAccount,
+        *,
+        expected: bool,
+        command: str,
+    ) -> None:
+        async with self._whitelist_operation_lock:
+            if await self._player_is_whitelisted(account.server_player_name) is expected:
+                return
+            await self._execute_checked_rcon(command)
+            for attempt in range(20):
+                if await self._player_is_whitelisted(account.server_player_name) is expected:
+                    return
+                if attempt < 19:
+                    await asyncio.sleep(0.25)
+        state = "追加" if expected else "削除"
+        raise RuntimeError(f"{account.server_player_name}のWhitelist{state}を確認できませんでした")
+
+    async def _player_is_whitelisted(self, player_name: str) -> bool:
+        player_names = await asyncio.to_thread(
+            read_whitelisted_players,
+            self._config.minecraft_whitelist_path,
+        )
+        normalized_name = player_name.casefold()
+        return any(name.casefold() == normalized_name for name in player_names)
 
     def _require_rcon(self) -> RconClient:
         if self._rcon is None:
@@ -1251,6 +1319,25 @@ class MinecraftDiscordBot(discord.Client):
             )
         except (OSError, ValueError) as error:
             LOGGER.warning("Could not import Minecraft whitelist: %s", error)
+
+    async def _sync_whitelist_accounts(self) -> None:
+        await self._import_whitelist()
+        try:
+            player_names = await asyncio.to_thread(
+                read_whitelisted_players,
+                self._config.minecraft_whitelist_path,
+            )
+        except ValueError as error:
+            LOGGER.warning("Could not reconcile Minecraft whitelist registrations: %s", error)
+            return
+        changes = await asyncio.to_thread(self._accounts.reconcile_whitelist, player_names)
+        if any(changes):
+            LOGGER.info(
+                "Reconciled Minecraft whitelist registrations queued_adds=%d "
+                "completed_adds=%d completed_removals=%d",
+                *changes,
+            )
+        await self._reconcile_pending_actions()
 
     async def _refresh_access_panel(self) -> None:
         channel_id = self._settings.panel_channel_id
@@ -1403,8 +1490,7 @@ class MinecraftDiscordBot(discord.Client):
             self._sync_ticks += 1
             if self._sync_ticks >= 6:
                 self._sync_ticks = 0
-                await self._import_whitelist()
-                await self._reconcile_pending_actions()
+                await self._sync_whitelist_accounts()
             self._schedule_player_count_refresh(delay=0)
             await asyncio.sleep(10)
 
@@ -1560,7 +1646,7 @@ class MinecraftDiscordBot(discord.Client):
                     await self._add_to_whitelist(account)
                 else:
                     await self._remove_from_whitelist(account)
-            except (OSError, RconError, RuntimeError) as error:
+            except (OSError, RconError, RuntimeError, ValueError) as error:
                 LOGGER.warning(
                     "Minecraft account reconciliation remains pending for %s: %s",
                     account.minecraft_name,
