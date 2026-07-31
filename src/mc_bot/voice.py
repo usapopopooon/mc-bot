@@ -44,9 +44,9 @@ def event_speech_text(
             advancement = translator.translate(event.detail)
             text = f"{player_name}が進捗、{advancement}、を達成しました"
         case EventType.JOIN:
-            text = f"{player_name}が参加しました"
+            text = f"{player_name}がゲームに参加しました"
         case EventType.LEAVE:
-            text = f"{player_name}が退出しました"
+            text = f"{player_name}がゲームから退出しました"
     if len(text) <= _MAX_SPEECH_LENGTH:
         return text
     return text[: _MAX_SPEECH_LENGTH - 1] + "…"

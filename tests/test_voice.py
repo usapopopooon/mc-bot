@@ -53,9 +53,13 @@ class FakeSession:
 def test_formats_minecraft_events_for_speech() -> None:
     translator = AdvancementTranslator.load()
 
-    assert event_speech_text(LogEvent(EventType.JOIN, ".hoge"), translator) == "hogeが参加しました"
     assert (
-        event_speech_text(LogEvent(EventType.LEAVE, "Steve"), translator) == "Steveが退出しました"
+        event_speech_text(LogEvent(EventType.JOIN, ".hoge"), translator)
+        == "hogeがゲームに参加しました"
+    )
+    assert (
+        event_speech_text(LogEvent(EventType.LEAVE, "Steve"), translator)
+        == "Steveがゲームから退出しました"
     )
     assert (
         event_speech_text(LogEvent(EventType.ADVANCEMENT, "Steve", "Stone Age"), translator)
@@ -85,7 +89,7 @@ def test_prefers_linked_discord_username_for_speech() -> None:
             translator,
             discord_username="discord_name",
         )
-        == "discord_nameが退出しました"
+        == "discord_nameがゲームから退出しました"
     )
     assert (
         event_speech_text(
