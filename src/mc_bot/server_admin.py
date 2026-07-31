@@ -42,6 +42,24 @@ def parse_online_players(response: str) -> list[str]:
     return players
 
 
+def read_whitelisted_players(whitelist_path: Path) -> list[str]:
+    try:
+        data = json.loads(whitelist_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError(f"whitelist.jsonを読み取れませんでした: {error}") from error
+    if not isinstance(data, list):
+        raise ValueError("whitelist.jsonの形式が正しくありません")
+    players: list[str] = []
+    for entry in data:
+        if not isinstance(entry, dict) or not isinstance(entry.get("name"), str):
+            raise ValueError("whitelist.jsonの登録者を読み取れませんでした")
+        name = entry["name"].strip()
+        if not _PLAYER_NAME.fullmatch(name):
+            raise ValueError("whitelist.jsonの登録者を読み取れませんでした")
+        players.append(name)
+    return sorted(players, key=str.casefold)
+
+
 def validate_rcon_response(response: str) -> str:
     cleaned = clean_rcon_output(response)
     lowered = cleaned.casefold()

@@ -27,6 +27,7 @@ from mc_bot.server_admin import (
     kick_command,
     parse_online_players,
     read_whitelist_enabled,
+    read_whitelisted_players,
     validate_rcon_response,
 )
 from mc_bot.settings import RuntimeSettings, SettingsStore
@@ -771,6 +772,72 @@ class MinecraftDiscordBot(discord.Client):
             f"承認待ち: **{pending}件**",
             ephemeral=True,
         )
+
+    async def show_whitelist_entries(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer(ephemeral=True)
+        try:
+            player_names = await asyncio.to_thread(
+                read_whitelisted_players,
+                self._config.minecraft_whitelist_path,
+            )
+        except ValueError as error:
+            await interaction.followup.send(
+                f"Whitelist一覧を取得できませんでした: {error}",
+                ephemeral=True,
+            )
+            return
+
+        if not player_names:
+            await interaction.followup.send(
+                embed=discord.Embed(
+                    title="🛡️ Whitelist一覧",
+                    description="登録者はいません。",
+                    color=discord.Color.blurple(),
+                ),
+                ephemeral=True,
+            )
+            return
+
+        lines: list[str] = []
+        for player_name in player_names:
+            account = await asyncio.to_thread(self._accounts.find_by_player_name, player_name)
+            edition = (
+                account.edition
+                if account is not None
+                else (
+                    "bedrock"
+                    if self._config.floodgate_username_prefix
+                    and player_name.startswith(self._config.floodgate_username_prefix)
+                    else "java"
+                )
+            )
+            edition_label = "🪨 Bedrock" if edition == "bedrock" else "☕ Java"
+            escaped_name = discord.utils.escape_markdown(player_name)
+            if account is not None and account.discord_user_id is not None:
+                account_text = f"**{escaped_name} (<@{account.discord_user_id}>)**"
+            else:
+                account_text = f"**{escaped_name}** (未連携)"
+            lines.append(f"{edition_label}  {account_text}")
+
+        embeds: list[discord.Embed] = []
+        total = len(lines)
+        for offset in range(0, total, 20):
+            page = discord.Embed(
+                title=(
+                    f"🛡️ Whitelist一覧 (全{total}件)" if offset == 0 else "🛡️ Whitelist一覧 (続き)"
+                ),
+                description="\n".join(lines[offset : offset + 20]),
+                color=discord.Color.blurple(),
+            )
+            page.set_footer(text=f"{offset + 1}-{min(offset + 20, total)} / {total}")
+            embeds.append(page)
+
+        for embed in embeds:
+            await interaction.followup.send(
+                embed=embed,
+                ephemeral=True,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
 
     async def validate_runtime_admin(self, interaction: discord.Interaction) -> bool:
         return await self._require_server_manager(interaction)

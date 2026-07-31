@@ -40,7 +40,7 @@ def test_admin_panel_exposes_server_controls() -> None:
 
     admin_panel, controls = asyncio.run(build_views())
 
-    assert {item.label for item in admin_panel.children} >= {"サーバー操作"}
+    assert {item.label for item in admin_panel.children} >= {"Whitelist一覧", "サーバー操作"}
     assert {item.label for item in controls.children} == {
         "Whitelist",
         "キック",

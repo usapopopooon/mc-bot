@@ -113,6 +113,16 @@ class AdminPanelView(discord.ui.View):
             await self.bot.show_admin_summary(interaction)
 
     @discord.ui.button(
+        label="Whitelist一覧",
+        emoji="🛡️",
+        style=discord.ButtonStyle.secondary,
+        custom_id="mc-admin:whitelist-list",
+    )
+    async def whitelist_list(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if await self.bot.validate_panel_interaction(interaction, admin=True):
+            await self.bot.show_whitelist_entries(interaction)
+
+    @discord.ui.button(
         label="サーバー操作",
         emoji="🎮",
         style=discord.ButtonStyle.danger,

@@ -11,6 +11,7 @@ from mc_bot.server_admin import (
     kick_command,
     parse_online_players,
     read_whitelist_enabled,
+    read_whitelisted_players,
     validate_rcon_response,
 )
 from mc_bot.settings import RuntimeSettings, SettingsStore
@@ -66,6 +67,32 @@ def test_rejects_failed_or_inconsistent_online_player_response() -> None:
         parse_online_players("Unknown command")
     with pytest.raises(ValueError, match="一致しません"):
         parse_online_players("There are 2 of a max of 20 players online: Steve")
+
+
+def test_reads_and_sorts_whitelisted_players(tmp_path) -> None:
+    whitelist_path = tmp_path / "whitelist.json"
+    whitelist_path.write_text(
+        json.dumps(
+            [
+                {"uuid": "1", "name": "Steve"},
+                {"uuid": "2", "name": ".Bedrock_User"},
+                {"uuid": "3", "name": "alex"},
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    assert read_whitelisted_players(whitelist_path) == [".Bedrock_User", "alex", "Steve"]
+
+
+def test_rejects_invalid_whitelist_file(tmp_path) -> None:
+    whitelist_path = tmp_path / "whitelist.json"
+    whitelist_path.write_text('{"name": "Steve"}', encoding="utf-8")
+
+    with pytest.raises(ValueError, match="読み取れません"):
+        read_whitelisted_players(tmp_path / "missing.json")
+    with pytest.raises(ValueError, match="形式"):
+        read_whitelisted_players(whitelist_path)
 
 
 def test_validates_rcon_command_response() -> None:
