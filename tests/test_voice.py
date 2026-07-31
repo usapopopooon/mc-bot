@@ -63,7 +63,7 @@ def test_formats_minecraft_events_for_speech() -> None:
     )
     assert (
         event_speech_text(LogEvent(EventType.CHAT, "Steve", "こんにちは\n  世界"), translator)
-        == "Steve。こんにちは 世界"
+        == "こんにちは 世界"
     )
 
 
@@ -77,7 +77,7 @@ def test_prefers_linked_discord_username_for_speech() -> None:
             ".",
             "discord_name",
         )
-        == "discord_name。こんにちは"
+        == "こんにちは"
     )
     assert (
         event_speech_text(
@@ -93,7 +93,7 @@ def test_prefers_linked_discord_username_for_speech() -> None:
             translator,
             discord_username="   ",
         )
-        == "MinecraftName。こんにちは"
+        == "こんにちは"
     )
 
 

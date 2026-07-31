@@ -39,8 +39,7 @@ def event_speech_text(
         player_name = player_name.removeprefix(floodgate_prefix)
     match event.type:
         case EventType.CHAT:
-            detail = " ".join(event.detail.split())
-            text = f"{player_name}。{detail}"
+            text = " ".join(event.detail.split())
         case EventType.ADVANCEMENT:
             advancement = translator.translate(event.detail)
             text = f"{player_name}が進捗、{advancement}、を達成しました"
