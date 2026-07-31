@@ -105,6 +105,7 @@ Bedrock版とDiscord連携状況を表示し、実行した管理者だけに見
 Discordへ送るゲーム参加・退出・進捗のEmbedでは、Minecraft名に「さん」を
 付けて表示します。コロンで発言に続くチャットには付けません。連携済みの
 Discordユーザー表示は通知なしのクリック可能なメンションのままです。
+Discord連携済みの場合は `Minecraft名 (@Discord名) さん` の順で表示します。
 
 Whitelistの再開予定時刻は永続化され、mc-botの再起動後も引き継がれます。
 Minecraftへのアカウント追加・削除は、RCON応答だけでなく実際の `whitelist.json` への

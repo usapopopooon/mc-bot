@@ -38,7 +38,19 @@ def test_includes_linked_discord_user_as_clickable_mention() -> None:
         123456789,
     )
 
-    assert embed.description == "🔴 **.hogeさん (<@123456789>)** が退出しました"
+    assert embed.description == "🔴 **.hoge (<@123456789>) さん** が退出しました"
+
+
+def test_places_honorific_after_linked_identity_for_advancement() -> None:
+    embed = format_event(
+        LogEvent(EventType.ADVANCEMENT, "Steve", "Stone Age"),
+        AdvancementTranslator.load(),
+        123456789,
+    )
+
+    assert embed.description == (
+        "🏆 **Steve (<@123456789>) さん** が進捗「石器時代」を達成しました"
+    )
 
 
 def test_adds_honorific_to_join_log_without_discord_link() -> None:

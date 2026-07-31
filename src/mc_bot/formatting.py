@@ -14,11 +14,13 @@ def format_event(
     discord_user_id: int | None = None,
 ) -> discord.Embed:
     player = _escape_markdown(event.player_name)
-    if event.type is not EventType.CHAT and not event.player_name.endswith("さん"):
-        player = f"{player}さん"
+    add_honorific = event.type is not EventType.CHAT and not event.player_name.endswith("さん")
     if discord_user_id is not None:
-        identity = f"**{player} (<@{discord_user_id}>)**"
+        honorific = " さん" if add_honorific else ""
+        identity = f"**{player} (<@{discord_user_id}>){honorific}**"
     else:
+        if add_honorific:
+            player = f"{player}さん"
         identity = f"**{player}**"
 
     match event.type:
