@@ -30,6 +30,8 @@ def test_saves_and_loads_settings(tmp_path) -> None:
         "approval_channel_id": None,
         "player_count_channel_id": None,
         "player_count_enabled": False,
+        "voice_channel_id": None,
+        "voice_enabled": False,
         "whitelist_resume_at": None,
     }
 
@@ -44,6 +46,19 @@ def test_ignores_legacy_server_label(tmp_path) -> None:
     assert SettingsStore(path).load() == RuntimeSettings(channel_id=123456789)
 
 
+def test_loads_persisted_voice_connection(tmp_path) -> None:
+    path = tmp_path / "settings.json"
+    path.write_text(
+        '{"voice_channel_id": 987654321, "voice_enabled": true}',
+        encoding="utf-8",
+    )
+
+    assert SettingsStore(path).load() == RuntimeSettings(
+        voice_channel_id=987654321,
+        voice_enabled=True,
+    )
+
+
 @pytest.mark.parametrize(
     "payload",
     [
@@ -52,6 +67,8 @@ def test_ignores_legacy_server_label(tmp_path) -> None:
         '{"channel_id": -1}',
         '{"player_count_channel_id": true}',
         '{"player_count_enabled": "yes"}',
+        '{"voice_channel_id": true}',
+        '{"voice_enabled": "yes"}',
         '{"whitelist_resume_at": -1}',
         '{"whitelist_resume_at": true}',
     ],

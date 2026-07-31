@@ -19,6 +19,8 @@ class RuntimeSettings:
     approval_channel_id: int | None = None
     player_count_channel_id: int | None = None
     player_count_enabled: bool = False
+    voice_channel_id: int | None = None
+    voice_enabled: bool = False
     whitelist_resume_at: float | None = None
 
 
@@ -47,6 +49,7 @@ class SettingsStore:
             "admin_panel_message_id",
             "approval_channel_id",
             "player_count_channel_id",
+            "voice_channel_id",
         ):
             value = data.get(name)
             if value is not None and (
@@ -61,6 +64,9 @@ class SettingsStore:
         player_count_enabled = data.get("player_count_enabled", False)
         if not isinstance(player_count_enabled, bool):
             raise ValueError("player_count_enabled must be a boolean")
+        voice_enabled = data.get("voice_enabled", False)
+        if not isinstance(voice_enabled, bool):
+            raise ValueError("voice_enabled must be a boolean")
         whitelist_resume_at = data.get("whitelist_resume_at")
         if whitelist_resume_at is not None and (
             not isinstance(whitelist_resume_at, int | float)
@@ -73,6 +79,7 @@ class SettingsStore:
             **identifiers,
             approval_mode=approval_mode,
             player_count_enabled=player_count_enabled,
+            voice_enabled=voice_enabled,
             whitelist_resume_at=(
                 float(whitelist_resume_at) if whitelist_resume_at is not None else None
             ),

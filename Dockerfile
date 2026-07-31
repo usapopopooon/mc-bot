@@ -24,7 +24,10 @@ ENV PATH="/app/.venv/bin:$PATH" \
     HOME="/home/mc-bot" \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
-RUN groupadd --gid 1000 mc-bot \
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends ffmpeg \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --gid 1000 mc-bot \
     && useradd --uid 1000 --gid mc-bot --create-home mc-bot
 WORKDIR /app
 COPY --from=dependencies /app/.venv /app/.venv

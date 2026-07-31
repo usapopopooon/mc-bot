@@ -132,6 +132,17 @@ class AdminPanelView(discord.ui.View):
         if await self.bot.validate_panel_interaction(interaction, admin=True):
             await self.bot.show_server_control(interaction)
 
+    @discord.ui.button(
+        label="Minecraft読み上げ",
+        emoji="🔊",
+        style=discord.ButtonStyle.secondary,
+        custom_id="mc-admin:voice",
+        row=1,
+    )
+    async def voice(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if await self.bot.validate_panel_interaction(interaction, admin=True):
+            await self.bot.show_voice_controls(interaction)
+
 
 class RegistrationModal(discord.ui.Modal):
     minecraft_name = discord.ui.TextInput(
@@ -400,6 +411,42 @@ class AdminOnlyView(discord.ui.View):
             )
             return False
         return await self.bot.validate_runtime_admin(interaction)
+
+
+class VoiceChannelSelect(discord.ui.ChannelSelect):
+    def __init__(self) -> None:
+        super().__init__(
+            placeholder="Minecraft読み上げ先VCを選択",
+            channel_types=[discord.ChannelType.voice],
+            min_values=1,
+            max_values=1,
+            row=0,
+        )
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        channel = self.values[0]
+        if not isinstance(channel, discord.VoiceChannel):
+            await interaction.response.send_message(
+                "通常のボイスチャンネルを選択してください。",
+                ephemeral=True,
+            )
+            return
+        if isinstance(self.view, VoiceControlView):
+            await self.view.bot.configure_voice_channel(interaction, channel)
+
+
+class VoiceControlView(AdminOnlyView):
+    def __init__(self, bot: MinecraftDiscordBot, owner_id: int) -> None:
+        super().__init__(bot, owner_id)
+        self.add_item(VoiceChannelSelect())
+
+    @discord.ui.button(label="テスト読み上げ", emoji="🔈", style=discord.ButtonStyle.primary, row=1)
+    async def test(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await self.bot.test_voice(interaction)
+
+    @discord.ui.button(label="切断", emoji="⏹️", style=discord.ButtonStyle.danger, row=1)
+    async def disconnect(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await self.bot.disconnect_voice(interaction)
 
 
 class ServerControlView(AdminOnlyView):

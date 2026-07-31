@@ -9,6 +9,10 @@ services:
       MINECRAFT_RCON_PORT: "25575"
       MINECRAFT_RCON_PASSWORD: "${MINECRAFT_RCON_PASSWORD:?Set the Minecraft RCON password}"
       FLOODGATE_USERNAME_PREFIX: "${FLOODGATE_USERNAME_PREFIX:-.}"
+      VOICEVOX_TTS_API_URL: "${VOICEVOX_TTS_API_URL:-http://voicevox-discord-tts:8080}"
+      VOICEVOX_TTS_API_TOKEN: "${VOICEVOX_TTS_API_TOKEN:-}"
+      VOICEVOX_SPEAKER_ID: "${VOICEVOX_SPEAKER_ID:-46}"
+      VOICEVOX_SPEED: "${VOICEVOX_SPEED:-1.0}"
     volumes:
       - minecraft-data:/minecraft:ro
       - mc-bot-data:/data
@@ -16,10 +20,11 @@ services:
       resources:
         limits:
           cpus: "0.25"
-          memory: 128M
+          memory: 192M
     networks:
       - default
       - minecraft-control
+      - voicevox-tts
 
 volumes:
   minecraft-data:
@@ -31,3 +36,6 @@ networks:
   minecraft-control:
     external: true
     name: "${MINECRAFT_CONTROL_NETWORK:-minecraft-control}"
+  voicevox-tts:
+    external: true
+    name: "${VOICEVOX_INTERNAL_TTS_NETWORK:-voicevox-discord-tts}"

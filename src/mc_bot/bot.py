@@ -12,7 +12,7 @@ from discord import app_commands
 
 from mc_bot.accounts import AccountStore, MinecraftAccount
 from mc_bot.config import Config
-from mc_bot.events import EventType, parse_log_line
+from mc_bot.events import EventType, LogEvent, parse_log_line
 from mc_bot.formatting import format_event
 from mc_bot.player_count import (
     PLAYER_COUNT_CHANNEL_NAME,
@@ -41,10 +41,12 @@ from mc_bot.ui import (
     ConfirmRegistrationView,
     KickPlayerSelectView,
     ServerControlView,
+    VoiceControlView,
     WhitelistControlView,
     access_panel_embed,
     admin_panel_embed,
 )
+from mc_bot.voice import MinecraftVoicePlayer, event_speech_text
 
 LOGGER = logging.getLogger(__name__)
 _JAVA_NAME = re.compile(r"[A-Za-z0-9_]{3,16}")
@@ -55,6 +57,7 @@ class MinecraftDiscordBot(discord.Client):
         intents = discord.Intents.none()
         intents.guilds = True
         intents.members = True
+        intents.voice_states = True
         super().__init__(intents=intents)
         self.tree = app_commands.CommandTree(self)
         self._register_commands()
@@ -64,6 +67,13 @@ class MinecraftDiscordBot(discord.Client):
         self._tailer = LogTailer(config.minecraft_log_path, config.cursor_path)
         self._settings_store = SettingsStore(config.settings_path)
         self._accounts = AccountStore(config.accounts_path)
+        self._voice_player = MinecraftVoicePlayer(
+            self,
+            api_url=config.voicevox_tts_api_url,
+            api_token=config.voicevox_tts_api_token,
+            speaker_id=config.voicevox_speaker_id,
+            speed=config.voicevox_speed,
+        )
         self._rcon = (
             RconClient(
                 config.rcon_host,
@@ -128,6 +138,7 @@ class MinecraftDiscordBot(discord.Client):
 
     async def setup_hook(self) -> None:
         await asyncio.to_thread(self._accounts.initialize)
+        self._voice_player.start()
         self.add_view(AccessPanelView(self))
         self.add_view(AdminPanelView(self))
         for account in await asyncio.to_thread(self._accounts.list_pending_approvals):
@@ -167,6 +178,8 @@ class MinecraftDiscordBot(discord.Client):
         if self._settings.player_count_enabled:
             self._schedule_player_count_refresh(delay=0)
             self._schedule_player_count_name_normalization()
+        if self._settings.voice_enabled:
+            await self._restore_voice_connection()
 
         LOGGER.info(
             "Discord connected as %s; loaded %d advancement translations",
@@ -208,6 +221,7 @@ class MinecraftDiscordBot(discord.Client):
             self._tailer_task.cancel()
             await asyncio.gather(self._tailer_task, return_exceptions=True)
             self._tailer_task = None
+        await self._voice_player.close()
         await super().close()
 
     @app_commands.describe(channel="通知先。省略時はコマンドを実行したチャンネル")
@@ -409,6 +423,9 @@ class MinecraftDiscordBot(discord.Client):
                     "人数表示: "
                     f"{self._channel_text(self._settings.player_count_channel_id)} "
                     f"({'稼働中' if self._settings.player_count_enabled else '停止中'})",
+                    "Minecraft読み上げ: "
+                    f"{self._channel_text(self._settings.voice_channel_id)} "
+                    f"({'稼働中' if self._settings.voice_enabled else '停止中'})",
                     f"ログ転送: {'稼働中' if forwarding else '停止中'}",
                     f"登録: {registered}件 (未連携 {unlinked}件、承認待ち {pending}件)",
                     f"RCON: {'設定済み' if self._rcon is not None else '未設定'}",
@@ -880,6 +897,102 @@ class MinecraftDiscordBot(discord.Client):
                 ephemeral=True,
                 allowed_mentions=discord.AllowedMentions.none(),
             )
+
+    async def show_voice_controls(self, interaction: discord.Interaction) -> None:
+        channel_id = self._settings.voice_channel_id
+        status = "停止中"
+        if self._settings.voice_enabled and channel_id is not None:
+            status = f"接続先: <#{channel_id}>"
+        api_status = "設定済み" if self._voice_player.configured else "APIトークン未設定"
+        await interaction.response.send_message(
+            f"Minecraft読み上げ: **{status}**\nVOICEVOX API: **{api_status}**\n\n"
+            "接続先のVCを選択すると、チャット・参加・退出・進捗を読み上げます。",
+            view=VoiceControlView(self, interaction.user.id),
+            ephemeral=True,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+    async def configure_voice_channel(
+        self,
+        interaction: discord.Interaction,
+        channel: discord.VoiceChannel,
+    ) -> None:
+        await interaction.response.defer()
+        if not self._voice_player.configured:
+            await interaction.edit_original_response(
+                content="VOICEVOX_TTS_API_TOKENが設定されていません。",
+                view=None,
+            )
+            return
+        try:
+            self._ensure_same_guild(channel.guild.id)
+            await self._connect_voice_channel(channel)
+            await self._save_settings(
+                replace(
+                    self._settings,
+                    voice_channel_id=channel.id,
+                    voice_enabled=True,
+                )
+            )
+        except (OSError, RuntimeError, discord.DiscordException) as error:
+            await interaction.edit_original_response(
+                content=f"VCへ接続できませんでした: {error}",
+                view=None,
+            )
+            return
+        self._audit_server_action(interaction, f"voice connect channel_id={channel.id}")
+        await interaction.edit_original_response(
+            content=f"✅ {channel.mention} でMinecraft読み上げを開始しました。",
+            view=None,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+    async def disconnect_voice(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer()
+        guild = interaction.guild
+        try:
+            if guild is not None and guild.voice_client is not None:
+                await guild.voice_client.disconnect(force=True)
+            await self._save_settings(
+                replace(
+                    self._settings,
+                    voice_channel_id=None,
+                    voice_enabled=False,
+                )
+            )
+        except (OSError, discord.DiscordException) as error:
+            await interaction.edit_original_response(
+                content=f"読み上げを停止できませんでした: {error}",
+                view=None,
+            )
+            return
+        self._audit_server_action(interaction, "voice disconnect")
+        await interaction.edit_original_response(
+            content="Minecraft読み上げを停止し、VCから切断しました。",
+            view=None,
+        )
+
+    async def test_voice(self, interaction: discord.Interaction) -> None:
+        guild_id = interaction.guild_id
+        if (
+            not self._settings.voice_enabled
+            or guild_id is None
+            or not self._voice_player.is_connected(guild_id)
+        ):
+            await interaction.response.send_message(
+                "VCへ接続されていません。接続先を選び直してください。",
+                ephemeral=True,
+            )
+            return
+        if not self._voice_player.enqueue(guild_id, "マインクラフト読み上げのテストです"):
+            await interaction.response.send_message(
+                "読み上げキューへ追加できませんでした。",
+                ephemeral=True,
+            )
+            return
+        await interaction.response.send_message(
+            "テスト音声をキューへ追加しました。", ephemeral=True
+        )
 
     async def validate_runtime_admin(self, interaction: discord.Interaction) -> bool:
         return await self._require_server_manager(interaction)
@@ -1419,7 +1532,7 @@ class MinecraftDiscordBot(discord.Client):
                 await asyncio.to_thread(self._tailer.acknowledge, pending_line)
                 continue
             account = await asyncio.to_thread(self._accounts.find_by_player_name, event.player_name)
-            discord_user_id = await self._discord_user_id(account)
+            discord_user_id, discord_username = await self._discord_identity(account)
             embed = format_event(event, self._translator, discord_user_id)
             if event.type in {EventType.JOIN, EventType.LEAVE}:
                 self._schedule_player_count_refresh()
@@ -1440,16 +1553,31 @@ class MinecraftDiscordBot(discord.Client):
                     continue
                 await asyncio.to_thread(self._tailer.acknowledge, pending_line)
                 self._delivery_healthy = True
+                self._queue_voice_event(event, discord_username)
                 break
 
-    async def _discord_user_id(self, account: MinecraftAccount | None) -> int | None:
+    def _queue_voice_event(self, event: LogEvent, discord_username: str | None) -> None:
+        if not self._settings.voice_enabled or self._settings.guild_id is None:
+            return
+        text = event_speech_text(
+            event,
+            self._translator,
+            self._config.floodgate_username_prefix,
+            discord_username,
+        )
+        self._voice_player.enqueue(self._settings.guild_id, text)
+
+    async def _discord_identity(
+        self, account: MinecraftAccount | None
+    ) -> tuple[int | None, str | None]:
         if account is None or account.discord_user_id is None:
-            return None
+            return None, None
         guild = self.get_guild(self._settings.guild_id or 0)
         member = guild.get_member(account.discord_user_id) if guild is not None else None
         if member is not None and member.name != account.discord_username:
             await asyncio.to_thread(self._accounts.update_discord_username, member.id, member.name)
-        return account.discord_user_id
+        username = member.name if member is not None else account.discord_username
+        return account.discord_user_id, username
 
     async def _send(self, embed: discord.Embed) -> None:
         if self._channel is None:
@@ -1477,6 +1605,37 @@ class MinecraftDiscordBot(discord.Client):
             raise RuntimeError("Botに「埋め込みリンク」権限が必要です")
         return channel
 
+    async def _connect_voice_channel(self, channel: discord.VoiceChannel) -> None:
+        member = channel.guild.me
+        if member is None:
+            raise RuntimeError("BotがDiscordサーバーに参加していません")
+        permissions = channel.permissions_for(member)
+        if not permissions.connect or not permissions.speak:
+            raise RuntimeError("BotにVCの「接続」と「発言」権限が必要です")
+        voice_client = channel.guild.voice_client
+        if voice_client is None or not voice_client.is_connected():
+            if voice_client is not None:
+                await voice_client.disconnect(force=True)
+            await channel.connect(timeout=15, reconnect=True, self_deaf=True)
+            return
+        if voice_client.channel.id != channel.id:
+            await voice_client.move_to(channel)
+
+    async def _restore_voice_connection(self) -> None:
+        channel_id = self._settings.voice_channel_id
+        if channel_id is None:
+            return
+        if not self._voice_player.configured:
+            LOGGER.warning("Minecraft voice is enabled but VOICEVOX TTS API is not configured")
+            return
+        try:
+            channel = self.get_channel(channel_id) or await self.fetch_channel(channel_id)
+            if not isinstance(channel, discord.VoiceChannel):
+                raise RuntimeError("設定済みの読み上げ先がVCではありません")
+            await self._connect_voice_channel(channel)
+        except (OSError, RuntimeError, discord.DiscordException) as error:
+            LOGGER.warning("Could not restore Minecraft voice connection: %s", error)
+
     async def _health_loop(self) -> None:
         while not self.is_closed():
             unconfigured = self._channel is None
@@ -1491,6 +1650,8 @@ class MinecraftDiscordBot(discord.Client):
             if self._sync_ticks >= 6:
                 self._sync_ticks = 0
                 await self._sync_whitelist_accounts()
+                if self._settings.voice_enabled:
+                    await self._restore_voice_connection()
             self._schedule_player_count_refresh(delay=0)
             await asyncio.sleep(10)
 

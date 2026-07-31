@@ -13,14 +13,14 @@ Minecraftサーバーのログを監視し、Discord Botとして指定チャン
 | パッケージ管理 | uv 0.11.8 |
 | デプロイ方式 | Docker Compose |
 | Discord接続方式 | BotアカウントによるGateway接続（Webhook不使用） |
-| Gateway Intents | Guilds、Guild Members |
+| Gateway Intents | Guilds、Guild Members、Voice States |
 | 対応Minecraftログ | チャット、進捗・達成、参加、退出 |
 | 通知方向 | Minecraftログ通知、Discordからwhitelist管理 |
 | 設定方法 | Discordスラッシュコマンド |
-| 秘密情報 | `DISCORD_TOKEN`、`MINECRAFT_RCON_PASSWORD` |
+| 秘密情報 | `DISCORD_TOKEN`、`MINECRAFT_RCON_PASSWORD`、`VOICEVOX_TTS_API_TOKEN` |
 | 永続データ | `/data/settings.json`、`/data/cursor.json`、`/data/accounts.db` |
 | CPU上限 | 0.25 CPU |
-| メモリ上限 | 128 MiB |
+| メモリ上限 | 192 MiB |
 | 実行ユーザー | UID/GID 1000（Minecraftデータの読み取り権限と一致） |
 
 Geyser/Floodgate経由のBedrockプレイヤーを含む次のログを扱います。
@@ -100,6 +100,7 @@ Bedrock版とDiscord連携状況を表示し、実行した管理者だけに見
 - Whitelistの手動再開
 - 天候を晴れ・雨・雷雨へ変更、時刻を朝・夜へ変更
 - sparkのローカルヘルスレポートによるTPS、MSPT、CPU、メモリ状況の確認
+- 専用VCでのMinecraftチャット、参加・退出、進捗のVOICEVOX読み上げ
 
 Whitelistの再開予定時刻は永続化され、mc-botの再起動後も引き継がれます。
 Minecraftへのアカウント追加・削除は、RCON応答だけでなく実際の `whitelist.json` への
@@ -122,7 +123,33 @@ Java版・Bedrock版を合わせた人数をボイスチャンネルステータ
 Botの初回起動直後はDiscordへの反映に少し時間がかかる場合があります。通知先が未設定、
 または古い通知先が利用不能でもBotは起動し続けるため、コマンドから修正できます。
 
-Botトークンは秘密情報として扱い、Git、README、Issue、ログへ貼らないでください。
+BotトークンとVOICEVOX内部TTS APIトークンは秘密情報として扱い、Git、README、Issue、
+ログへ貼らないでください。
+
+## Minecraft専用VC読み上げ
+
+管理パネルの「Minecraft読み上げ」から接続先VCを選択すると、mc-bot自身がVCへ接続し、
+Minecraftログを構造化したままVOICEVOX内部TTS APIへ送信します。Discordへ投稿したEmbedを
+読み直さないため、Markdownやメンション表現に依存しません。読み上げは上限付きキューで
+順番を維持し、API障害時もMinecraftログのDiscord転送を止めません。
+
+VOICEVOX Discord側では内部APIを有効化し、両アプリで同じトークンを設定します。
+
+```text
+INTERNAL_TTS_API_ENABLED=true
+INTERNAL_TTS_API_TOKEN=<強い共有トークン>
+```
+
+mc-bot側では次を設定します。
+
+```text
+VOICEVOX_TTS_API_TOKEN=<同じ共有トークン>
+VOICEVOX_TTS_API_URL=http://voicevox-discord-tts:8080
+```
+
+両アプリを外部Dockerネットワーク `voicevox-discord-tts` へ接続します。mc-botには対象VCの
+「接続」「発言」権限が必要です。接続先は永続化され、mc-bot再デプロイ後に自動再接続します。
+Minecraftサーバーの再起動は必要ありません。
 
 ## Coolifyへのデプロイ
 
@@ -138,6 +165,11 @@ Botトークンは秘密情報として扱い、Git、README、Issue、ログへ
 | `MINECRAFT_RCON_PASSWORD` | はい | Minecraft側と同じ強いRCONパスワード |
 | `MINECRAFT_CONTROL_NETWORK` | いいえ | 事前作成した内部Dockerネットワーク名 |
 | `FLOODGATE_USERNAME_PREFIX` | いいえ | Bedrock名のprefix。既定値は `.` |
+| `VOICEVOX_INTERNAL_TTS_NETWORK` | いいえ | VOICEVOX内部APIのDockerネットワーク名 |
+| `VOICEVOX_TTS_API_URL` | いいえ | VOICEVOX内部TTS API URL |
+| `VOICEVOX_TTS_API_TOKEN` | 読み上げ時 | VOICEVOX側と共有するBearerトークン |
+| `VOICEVOX_SPEAKER_ID` | いいえ | 話者ID。既定値は `46` |
+| `VOICEVOX_SPEED` | いいえ | 読み上げ速度。既定値は `1.0` |
 
 `MINECRAFT_DATA_VOLUME` はBotの動作設定ではなく、コンテナ起動前に外部ボリュームを
 解決するDocker Compose側のインフラ設定です。Coolifyの変数一覧に表示されるよう、
@@ -153,6 +185,7 @@ Minecraftアプリとmc-botアプリをデプロイする前に、Dockerホス�
 
 ```sh
 docker network create minecraft-control
+docker network create voicevox-discord-tts
 ```
 
 両アプリを同じネットワークへ接続します。RCONのTCP/25575はホストへ公開しません。
