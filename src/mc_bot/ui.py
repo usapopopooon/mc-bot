@@ -29,7 +29,10 @@ def access_panel_embed(approval_mode: str) -> discord.Embed:
 def admin_panel_embed() -> discord.Embed:
     return discord.Embed(
         title="🛠 Minecraft管理メニュー",
-        description="代理登録、既存whitelistの紐付け、登録状況の確認ができます。",
+        description=(
+            "代理登録、既存whitelistの紐付け、登録状況の確認に加え、\n"
+            "稼働中のMinecraftサーバーをリアルタイムで操作できます。"
+        ),
         color=discord.Color.blurple(),
     )
 
@@ -108,6 +111,16 @@ class AdminPanelView(discord.ui.View):
     async def summary(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if await self.bot.validate_panel_interaction(interaction, admin=True):
             await self.bot.show_admin_summary(interaction)
+
+    @discord.ui.button(
+        label="サーバー操作",
+        emoji="🎮",
+        style=discord.ButtonStyle.danger,
+        custom_id="mc-admin:server-control",
+    )
+    async def server_control(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if await self.bot.validate_panel_interaction(interaction, admin=True):
+            await self.bot.show_server_control(interaction)
 
 
 class RegistrationModal(discord.ui.Modal):
@@ -362,3 +375,202 @@ class ApprovalView(discord.ui.View):
         self.account_id = account_id
         self.add_item(ApprovalButton(account_id, approved=True))
         self.add_item(ApprovalButton(account_id, approved=False))
+
+
+class AdminOnlyView(discord.ui.View):
+    def __init__(self, bot: MinecraftDiscordBot, owner_id: int, *, timeout: float = 180) -> None:
+        super().__init__(timeout=timeout)
+        self.bot = bot
+        self.owner_id = owner_id
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message(
+                "この管理画面は操作できません。", ephemeral=True
+            )
+            return False
+        return await self.bot.validate_runtime_admin(interaction)
+
+
+class ServerControlView(AdminOnlyView):
+    @discord.ui.button(label="最新状態", emoji="🔄", style=discord.ButtonStyle.primary)
+    async def refresh(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await self.bot.refresh_server_control(interaction, self)
+
+    @discord.ui.button(label="プレイヤー", emoji="👥", style=discord.ButtonStyle.secondary)
+    async def players(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await self.bot.show_online_players(interaction)
+
+    @discord.ui.button(label="キック", emoji="🚪", style=discord.ButtonStyle.danger)
+    async def kick(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await self.bot.show_kick_player_select(interaction)
+
+    @discord.ui.button(label="サーバー告知", emoji="📢", style=discord.ButtonStyle.secondary)
+    async def announce(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await interaction.response.send_modal(AnnouncementModal(self.bot))
+
+    @discord.ui.button(label="Whitelist", emoji="🛡️", style=discord.ButtonStyle.secondary)
+    async def whitelist(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await self.bot.show_whitelist_controls(interaction)
+
+    @discord.ui.button(label="天候・時刻", emoji="🌤️", style=discord.ButtonStyle.secondary, row=1)
+    async def world(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await interaction.response.send_message(
+            "変更する天候または時刻を選択してください。",
+            view=WorldControlView(self.bot, interaction.user.id),
+            ephemeral=True,
+        )
+
+    @discord.ui.button(
+        label="パフォーマンス", emoji="📊", style=discord.ButtonStyle.secondary, row=1
+    )
+    async def performance(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await self.bot.show_performance(interaction)
+
+
+class KickPlayerSelect(discord.ui.Select):
+    def __init__(self, bot: MinecraftDiscordBot, players: list[str]) -> None:
+        super().__init__(
+            placeholder="キックするプレイヤーを選択",
+            min_values=1,
+            max_values=1,
+            options=[discord.SelectOption(label=player, value=player) for player in players],
+        )
+        self.bot = bot
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        await interaction.response.send_modal(KickReasonModal(self.bot, self.values[0]))
+
+
+class KickPlayerSelectView(AdminOnlyView):
+    def __init__(self, bot: MinecraftDiscordBot, owner_id: int, players: list[str]) -> None:
+        super().__init__(bot, owner_id)
+        self.add_item(KickPlayerSelect(bot, players))
+
+
+class KickReasonModal(discord.ui.Modal, title="プレイヤーをキック"):
+    reason = discord.ui.TextInput(
+        label="理由",
+        default="管理者によりキックされました",
+        min_length=1,
+        max_length=200,
+    )
+
+    def __init__(self, bot: MinecraftDiscordBot, player_name: str) -> None:
+        super().__init__()
+        self.bot = bot
+        self.player_name = player_name
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        await interaction.response.send_message(
+            f"**{discord.utils.escape_markdown(self.player_name)}** をキックしますか?\n"
+            f"理由: {discord.utils.escape_markdown(str(self.reason))}",
+            view=ConfirmKickView(
+                self.bot,
+                interaction.user.id,
+                self.player_name,
+                str(self.reason),
+            ),
+            ephemeral=True,
+        )
+
+
+class ConfirmKickView(AdminOnlyView):
+    def __init__(
+        self,
+        bot: MinecraftDiscordBot,
+        owner_id: int,
+        player_name: str,
+        reason: str,
+    ) -> None:
+        super().__init__(bot, owner_id, timeout=120)
+        self.player_name = player_name
+        self.reason = reason
+
+    @discord.ui.button(label="キックする", style=discord.ButtonStyle.danger)
+    async def confirm(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await self.bot.kick_online_player(interaction, self.player_name, self.reason)
+
+    @discord.ui.button(label="キャンセル", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await interaction.response.edit_message(content="キックをキャンセルしました。", view=None)
+
+
+class AnnouncementModal(discord.ui.Modal, title="Minecraftサーバーへ告知"):
+    message = discord.ui.TextInput(
+        label="告知内容",
+        placeholder="サーバー内の全プレイヤーへ表示します",
+        style=discord.TextStyle.paragraph,
+        min_length=1,
+        max_length=200,
+    )
+
+    def __init__(self, bot: MinecraftDiscordBot) -> None:
+        super().__init__()
+        self.bot = bot
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        await self.bot.announce_server(interaction, str(self.message))
+
+
+class WhitelistControlView(AdminOnlyView):
+    @discord.ui.button(label="15分停止", style=discord.ButtonStyle.danger)
+    async def pause_15(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await self._confirm_pause(interaction, 15)
+
+    @discord.ui.button(label="30分停止", style=discord.ButtonStyle.danger)
+    async def pause_30(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await self._confirm_pause(interaction, 30)
+
+    @discord.ui.button(label="1時間停止", style=discord.ButtonStyle.danger)
+    async def pause_60(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await self._confirm_pause(interaction, 60)
+
+    @discord.ui.button(label="今すぐ再開", style=discord.ButtonStyle.success)
+    async def resume(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await self.bot.resume_whitelist(interaction)
+
+    async def _confirm_pause(self, interaction: discord.Interaction, minutes: int) -> None:
+        await interaction.response.send_message(
+            f"⚠️ Whitelistを{minutes}分間停止すると、未登録者も接続できます。\n本当に停止しますか?",
+            view=ConfirmWhitelistPauseView(self.bot, interaction.user.id, minutes),
+            ephemeral=True,
+        )
+
+
+class ConfirmWhitelistPauseView(AdminOnlyView):
+    def __init__(self, bot: MinecraftDiscordBot, owner_id: int, minutes: int) -> None:
+        super().__init__(bot, owner_id, timeout=120)
+        self.minutes = minutes
+
+    @discord.ui.button(label="Whitelistを停止", style=discord.ButtonStyle.danger)
+    async def confirm(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await self.bot.pause_whitelist(interaction, self.minutes)
+
+    @discord.ui.button(label="キャンセル", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await interaction.response.edit_message(
+            content="Whitelistの停止をキャンセルしました。", view=None
+        )
+
+
+class WorldControlView(AdminOnlyView):
+    @discord.ui.button(label="晴れ", emoji="☀️", style=discord.ButtonStyle.secondary)
+    async def clear(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await self.bot.change_world(interaction, "weather clear", "天候を晴れ")
+
+    @discord.ui.button(label="雨", emoji="🌧️", style=discord.ButtonStyle.secondary)
+    async def rain(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await self.bot.change_world(interaction, "weather rain", "天候を雨")
+
+    @discord.ui.button(label="雷雨", emoji="⛈️", style=discord.ButtonStyle.secondary)
+    async def thunder(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await self.bot.change_world(interaction, "weather thunder", "天候を雷雨")
+
+    @discord.ui.button(label="朝", emoji="🌅", style=discord.ButtonStyle.secondary, row=1)
+    async def day(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await self.bot.change_world(interaction, "time set day", "時刻を朝")
+
+    @discord.ui.button(label="夜", emoji="🌙", style=discord.ButtonStyle.secondary, row=1)
+    async def night(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await self.bot.change_world(interaction, "time set night", "時刻を夜")

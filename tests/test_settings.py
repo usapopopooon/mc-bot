@@ -30,6 +30,7 @@ def test_saves_and_loads_settings(tmp_path) -> None:
         "approval_channel_id": None,
         "player_count_channel_id": None,
         "player_count_enabled": False,
+        "whitelist_resume_at": None,
     }
 
 
@@ -51,6 +52,8 @@ def test_ignores_legacy_server_label(tmp_path) -> None:
         '{"channel_id": -1}',
         '{"player_count_channel_id": true}',
         '{"player_count_enabled": "yes"}',
+        '{"whitelist_resume_at": -1}',
+        '{"whitelist_resume_at": true}',
     ],
 )
 def test_rejects_invalid_settings(tmp_path, payload: str) -> None:

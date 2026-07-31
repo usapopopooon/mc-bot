@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -18,6 +19,7 @@ class RuntimeSettings:
     approval_channel_id: int | None = None
     player_count_channel_id: int | None = None
     player_count_enabled: bool = False
+    whitelist_resume_at: float | None = None
 
 
 class SettingsStore:
@@ -59,10 +61,21 @@ class SettingsStore:
         player_count_enabled = data.get("player_count_enabled", False)
         if not isinstance(player_count_enabled, bool):
             raise ValueError("player_count_enabled must be a boolean")
+        whitelist_resume_at = data.get("whitelist_resume_at")
+        if whitelist_resume_at is not None and (
+            not isinstance(whitelist_resume_at, int | float)
+            or isinstance(whitelist_resume_at, bool)
+            or not math.isfinite(whitelist_resume_at)
+            or whitelist_resume_at <= 0
+        ):
+            raise ValueError("whitelist_resume_at must be a positive number or null")
         return RuntimeSettings(
             **identifiers,
             approval_mode=approval_mode,
             player_count_enabled=player_count_enabled,
+            whitelist_resume_at=(
+                float(whitelist_resume_at) if whitelist_resume_at is not None else None
+            ),
         )
 
     def save(self, settings: RuntimeSettings) -> None:

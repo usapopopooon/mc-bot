@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import time
 from dataclasses import replace
 from pathlib import Path
 
@@ -20,6 +21,12 @@ from mc_bot.player_count import (
     player_count_status,
 )
 from mc_bot.rcon import RconClient, RconError
+from mc_bot.server_admin import (
+    announcement_command,
+    clean_rcon_output,
+    kick_command,
+    parse_online_players,
+)
 from mc_bot.settings import RuntimeSettings, SettingsStore
 from mc_bot.tailer import LogTailer
 from mc_bot.translations import AdvancementTranslator
@@ -29,6 +36,9 @@ from mc_bot.ui import (
     AdminPanelView,
     ApprovalView,
     ConfirmRegistrationView,
+    KickPlayerSelectView,
+    ServerControlView,
+    WhitelistControlView,
     access_panel_embed,
     admin_panel_embed,
 )
@@ -130,6 +140,7 @@ class MinecraftDiscordBot(discord.Client):
             self._health_task = asyncio.create_task(self._health_loop(), name="health-monitor")
 
         await self._import_whitelist()
+        await self._refresh_admin_panel()
         channel_id = self._settings.channel_id
         if channel_id is None:
             self._channel = None
@@ -758,6 +769,259 @@ class MinecraftDiscordBot(discord.Client):
             ephemeral=True,
         )
 
+    async def validate_runtime_admin(self, interaction: discord.Interaction) -> bool:
+        return await self._require_server_manager(interaction)
+
+    async def show_server_control(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer(ephemeral=True)
+        try:
+            embed = await self._server_control_embed()
+        except (OSError, RconError, RuntimeError, ValueError) as error:
+            await interaction.followup.send(
+                f"Minecraftサーバーの状態を取得できませんでした: {error}",
+                ephemeral=True,
+            )
+            return
+        await interaction.followup.send(
+            embed=embed,
+            view=ServerControlView(self, interaction.user.id),
+            ephemeral=True,
+        )
+
+    async def refresh_server_control(
+        self,
+        interaction: discord.Interaction,
+        view: ServerControlView,
+    ) -> None:
+        await interaction.response.defer()
+        try:
+            embed = await self._server_control_embed()
+        except (OSError, RconError, RuntimeError, ValueError) as error:
+            await interaction.followup.send(f"更新できませんでした: {error}", ephemeral=True)
+            return
+        await interaction.edit_original_response(embed=embed, view=view)
+
+    async def show_online_players(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer(ephemeral=True)
+        try:
+            players = await self._online_players()
+        except (OSError, RconError, RuntimeError, ValueError) as error:
+            await interaction.followup.send(f"取得できませんでした: {error}", ephemeral=True)
+            return
+        description = (
+            "オンラインプレイヤーはいません。"
+            if not players
+            else "\n".join(f"・**{discord.utils.escape_markdown(name)}**" for name in players)
+        )
+        await interaction.followup.send(
+            embed=discord.Embed(
+                title=f"👥 オンライン {len(players)}人",
+                description=description,
+                color=discord.Color.green() if players else discord.Color.light_grey(),
+            ),
+            ephemeral=True,
+        )
+
+    async def show_kick_player_select(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer(ephemeral=True)
+        try:
+            players = await self._online_players()
+        except (OSError, RconError, RuntimeError, ValueError) as error:
+            await interaction.followup.send(f"取得できませんでした: {error}", ephemeral=True)
+            return
+        if not players:
+            await interaction.followup.send("オンラインプレイヤーはいません。", ephemeral=True)
+            return
+        await interaction.followup.send(
+            "キックするプレイヤーを選択してください。",
+            view=KickPlayerSelectView(self, interaction.user.id, players[:25]),
+            ephemeral=True,
+        )
+
+    async def kick_online_player(
+        self,
+        interaction: discord.Interaction,
+        player_name: str,
+        reason: str,
+    ) -> None:
+        await interaction.response.defer()
+        try:
+            players = await self._online_players()
+            if player_name not in players:
+                raise ValueError("そのプレイヤーはすでにオフラインです")
+            await self._execute_rcon(kick_command(player_name, reason))
+        except (OSError, RconError, RuntimeError, ValueError) as error:
+            await interaction.edit_original_response(
+                content=f"キックできませんでした: {error}", view=None
+            )
+            return
+        self._audit_server_action(interaction, f"kick player={player_name}")
+        await interaction.edit_original_response(
+            content=f"✅ **{discord.utils.escape_markdown(player_name)}** をキックしました。",
+            view=None,
+        )
+
+    async def announce_server(self, interaction: discord.Interaction, message: str) -> None:
+        if not await self.validate_runtime_admin(interaction):
+            return
+        await interaction.response.defer(ephemeral=True)
+        try:
+            await self._execute_rcon(announcement_command(message))
+        except (OSError, RconError, RuntimeError, ValueError) as error:
+            await interaction.followup.send(f"告知できませんでした: {error}", ephemeral=True)
+            return
+        self._audit_server_action(interaction, "announcement")
+        await interaction.followup.send("✅ サーバー内へ告知しました。", ephemeral=True)
+
+    async def show_whitelist_controls(self, interaction: discord.Interaction) -> None:
+        resume_at = self._settings.whitelist_resume_at
+        state = f"一時停止中・<t:{int(resume_at)}:R>に自動再開" if resume_at is not None else "有効"
+        await interaction.response.send_message(
+            f"Whitelistの現在状態: **{state}**\n\n停止中はwhitelist未登録者も接続できます。",
+            view=WhitelistControlView(self, interaction.user.id),
+            ephemeral=True,
+        )
+
+    async def pause_whitelist(self, interaction: discord.Interaction, minutes: int) -> None:
+        if minutes not in {15, 30, 60}:
+            await interaction.response.send_message("無効な停止時間です。", ephemeral=True)
+            return
+        await interaction.response.defer()
+        resume_at = time.time() + minutes * 60
+        previous_resume_at = self._settings.whitelist_resume_at
+        try:
+            await self._execute_rcon("whitelist off")
+        except (OSError, RconError, RuntimeError) as error:
+            await interaction.edit_original_response(
+                content=f"停止できませんでした: {error}", view=None
+            )
+            return
+        try:
+            await self._save_settings(replace(self._settings, whitelist_resume_at=resume_at))
+        except OSError as error:
+            if previous_resume_at is None:
+                try:
+                    await self._execute_rcon("whitelist on")
+                except OSError, RconError, RuntimeError:
+                    LOGGER.exception("Whitelist pause could not be persisted and rollback failed")
+            await interaction.edit_original_response(
+                content=f"停止予定を保存できませんでした: {error}", view=None
+            )
+            return
+        self._audit_server_action(interaction, f"whitelist pause minutes={minutes}")
+        await interaction.edit_original_response(
+            content=(
+                f"⚠️ Whitelistを{minutes}分間停止しました。<t:{int(resume_at)}:R>に自動再開します。"
+            ),
+            view=None,
+        )
+
+    async def resume_whitelist(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer()
+        try:
+            await self._execute_rcon("whitelist on")
+            await self._save_settings(replace(self._settings, whitelist_resume_at=None))
+        except (OSError, RconError, RuntimeError) as error:
+            await interaction.edit_original_response(
+                content=f"再開できませんでした: {error}", view=None
+            )
+            return
+        self._audit_server_action(interaction, "whitelist resume")
+        await interaction.edit_original_response(content="✅ Whitelistを再開しました。", view=None)
+
+    async def change_world(
+        self,
+        interaction: discord.Interaction,
+        command: str,
+        description: str,
+    ) -> None:
+        allowed = {
+            "weather clear": "天候を晴れ",
+            "weather rain": "天候を雨",
+            "weather thunder": "天候を雷雨",
+            "time set day": "時刻を朝",
+            "time set night": "時刻を夜",
+        }
+        if allowed.get(command) != description:
+            await interaction.response.send_message("許可されていない操作です。", ephemeral=True)
+            return
+        await interaction.response.defer()
+        try:
+            await self._execute_rcon(command)
+        except (OSError, RconError, RuntimeError) as error:
+            await interaction.edit_original_response(
+                content=f"変更できませんでした: {error}", view=None
+            )
+            return
+        self._audit_server_action(interaction, command)
+        await interaction.edit_original_response(
+            content=f"✅ {description}に変更しました。", view=None
+        )
+
+    async def show_performance(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer(ephemeral=True)
+        try:
+            response = await self._execute_rcon("spark health --memory")
+        except (OSError, RconError, RuntimeError) as error:
+            await interaction.followup.send(f"取得できませんでした: {error}", ephemeral=True)
+            return
+        output = clean_rcon_output(response, limit=3800).replace("```", "'''")
+        await interaction.followup.send(
+            embed=discord.Embed(
+                title="📊 Minecraftパフォーマンス",
+                description=f"```text\n{output or '応答がありませんでした'}\n```",
+                color=discord.Color.blurple(),
+            ),
+            ephemeral=True,
+        )
+
+    async def _server_control_embed(self) -> discord.Embed:
+        players = await self._online_players()
+        resume_at = self._settings.whitelist_resume_at
+        whitelist = f"一時停止中・<t:{int(resume_at)}:R>に再開" if resume_at is not None else "有効"
+        names = (
+            "、".join(discord.utils.escape_markdown(name) for name in players)
+            if players
+            else "なし"
+        )
+        embed = discord.Embed(
+            title="🎮 Minecraft サーバー操作",
+            description="🟢 サーバー稼働中",
+            color=discord.Color.green(),
+        )
+        embed.add_field(name="オンライン", value=f"**{len(players)}人**", inline=True)
+        embed.add_field(name="Whitelist", value=whitelist, inline=True)
+        embed.add_field(name="プレイヤー", value=names[:1024], inline=False)
+        embed.set_footer(text="表示内容はボタンを押した時点の状態です")
+        return embed
+
+    async def _online_players(self) -> list[str]:
+        return parse_online_players(await self._execute_rcon("list"))
+
+    async def _execute_rcon(self, command: str) -> str:
+        return await asyncio.to_thread(self._require_rcon().execute, command)
+
+    async def _resume_whitelist_if_due(self) -> None:
+        resume_at = self._settings.whitelist_resume_at
+        if resume_at is None or time.time() < resume_at:
+            return
+        try:
+            await self._execute_rcon("whitelist on")
+            await self._save_settings(replace(self._settings, whitelist_resume_at=None))
+        except (OSError, RconError, RuntimeError) as error:
+            LOGGER.warning("Could not automatically resume Minecraft whitelist: %s", error)
+            return
+        LOGGER.info("Minecraft whitelist automatically resumed")
+
+    @staticmethod
+    def _audit_server_action(interaction: discord.Interaction, action: str) -> None:
+        LOGGER.info(
+            "Minecraft admin action user_id=%d guild_id=%s action=%s",
+            interaction.user.id,
+            interaction.guild_id,
+            action,
+        )
+
     async def _post_approval(self, account: MinecraftAccount, target: discord.Member) -> None:
         channel_id = self._settings.approval_channel_id
         if channel_id is None:
@@ -880,6 +1144,18 @@ class MinecraftDiscordBot(discord.Client):
         except discord.DiscordException as error:
             LOGGER.warning("Could not refresh access panel: %s", error)
 
+    async def _refresh_admin_panel(self) -> None:
+        channel_id = self._settings.admin_panel_channel_id
+        message_id = self._settings.admin_panel_message_id
+        if channel_id is None or message_id is None:
+            return
+        try:
+            channel = await self._resolve_and_validate_channel(channel_id, require_embeds=True)
+            message = await channel.fetch_message(message_id)
+            await message.edit(embed=admin_panel_embed(), view=AdminPanelView(self))
+        except (RuntimeError, discord.DiscordException) as error:
+            LOGGER.warning("Could not refresh admin panel: %s", error)
+
     async def _disable_old_panel(self, channel_id: int | None, message_id: int | None) -> None:
         if channel_id is None or message_id is None:
             return
@@ -1000,6 +1276,7 @@ class MinecraftDiscordBot(discord.Client):
                 self._health_path.touch()
             else:
                 self._remove_health_file()
+            await self._resume_whitelist_if_due()
             self._sync_ticks += 1
             if self._sync_ticks >= 6:
                 self._sync_ticks = 0
