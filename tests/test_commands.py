@@ -96,6 +96,50 @@ def test_vc_command_disconnects_when_bot_is_connected() -> None:
     asyncio.run(exercise())
 
 
+def test_empty_voice_channel_auto_disconnects_ignoring_bots() -> None:
+    async def exercise() -> None:
+        bot = MinecraftDiscordBot(Config(discord_token="secret"))
+        bot._settings = RuntimeSettings(voice_channel_id=456, voice_enabled=True)
+        bot._save_settings = AsyncMock()  # type: ignore[method-assign]
+        voice_client = Mock()
+        voice_client.is_connected.return_value = True
+        voice_client.disconnect = AsyncMock()
+        voice_client.channel.id = 456
+        voice_client.channel.members = [Mock(bot=True), Mock(bot=True)]
+        member = Mock(spec=discord.Member)
+        member.guild.voice_client = voice_client
+
+        await bot.on_voice_state_update(member, Mock(), Mock())
+
+        saved = bot._save_settings.await_args.args[0]
+        assert saved.voice_enabled is False
+        assert saved.voice_channel_id is None
+        voice_client.disconnect.assert_awaited_once_with(force=True)
+
+    asyncio.run(exercise())
+
+
+def test_voice_channel_stays_connected_while_a_human_remains() -> None:
+    async def exercise() -> None:
+        bot = MinecraftDiscordBot(Config(discord_token="secret"))
+        bot._settings = RuntimeSettings(voice_channel_id=456, voice_enabled=True)
+        bot._save_settings = AsyncMock()  # type: ignore[method-assign]
+        voice_client = Mock()
+        voice_client.is_connected.return_value = True
+        voice_client.disconnect = AsyncMock()
+        voice_client.channel.id = 456
+        voice_client.channel.members = [Mock(bot=True), Mock(bot=False)]
+        member = Mock(spec=discord.Member)
+        member.guild.voice_client = voice_client
+
+        await bot.on_voice_state_update(member, Mock(), Mock())
+
+        bot._save_settings.assert_not_awaited()
+        voice_client.disconnect.assert_not_awaited()
+
+    asyncio.run(exercise())
+
+
 def test_voice_connection_posts_public_explanation_embed() -> None:
     async def exercise() -> None:
         bot = MinecraftDiscordBot(

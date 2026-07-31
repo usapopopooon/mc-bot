@@ -98,6 +98,7 @@ class MinecraftDiscordBot(discord.Client):
         self._player_count_name_task: asyncio.Task[None] | None = None
         self._player_count_update_lock = asyncio.Lock()
         self._whitelist_operation_lock = asyncio.Lock()
+        self._voice_disconnect_lock = asyncio.Lock()
         self._last_player_count_status: str | None = None
         self._channel: discord.TextChannel | None = None
         self._delivery_healthy = True
@@ -207,6 +208,40 @@ class MinecraftDiscordBot(discord.Client):
                     account.minecraft_name,
                     error,
                 )
+
+    async def on_voice_state_update(
+        self,
+        member: discord.Member,
+        _before: discord.VoiceState,
+        _after: discord.VoiceState,
+    ) -> None:
+        if not self._settings.voice_enabled:
+            return
+        async with self._voice_disconnect_lock:
+            voice_client = member.guild.voice_client
+            if voice_client is None or not voice_client.is_connected():
+                return
+            channel = voice_client.channel
+            if channel is None or channel.id != self._settings.voice_channel_id:
+                return
+            if any(not channel_member.bot for channel_member in channel.members):
+                return
+            try:
+                await self._save_settings(
+                    replace(
+                        self._settings,
+                        voice_channel_id=None,
+                        voice_enabled=False,
+                    )
+                )
+                await voice_client.disconnect(force=True)
+            except (OSError, discord.DiscordException) as error:
+                LOGGER.warning("Could not auto-disconnect empty Minecraft voice channel: %s", error)
+                return
+            LOGGER.info(
+                "Minecraft voice disconnected automatically from empty channel_id=%d",
+                channel.id,
+            )
 
     async def close(self) -> None:
         self._closing = True
