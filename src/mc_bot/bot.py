@@ -139,7 +139,7 @@ class MinecraftDiscordBot(discord.Client):
         self.tree.add_command(group)
         self.tree.command(
             name="vc",
-            description="Minecraft読み上げを現在のVCで開始します",
+            description="Minecraft読み上げのVC接続・切断を切り替えます",
         )(self._voice_command)
 
     async def setup_hook(self) -> None:
@@ -906,6 +906,11 @@ class MinecraftDiscordBot(discord.Client):
 
     @app_commands.guild_only()
     async def _voice_command(self, interaction: discord.Interaction) -> None:
+        guild = interaction.guild
+        voice_client = guild.voice_client if guild is not None else None
+        if voice_client is not None and voice_client.is_connected():
+            await self.disconnect_voice(interaction)
+            return
         member = interaction.user
         voice_state = member.voice if isinstance(member, discord.Member) else None
         channel = voice_state.channel if voice_state is not None else None

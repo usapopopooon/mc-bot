@@ -45,6 +45,7 @@ def test_vc_command_connects_to_callers_current_voice_channel() -> None:
         bot = MinecraftDiscordBot(Config(discord_token="secret"))
         bot.configure_voice_channel = AsyncMock()  # type: ignore[method-assign]
         interaction = Mock(spec=discord.Interaction)
+        interaction.guild.voice_client = None
         interaction.user = Mock(spec=discord.Member)
         interaction.user.voice = Mock()
         interaction.user.voice.channel = Mock(spec=discord.VoiceChannel)
@@ -63,6 +64,7 @@ def test_vc_command_asks_caller_to_join_voice_first() -> None:
         bot = MinecraftDiscordBot(Config(discord_token="secret"))
         bot.configure_voice_channel = AsyncMock()  # type: ignore[method-assign]
         interaction = Mock(spec=discord.Interaction)
+        interaction.guild.voice_client = None
         interaction.user = Mock(spec=discord.Member)
         interaction.user.voice = None
         interaction.response.send_message = AsyncMock()
@@ -74,6 +76,22 @@ def test_vc_command_asks_caller_to_join_voice_first() -> None:
             "先に接続させたいVCへ参加してから `/vc` を実行してください。",
             ephemeral=True,
         )
+
+    asyncio.run(exercise())
+
+
+def test_vc_command_disconnects_when_bot_is_connected() -> None:
+    async def exercise() -> None:
+        bot = MinecraftDiscordBot(Config(discord_token="secret"))
+        bot.configure_voice_channel = AsyncMock()  # type: ignore[method-assign]
+        bot.disconnect_voice = AsyncMock()  # type: ignore[method-assign]
+        interaction = Mock(spec=discord.Interaction)
+        interaction.guild.voice_client.is_connected.return_value = True
+
+        await bot._voice_command(interaction)
+
+        bot.disconnect_voice.assert_awaited_once_with(interaction)
+        bot.configure_voice_channel.assert_not_awaited()
 
     asyncio.run(exercise())
 
