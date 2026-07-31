@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, Mock
 import discord
 from discord import app_commands
 
+from mc_bot.accounts import MinecraftAccount
 from mc_bot.bot import MinecraftDiscordBot
 from mc_bot.config import Config
 from mc_bot.settings import RuntimeSettings
@@ -73,6 +74,77 @@ def test_vc_command_asks_caller_to_join_voice_first() -> None:
             "先に接続させたいVCへ参加してから `/vc` を実行してください。",
             ephemeral=True,
         )
+
+    asyncio.run(exercise())
+
+
+def test_voice_connection_posts_public_explanation_embed() -> None:
+    async def exercise() -> None:
+        bot = MinecraftDiscordBot(
+            Config(
+                discord_token="secret",
+                voicevox_tts_api_url="http://tts:8080",
+                voicevox_tts_api_token="tts-secret",
+            )
+        )
+        bot._connect_voice_channel = AsyncMock(return_value=True)  # type: ignore[method-assign]
+        bot._save_settings = AsyncMock()  # type: ignore[method-assign]
+        bot._voice_player.enqueue = Mock(return_value=True)  # type: ignore[method-assign]
+        channel = Mock(spec=discord.VoiceChannel)
+        channel.id = 456
+        channel.mention = "<#456>"
+        channel.guild.id = 123
+        interaction = Mock(spec=discord.Interaction)
+        interaction.user.id = 789
+        interaction.guild_id = 123
+        interaction.response.defer = AsyncMock()
+        interaction.edit_original_response = AsyncMock()
+        interaction.followup.send = AsyncMock()
+
+        await bot.configure_voice_channel(interaction, channel)
+
+        interaction.response.defer.assert_awaited_once_with(ephemeral=True)
+        followup = interaction.followup.send.await_args.kwargs
+        assert followup["ephemeral"] is False
+        mentions = followup["allowed_mentions"]
+        assert mentions.everyone is False
+        assert mentions.users is False
+        assert mentions.roles is False
+        assert followup["embed"].title == "🔊 Minecraft読み上げを開始しました"
+        assert "チャット・参加・退出・進捗" in followup["embed"].description
+        assert "小夜/SAYO" in followup["embed"].description
+
+    asyncio.run(exercise())
+
+
+def test_discord_identity_uses_server_display_name_for_speech() -> None:
+    async def exercise() -> None:
+        bot = MinecraftDiscordBot(Config(discord_token="secret"))
+        bot._settings = RuntimeSettings(guild_id=123)
+        member = Mock(spec=discord.Member)
+        member.id = 789
+        member.display_name = "サーバー表示名"
+        guild = Mock(spec=discord.Guild)
+        guild.get_member.return_value = member
+        bot.get_guild = Mock(return_value=guild)  # type: ignore[method-assign]
+        bot._accounts.update_discord_username = Mock()  # type: ignore[method-assign]
+        account = MinecraftAccount(
+            id=1,
+            edition="java",
+            minecraft_name="Steve",
+            server_player_name="Steve",
+            player_uuid=None,
+            discord_user_id=789,
+            discord_username="old_username",
+            managed=True,
+            source="self",
+            status="active",
+            created_by=789,
+            approval_message_id=None,
+        )
+
+        assert await bot._discord_identity(account) == (789, "サーバー表示名")
+        bot._accounts.update_discord_username.assert_called_once_with(789, "サーバー表示名")
 
     asyncio.run(exercise())
 

@@ -585,7 +585,7 @@ class MinecraftDiscordBot(discord.Client):
                 minecraft_name=minecraft_name,
                 server_player_name=server_name,
                 discord_user_id=target.id,
-                discord_username=target.name,
+                discord_username=target.display_name,
                 source=source,
                 status=status,
                 created_by=interaction.user.id,
@@ -679,7 +679,7 @@ class MinecraftDiscordBot(discord.Client):
                 self._accounts.link_existing,
                 account_id,
                 discord_user_id=target.id,
-                discord_username=target.name,
+                discord_username=target.display_name,
                 managed=managed,
                 created_by=interaction.user.id,
             )
@@ -966,6 +966,29 @@ class MinecraftDiscordBot(discord.Client):
             view=None,
             allowed_mentions=discord.AllowedMentions.none(),
         )
+        try:
+            await interaction.followup.send(
+                embed=discord.Embed(
+                    title="🔊 Minecraft読み上げを開始しました",
+                    description=(
+                        f"{channel.mention} で、Minecraftサーバーのチャット・参加・退出・"
+                        "進捗を読み上げます。\n話者は **小夜/SAYO** です。"
+                    ),
+                    color=discord.Color.green(),
+                ),
+                ephemeral=False,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+        except discord.DiscordException as error:
+            LOGGER.warning("Could not post Minecraft voice connection notice: %s", error)
+            await interaction.edit_original_response(
+                content=(
+                    f"✅ {channel.mention} でMinecraft読み上げを開始しました。\n"
+                    "⚠️ 接続案内をこのチャンネルへ投稿できませんでした。"
+                ),
+                view=None,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
 
     async def disconnect_voice(self, interaction: discord.Interaction) -> None:
         await interaction.response.defer()
@@ -1338,7 +1361,7 @@ class MinecraftDiscordBot(discord.Client):
         state: str,
         target: discord.Member | None = None,
     ) -> discord.Embed:
-        username = target.name if target is not None else account.discord_username or "不明"
+        username = target.display_name if target is not None else account.discord_username or "不明"
         user_id = target.id if target is not None else account.discord_user_id
         edition = "Java版" if account.edition == "java" else "Bedrock版"
         color = (
@@ -1594,9 +1617,13 @@ class MinecraftDiscordBot(discord.Client):
             return None, None
         guild = self.get_guild(self._settings.guild_id or 0)
         member = guild.get_member(account.discord_user_id) if guild is not None else None
-        if member is not None and member.name != account.discord_username:
-            await asyncio.to_thread(self._accounts.update_discord_username, member.id, member.name)
-        username = member.name if member is not None else account.discord_username
+        if member is not None and member.display_name != account.discord_username:
+            await asyncio.to_thread(
+                self._accounts.update_discord_username,
+                member.id,
+                member.display_name,
+            )
+        username = member.display_name if member is not None else account.discord_username
         return account.discord_user_id, username
 
     async def _send(self, embed: discord.Embed) -> None:

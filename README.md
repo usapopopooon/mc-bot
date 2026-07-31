@@ -128,10 +128,12 @@ BotトークンとVOICEVOX内部TTS APIトークンは秘密情報として扱�
 
 ## Minecraft専用VC読み上げ
 
-管理パネルの「Minecraft読み上げ」から接続先VCを選択すると、mc-bot自身がVCへ接続し、
+VCへ参加して `/vc` を実行するか、管理パネルの「Minecraft読み上げ」から接続先VCを
+選択すると、mc-bot自身がVCへ接続し、接続内容を実行チャンネルへEmbedで案内してから、
 Minecraftログを構造化したままVOICEVOX内部TTS APIへ送信します。Discordへ投稿したEmbedを
 読み直さないため、Markdownやメンション表現に依存しません。読み上げは上限付きキューで
-順番を維持し、API障害時もMinecraftログのDiscord転送を止めません。
+順番を維持し、API障害時もMinecraftログのDiscord転送を止めません。Discord連携済みの
+プレイヤー名は、サーバー内の表示名（ニックネーム優先）で読み上げます。
 
 VOICEVOX Discord側では内部APIを有効化し、両アプリで同じトークンを設定します。
 
