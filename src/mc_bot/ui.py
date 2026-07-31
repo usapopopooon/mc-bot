@@ -440,7 +440,7 @@ class VoiceControlView(AdminOnlyView):
         super().__init__(bot, owner_id)
         self.add_item(VoiceChannelSelect())
 
-    @discord.ui.button(label="テスト読み上げ", emoji="🔈", style=discord.ButtonStyle.primary, row=1)
+    @discord.ui.button(label="読み上げ確認", emoji="🔈", style=discord.ButtonStyle.primary, row=1)
     async def test(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         await self.bot.test_voice(interaction)
 

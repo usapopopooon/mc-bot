@@ -170,7 +170,7 @@ Minecraftサーバーの再起動は必要ありません。
 | `FLOODGATE_USERNAME_PREFIX` | いいえ | Bedrock名のprefix。既定値は `.` |
 | `VOICEVOX_TTS_API_URL` | 読み上げ時 | mc-botから到達可能なVOICEVOX内部TTS API URL |
 | `VOICEVOX_TTS_API_TOKEN` | 読み上げ時 | VOICEVOX側と共有するBearerトークン |
-| `VOICEVOX_SPEAKER_ID` | いいえ | 話者ID。既定値は `46` |
+| `VOICEVOX_SPEAKER_ID` | いいえ | 話者ID。既定値は小夜/SAYOの `46` |
 | `VOICEVOX_SPEED` | いいえ | 読み上げ速度。既定値は `1.0` |
 
 `MINECRAFT_DATA_VOLUME` はBotの動作設定ではなく、コンテナ起動前に外部ボリュームを

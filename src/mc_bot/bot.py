@@ -50,6 +50,8 @@ from mc_bot.voice import MinecraftVoicePlayer, event_speech_text
 
 LOGGER = logging.getLogger(__name__)
 _JAVA_NAME = re.compile(r"[A-Za-z0-9_]{3,16}")
+_VOICE_CONNECTED_SPEECH = "せつぞくしました"
+_VOICE_CHECK_SPEECH = "マインクラフトの読み上げは正常に動作しています"
 
 
 class MinecraftDiscordBot(discord.Client):
@@ -934,6 +936,7 @@ class MinecraftDiscordBot(discord.Client):
                     voice_enabled=True,
                 )
             )
+            self._voice_player.enqueue(channel.guild.id, _VOICE_CONNECTED_SPEECH)
         except (OSError, RuntimeError, discord.DiscordException) as error:
             await interaction.edit_original_response(
                 content=f"VCへ接続できませんでした: {error}",
@@ -984,14 +987,14 @@ class MinecraftDiscordBot(discord.Client):
                 ephemeral=True,
             )
             return
-        if not self._voice_player.enqueue(guild_id, "マインクラフト読み上げのテストです"):
+        if not self._voice_player.enqueue(guild_id, _VOICE_CHECK_SPEECH):
             await interaction.response.send_message(
                 "読み上げキューへ追加できませんでした。",
                 ephemeral=True,
             )
             return
         await interaction.response.send_message(
-            "テスト音声をキューへ追加しました。", ephemeral=True
+            "読み上げ確認音声をキューへ追加しました。", ephemeral=True
         )
 
     async def validate_runtime_admin(self, interaction: discord.Interaction) -> bool:
@@ -1605,7 +1608,7 @@ class MinecraftDiscordBot(discord.Client):
             raise RuntimeError("Botに「埋め込みリンク」権限が必要です")
         return channel
 
-    async def _connect_voice_channel(self, channel: discord.VoiceChannel) -> None:
+    async def _connect_voice_channel(self, channel: discord.VoiceChannel) -> bool:
         member = channel.guild.me
         if member is None:
             raise RuntimeError("BotがDiscordサーバーに参加していません")
@@ -1617,9 +1620,11 @@ class MinecraftDiscordBot(discord.Client):
             if voice_client is not None:
                 await voice_client.disconnect(force=True)
             await channel.connect(timeout=15, reconnect=True, self_deaf=True)
-            return
+            return True
         if voice_client.channel.id != channel.id:
             await voice_client.move_to(channel)
+            return True
+        return False
 
     async def _restore_voice_connection(self) -> None:
         channel_id = self._settings.voice_channel_id
@@ -1632,7 +1637,9 @@ class MinecraftDiscordBot(discord.Client):
             channel = self.get_channel(channel_id) or await self.fetch_channel(channel_id)
             if not isinstance(channel, discord.VoiceChannel):
                 raise RuntimeError("設定済みの読み上げ先がVCではありません")
-            await self._connect_voice_channel(channel)
+            connected = await self._connect_voice_channel(channel)
+            if connected:
+                self._voice_player.enqueue(channel.guild.id, _VOICE_CONNECTED_SPEECH)
         except (OSError, RuntimeError, discord.DiscordException) as error:
             LOGGER.warning("Could not restore Minecraft voice connection: %s", error)
 
