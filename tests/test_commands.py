@@ -33,6 +33,48 @@ def test_registers_manager_only_configuration_commands() -> None:
         "disable",
         "remove",
     }
+    voice = bot.tree.get_command("vc")
+    assert isinstance(voice, app_commands.Command)
+    assert voice.guild_only
+    assert voice.default_permissions is None
+
+
+def test_vc_command_connects_to_callers_current_voice_channel() -> None:
+    async def exercise() -> None:
+        bot = MinecraftDiscordBot(Config(discord_token="secret"))
+        bot.configure_voice_channel = AsyncMock()  # type: ignore[method-assign]
+        interaction = Mock(spec=discord.Interaction)
+        interaction.user = Mock(spec=discord.Member)
+        interaction.user.voice = Mock()
+        interaction.user.voice.channel = Mock(spec=discord.VoiceChannel)
+
+        await bot._voice_command(interaction)
+
+        bot.configure_voice_channel.assert_awaited_once_with(
+            interaction, interaction.user.voice.channel
+        )
+
+    asyncio.run(exercise())
+
+
+def test_vc_command_asks_caller_to_join_voice_first() -> None:
+    async def exercise() -> None:
+        bot = MinecraftDiscordBot(Config(discord_token="secret"))
+        bot.configure_voice_channel = AsyncMock()  # type: ignore[method-assign]
+        interaction = Mock(spec=discord.Interaction)
+        interaction.user = Mock(spec=discord.Member)
+        interaction.user.voice = None
+        interaction.response.send_message = AsyncMock()
+
+        await bot._voice_command(interaction)
+
+        bot.configure_voice_channel.assert_not_awaited()
+        interaction.response.send_message.assert_awaited_once_with(
+            "先に接続させたいVCへ参加してから `/vc` を実行してください。",
+            ephemeral=True,
+        )
+
+    asyncio.run(exercise())
 
 
 def test_admin_panel_exposes_server_controls() -> None:

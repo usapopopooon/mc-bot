@@ -137,6 +137,10 @@ class MinecraftDiscordBot(discord.Client):
             description="現在のBot設定と稼働状態を表示します",
         )(self._show_configuration)
         self.tree.add_command(group)
+        self.tree.command(
+            name="vc",
+            description="Minecraft読み上げを現在のVCで開始します",
+        )(self._voice_command)
 
     async def setup_hook(self) -> None:
         await asyncio.to_thread(self._accounts.initialize)
@@ -900,6 +904,19 @@ class MinecraftDiscordBot(discord.Client):
                 allowed_mentions=discord.AllowedMentions.none(),
             )
 
+    @app_commands.guild_only()
+    async def _voice_command(self, interaction: discord.Interaction) -> None:
+        member = interaction.user
+        voice_state = member.voice if isinstance(member, discord.Member) else None
+        channel = voice_state.channel if voice_state is not None else None
+        if isinstance(channel, discord.VoiceChannel):
+            await self.configure_voice_channel(interaction, channel)
+            return
+        await interaction.response.send_message(
+            "先に接続させたいVCへ参加してから `/vc` を実行してください。",
+            ephemeral=True,
+        )
+
     async def show_voice_controls(self, interaction: discord.Interaction) -> None:
         channel_id = self._settings.voice_channel_id
         status = "停止中"
@@ -919,7 +936,7 @@ class MinecraftDiscordBot(discord.Client):
         interaction: discord.Interaction,
         channel: discord.VoiceChannel,
     ) -> None:
-        await interaction.response.defer()
+        await interaction.response.defer(ephemeral=True)
         if not self._voice_player.configured:
             await interaction.edit_original_response(
                 content="VOICEVOX_TTS_API_TOKENが設定されていません。",
