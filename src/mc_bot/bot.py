@@ -26,6 +26,8 @@ from mc_bot.server_admin import (
     clean_rcon_output,
     kick_command,
     parse_online_players,
+    read_whitelist_enabled,
+    validate_rcon_response,
 )
 from mc_bot.settings import RuntimeSettings, SettingsStore
 from mc_bot.tailer import LogTailer
@@ -82,6 +84,7 @@ class MinecraftDiscordBot(discord.Client):
         self._player_count_task: asyncio.Task[None] | None = None
         self._player_count_name_task: asyncio.Task[None] | None = None
         self._player_count_update_lock = asyncio.Lock()
+        self._whitelist_operation_lock = asyncio.Lock()
         self._last_player_count_status: str | None = None
         self._channel: discord.TextChannel | None = None
         self._delivery_healthy = True
@@ -849,7 +852,7 @@ class MinecraftDiscordBot(discord.Client):
             players = await self._online_players()
             if player_name not in players:
                 raise ValueError("そのプレイヤーはすでにオフラインです")
-            await self._execute_rcon(kick_command(player_name, reason))
+            await self._execute_checked_rcon(kick_command(player_name, reason))
         except (OSError, RconError, RuntimeError, ValueError) as error:
             await interaction.edit_original_response(
                 content=f"キックできませんでした: {error}", view=None
@@ -866,7 +869,7 @@ class MinecraftDiscordBot(discord.Client):
             return
         await interaction.response.defer(ephemeral=True)
         try:
-            await self._execute_rcon(announcement_command(message))
+            await self._execute_checked_rcon(announcement_command(message))
         except (OSError, RconError, RuntimeError, ValueError) as error:
             await interaction.followup.send(f"告知できませんでした: {error}", ephemeral=True)
             return
@@ -874,8 +877,14 @@ class MinecraftDiscordBot(discord.Client):
         await interaction.followup.send("✅ サーバー内へ告知しました。", ephemeral=True)
 
     async def show_whitelist_controls(self, interaction: discord.Interaction) -> None:
-        resume_at = self._settings.whitelist_resume_at
-        state = f"一時停止中・<t:{int(resume_at)}:R>に自動再開" if resume_at is not None else "有効"
+        try:
+            state = await self._whitelist_state_text()
+        except ValueError as error:
+            await interaction.response.send_message(
+                f"Whitelistの実状態を取得できませんでした: {error}",
+                ephemeral=True,
+            )
+            return
         await interaction.response.send_message(
             f"Whitelistの現在状態: **{state}**\n\n停止中はwhitelist未登録者も接続できます。",
             view=WhitelistControlView(self, interaction.user.id),
@@ -887,25 +896,11 @@ class MinecraftDiscordBot(discord.Client):
             await interaction.response.send_message("無効な停止時間です。", ephemeral=True)
             return
         await interaction.response.defer()
-        resume_at = time.time() + minutes * 60
-        previous_resume_at = self._settings.whitelist_resume_at
         try:
-            await self._execute_rcon("whitelist off")
-        except (OSError, RconError, RuntimeError) as error:
+            resume_at = await self._pause_whitelist_for(minutes)
+        except (OSError, RconError, RuntimeError, ValueError) as error:
             await interaction.edit_original_response(
                 content=f"停止できませんでした: {error}", view=None
-            )
-            return
-        try:
-            await self._save_settings(replace(self._settings, whitelist_resume_at=resume_at))
-        except OSError as error:
-            if previous_resume_at is None:
-                try:
-                    await self._execute_rcon("whitelist on")
-                except OSError, RconError, RuntimeError:
-                    LOGGER.exception("Whitelist pause could not be persisted and rollback failed")
-            await interaction.edit_original_response(
-                content=f"停止予定を保存できませんでした: {error}", view=None
             )
             return
         self._audit_server_action(interaction, f"whitelist pause minutes={minutes}")
@@ -919,9 +914,8 @@ class MinecraftDiscordBot(discord.Client):
     async def resume_whitelist(self, interaction: discord.Interaction) -> None:
         await interaction.response.defer()
         try:
-            await self._execute_rcon("whitelist on")
-            await self._save_settings(replace(self._settings, whitelist_resume_at=None))
-        except (OSError, RconError, RuntimeError) as error:
+            await self._resume_whitelist_now()
+        except (OSError, RconError, RuntimeError, ValueError) as error:
             await interaction.edit_original_response(
                 content=f"再開できませんでした: {error}", view=None
             )
@@ -947,8 +941,8 @@ class MinecraftDiscordBot(discord.Client):
             return
         await interaction.response.defer()
         try:
-            await self._execute_rcon(command)
-        except (OSError, RconError, RuntimeError) as error:
+            await self._execute_checked_rcon(command)
+        except (OSError, RconError, RuntimeError, ValueError) as error:
             await interaction.edit_original_response(
                 content=f"変更できませんでした: {error}", view=None
             )
@@ -961,8 +955,8 @@ class MinecraftDiscordBot(discord.Client):
     async def show_performance(self, interaction: discord.Interaction) -> None:
         await interaction.response.defer(ephemeral=True)
         try:
-            response = await self._execute_rcon("spark health --memory")
-        except (OSError, RconError, RuntimeError) as error:
+            response = await self._execute_checked_rcon("spark health --memory")
+        except (OSError, RconError, RuntimeError, ValueError) as error:
             await interaction.followup.send(f"取得できませんでした: {error}", ephemeral=True)
             return
         output = clean_rcon_output(response, limit=3800).replace("```", "'''")
@@ -977,8 +971,7 @@ class MinecraftDiscordBot(discord.Client):
 
     async def _server_control_embed(self) -> discord.Embed:
         players = await self._online_players()
-        resume_at = self._settings.whitelist_resume_at
-        whitelist = f"一時停止中・<t:{int(resume_at)}:R>に再開" if resume_at is not None else "有効"
+        whitelist = await self._whitelist_state_text()
         names = (
             "、".join(discord.utils.escape_markdown(name) for name in players)
             if players
@@ -1001,17 +994,80 @@ class MinecraftDiscordBot(discord.Client):
     async def _execute_rcon(self, command: str) -> str:
         return await asyncio.to_thread(self._require_rcon().execute, command)
 
-    async def _resume_whitelist_if_due(self) -> None:
-        resume_at = self._settings.whitelist_resume_at
-        if resume_at is None or time.time() < resume_at:
-            return
-        try:
-            await self._execute_rcon("whitelist on")
+    async def _execute_checked_rcon(self, command: str) -> str:
+        return validate_rcon_response(await self._execute_rcon(command))
+
+    async def _read_whitelist_enabled(self) -> bool:
+        return await asyncio.to_thread(
+            read_whitelist_enabled,
+            self._config.minecraft_server_properties_path,
+        )
+
+    async def _wait_for_whitelist_state(self, expected: bool) -> None:
+        for attempt in range(10):
+            if await self._read_whitelist_enabled() is expected:
+                return
+            if attempt < 9:
+                await asyncio.sleep(0.2)
+        label = "有効" if expected else "無効"
+        raise RuntimeError(f"Whitelistの実状態が{label}になりませんでした")
+
+    async def _set_whitelist_enabled(self, enabled: bool) -> None:
+        command = "whitelist on" if enabled else "whitelist off"
+        await self._execute_checked_rcon(command)
+        await self._wait_for_whitelist_state(enabled)
+
+    async def _pause_whitelist_for(self, minutes: int) -> float:
+        async with self._whitelist_operation_lock:
+            resume_at = time.time() + minutes * 60
+            await self._save_settings(replace(self._settings, whitelist_resume_at=resume_at))
+            try:
+                await self._set_whitelist_enabled(False)
+            except OSError, RconError, RuntimeError, ValueError:
+                try:
+                    await self._set_whitelist_enabled(True)
+                except OSError, RconError, RuntimeError, ValueError:
+                    LOGGER.exception(
+                        "Whitelist pause failed and immediate safety recovery also failed"
+                    )
+                    raise
+                await self._save_settings(replace(self._settings, whitelist_resume_at=None))
+                raise
+            return resume_at
+
+    async def _resume_whitelist_now(self) -> None:
+        async with self._whitelist_operation_lock:
+            await self._set_whitelist_enabled(True)
             await self._save_settings(replace(self._settings, whitelist_resume_at=None))
-        except (OSError, RconError, RuntimeError) as error:
-            LOGGER.warning("Could not automatically resume Minecraft whitelist: %s", error)
-            return
-        LOGGER.info("Minecraft whitelist automatically resumed")
+
+    async def _whitelist_state_text(self) -> str:
+        async with self._whitelist_operation_lock:
+            enabled = await self._read_whitelist_enabled()
+            resume_at = self._settings.whitelist_resume_at
+        if not enabled and resume_at is not None:
+            return f"一時停止中・<t:{int(resume_at)}:R>に自動再開"
+        if not enabled:
+            return "⚠️ 無効・自動再開予定なし"
+        if resume_at is not None:
+            return f"有効・一時停止の再反映待ち (<t:{int(resume_at)}:R>に再開)"
+        return "有効"
+
+    async def _resume_whitelist_if_due(self) -> None:
+        async with self._whitelist_operation_lock:
+            resume_at = self._settings.whitelist_resume_at
+            if resume_at is None:
+                return
+            try:
+                if time.time() < resume_at:
+                    if await self._read_whitelist_enabled():
+                        await self._set_whitelist_enabled(False)
+                    return
+                await self._set_whitelist_enabled(True)
+                await self._save_settings(replace(self._settings, whitelist_resume_at=None))
+            except (OSError, RconError, RuntimeError, ValueError) as error:
+                LOGGER.warning("Could not reconcile Minecraft whitelist pause: %s", error)
+                return
+            LOGGER.info("Minecraft whitelist automatically resumed")
 
     @staticmethod
     def _audit_server_action(interaction: discord.Interaction, action: str) -> None:
@@ -1141,7 +1197,7 @@ class MinecraftDiscordBot(discord.Client):
                 embed=access_panel_embed(self._settings.approval_mode),
                 view=AccessPanelView(self),
             )
-        except discord.DiscordException as error:
+        except (RuntimeError, discord.DiscordException) as error:
             LOGGER.warning("Could not refresh access panel: %s", error)
 
     async def _refresh_admin_panel(self) -> None:

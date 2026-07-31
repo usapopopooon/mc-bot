@@ -11,6 +11,7 @@ class Config:
     discord_token: str
     minecraft_log_path: Path = Path("/minecraft/logs/latest.log")
     minecraft_whitelist_path: Path = Path("/minecraft/whitelist.json")
+    minecraft_server_properties_path: Path = Path("/minecraft/server.properties")
     cursor_path: Path = Path("/data/cursor.json")
     settings_path: Path = Path("/data/settings.json")
     accounts_path: Path = Path("/data/accounts.db")

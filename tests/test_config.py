@@ -10,6 +10,7 @@ def test_loads_required_and_default_configuration() -> None:
     assert config.discord_token == "secret"
     assert config.minecraft_log_path == Path("/minecraft/logs/latest.log")
     assert config.minecraft_whitelist_path == Path("/minecraft/whitelist.json")
+    assert config.minecraft_server_properties_path == Path("/minecraft/server.properties")
     assert config.cursor_path == Path("/data/cursor.json")
     assert config.settings_path == Path("/data/settings.json")
     assert config.accounts_path == Path("/data/accounts.db")
