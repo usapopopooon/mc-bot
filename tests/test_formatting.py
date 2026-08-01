@@ -69,3 +69,32 @@ def test_does_not_duplicate_honorific_in_join_or_leave_log() -> None:
     )
 
     assert embed.description == "🔴 **さよさん** が退出しました"
+
+
+def test_formats_death_with_linked_identity_without_notification_ping() -> None:
+    embed = format_event(
+        LogEvent(EventType.DEATH, "Steve", "was slain by Zombie"),
+        AdvancementTranslator.load(),
+        123456789,
+    )
+
+    assert embed.description == "💀 **Steve (<@123456789>) さん** がZombieに倒されました"
+    assert embed.color.value == 0x992D22
+
+
+def test_formats_environmental_death_in_japanese() -> None:
+    embed = format_event(
+        LogEvent(EventType.DEATH, ".Bedrock_Player", "fell from a high place"),
+        AdvancementTranslator.load(),
+    )
+
+    assert embed.description == r"💀 **.Bedrock\_Playerさん** が高い場所から落下しました"
+
+
+def test_escapes_attacker_markdown_in_death_log() -> None:
+    embed = format_event(
+        LogEvent(EventType.DEATH, "Steve", "was slain by Bad_Name"),
+        AdvancementTranslator.load(),
+    )
+
+    assert embed.description == r"💀 **Steveさん** がBad\_Nameに倒されました"

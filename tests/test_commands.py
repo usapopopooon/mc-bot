@@ -210,7 +210,7 @@ def test_voice_connection_posts_public_explanation_embed() -> None:
         assert mentions.users is False
         assert mentions.roles is False
         assert followup["embed"].title == "🔊 Minecraft読み上げを開始しました"
-        assert "チャット・参加・退出・進捗" in followup["embed"].description
+        assert "チャット・参加・退出・進捗・死亡" in followup["embed"].description
         assert "小夜/SAYO" in followup["embed"].description
 
     asyncio.run(exercise())

@@ -4,12 +4,15 @@ import re
 from dataclasses import dataclass
 from enum import Enum, auto
 
+from mc_bot.deaths import is_death_detail
+
 
 class EventType(Enum):
     CHAT = auto()
     ADVANCEMENT = auto()
     JOIN = auto()
     LEAVE = auto()
+    DEATH = auto()
 
 
 @dataclass(frozen=True, slots=True)
@@ -26,6 +29,7 @@ _ADVANCEMENT = re.compile(
     r"^(.+?) (?:has made the advancement|has completed the challenge|has reached the goal) "
     r"\[(.+)]$"
 )
+_PLAYER_EVENT = re.compile(r"^(\.?[A-Za-z0-9_]{1,32}) (.+)$")
 
 
 def parse_log_line(line: str) -> LogEvent | None:
@@ -41,4 +45,6 @@ def parse_log_line(line: str) -> LogEvent | None:
         return LogEvent(EventType.JOIN, match[1])
     if match := _LEAVE.fullmatch(message):
         return LogEvent(EventType.LEAVE, match[1])
+    if (match := _PLAYER_EVENT.fullmatch(message)) and is_death_detail(match[2]):
+        return LogEvent(EventType.DEATH, match[1], match[2])
     return None

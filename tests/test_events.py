@@ -30,5 +30,17 @@ def test_parses_all_advancement_wording() -> None:
         ) == LogEvent(EventType.ADVANCEMENT, "Steve", "Stone Age")
 
 
+def test_parses_standard_death_messages() -> None:
+    assert parse_log_line(
+        "[12:34:56] [Server thread/INFO]: Steve fell from a high place"
+    ) == LogEvent(EventType.DEATH, "Steve", "fell from a high place")
+    assert parse_log_line(
+        "[12:34:56] [Server thread/INFO]: .Bedrock_Player was slain by Zombie"
+    ) == LogEvent(EventType.DEATH, ".Bedrock_Player", "was slain by Zombie")
+    assert parse_log_line(
+        "[12:34:56] [Server thread/INFO]: Steve burned to death whilst fighting Skeleton"
+    ) == LogEvent(EventType.DEATH, "Steve", "burned to death whilst fighting Skeleton")
+
+
 def test_ignores_unrelated_log_line() -> None:
     assert parse_log_line("[12:34:56] [Server thread/INFO]: Saving the game") is None

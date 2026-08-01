@@ -69,6 +69,10 @@ def test_formats_minecraft_events_for_speech() -> None:
         event_speech_text(LogEvent(EventType.CHAT, "Steve", "こんにちは\n  世界"), translator)
         == "こんにちは 世界"
     )
+    assert (
+        event_speech_text(LogEvent(EventType.DEATH, "Steve", "tried to swim in lava"), translator)
+        == "Steveさんが溶岩に落ちました"
+    )
 
 
 def test_prefers_linked_discord_username_for_speech() -> None:
@@ -109,6 +113,17 @@ def test_does_not_duplicate_existing_honorific() -> None:
             discord_username="さよさん",
         )
         == "さよさんがゲームに参加しました"
+    )
+
+
+def test_death_speech_prefers_linked_discord_name() -> None:
+    assert (
+        event_speech_text(
+            LogEvent(EventType.DEATH, ".MinecraftName", "drowned"),
+            AdvancementTranslator.load(),
+            discord_username="discord_name",
+        )
+        == "discord_nameさんが溺れました"
     )
 
 

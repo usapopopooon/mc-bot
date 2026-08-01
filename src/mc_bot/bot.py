@@ -975,7 +975,7 @@ class MinecraftDiscordBot(discord.Client):
         api_status = "設定済み" if self._voice_player.configured else "APIトークン未設定"
         await interaction.response.send_message(
             f"Minecraft読み上げ: **{status}**\nVOICEVOX API: **{api_status}**\n\n"
-            "接続先のVCを選択すると、チャット・参加・退出・進捗を読み上げます。",
+            "接続先のVCを選択すると、チャット・参加・退出・進捗・死亡を読み上げます。",
             view=VoiceControlView(self, interaction.user.id),
             ephemeral=True,
             allowed_mentions=discord.AllowedMentions.none(),
@@ -1022,7 +1022,7 @@ class MinecraftDiscordBot(discord.Client):
                     title="🔊 Minecraft読み上げを開始しました",
                     description=(
                         f"{channel.mention} で、Minecraftサーバーのチャット・参加・退出・"
-                        "進捗を読み上げます。\n話者は **小夜/SAYO** です。"
+                        "進捗・死亡を読み上げます。\n話者は **小夜/SAYO** です。"
                     ),
                     color=discord.Color.green(),
                 ),

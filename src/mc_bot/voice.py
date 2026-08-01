@@ -8,6 +8,7 @@ from dataclasses import dataclass
 import aiohttp
 import discord
 
+from mc_bot.deaths import translate_death
 from mc_bot.events import EventType, LogEvent
 from mc_bot.translations import AdvancementTranslator
 
@@ -48,6 +49,8 @@ def event_speech_text(
             text = f"{honored_name}がゲームに参加しました"
         case EventType.LEAVE:
             text = f"{honored_name}がゲームから退出しました"
+        case EventType.DEATH:
+            text = f"{honored_name}が{translate_death(event.detail)}"
     if len(text) <= _MAX_SPEECH_LENGTH:
         return text
     return text[: _MAX_SPEECH_LENGTH - 1] + "…"

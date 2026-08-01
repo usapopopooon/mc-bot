@@ -14,7 +14,7 @@ Minecraftサーバーのログを監視し、Discord Botとして指定チャン
 | デプロイ方式 | Docker Compose |
 | Discord接続方式 | BotアカウントによるGateway接続（Webhook不使用） |
 | Gateway Intents | Guilds、Guild Members、Voice States |
-| 対応Minecraftログ | チャット、進捗・達成、参加、退出 |
+| 対応Minecraftログ | チャット、進捗・達成、参加、退出、死亡 |
 | 通知方向 | Minecraftログ通知、Discordからwhitelist管理 |
 | 設定方法 | Discordスラッシュコマンド |
 | 秘密情報 | `DISCORD_TOKEN`、`MINECRAFT_RCON_PASSWORD`、`VOICEVOX_TTS_API_TOKEN` |
@@ -100,7 +100,7 @@ Bedrock版とDiscord連携状況を表示し、実行した管理者だけに見
 - Whitelistの手動再開
 - 天候を晴れ・雨・雷雨へ変更、時刻を朝・夜へ変更
 - sparkのローカルヘルスレポートによるTPS、MSPT、CPU、メモリ状況の確認
-- 専用VCでのMinecraftチャット、参加・退出、進捗のVOICEVOX読み上げ
+- 専用VCでのMinecraftチャット、参加・退出、進捗、死亡のVOICEVOX読み上げ
 
 Discordへ送るゲーム参加・退出・進捗のEmbedでは、Minecraft名に「さん」を
 付けて表示します。コロンで発言に続くチャットには付けません。連携済みの
@@ -145,7 +145,9 @@ Minecraftログを構造化したままVOICEVOX内部TTS APIへ送信します�
 ただし、Minecraft内チャットは名前を付けず、発言内容だけを読み上げます。
 ゲームへの入退室は「ゲームに参加しました」「ゲームから退出しました」と読み上げ、
 Discord VCの接続・切断と区別します。
-名前を読み上げる入退室・進捗では、名前に「さん」を付けます。
+名前を読み上げる入退室・進捗・死亡では、名前に「さん」を付けます。死亡原因は
+Paper標準の英語ログから判定し、落下、溶岩、溺死、炎、爆発、モブ・プレイヤーによる
+死亡などを日本語でDiscordへ表示して読み上げます。
 接続中にもう一度 `/vc` を実行すると、読み上げを停止してVCから切断します。
 VCから人間の利用者がいなくなった場合も自動切断します。mc-botを含むBotアカウントは
 利用者数に含めません。

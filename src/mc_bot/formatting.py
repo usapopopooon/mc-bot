@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import discord
 
+from mc_bot.deaths import translate_death
 from mc_bot.events import EventType, LogEvent
 from mc_bot.translations import AdvancementTranslator
 
@@ -37,6 +38,10 @@ def format_event(
         case EventType.LEAVE:
             message = f"🔴 {identity} が退出しました"
             color = discord.Color.red()
+        case EventType.DEATH:
+            death = _escape_markdown(translate_death(event.detail))
+            message = f"💀 {identity} が{death}"
+            color = discord.Color.dark_red()
 
     if len(message) > _DISCORD_EMBED_DESCRIPTION_LIMIT:
         message = f"{message[: _DISCORD_EMBED_DESCRIPTION_LIMIT - 1]}…"
