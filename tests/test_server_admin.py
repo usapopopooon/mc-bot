@@ -424,6 +424,77 @@ def test_falls_back_to_direct_whitelist_update_when_rcon_is_not_reflected(
     assert store.get(account.id).status == "active"  # type: ignore[union-attr]
 
 
+def test_resolves_bedrock_uuid_through_public_profile_fallback(tmp_path, monkeypatch) -> None:
+    class JsonResponse:
+        def __init__(self, status, payload) -> None:
+            self.status = status
+            self.payload = payload
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args) -> None:
+            return None
+
+        async def json(self, *, content_type=None):
+            return self.payload
+
+    class JsonSession:
+        def __init__(self, *, timeout) -> None:
+            self.responses = [
+                JsonResponse(404, {}),
+                JsonResponse(
+                    200,
+                    {
+                        "success": True,
+                        "data": {
+                            "player": {
+                                "id": "281474976710655",
+                                "username": "Bedrock User",
+                            }
+                        },
+                    },
+                ),
+            ]
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args) -> None:
+            return None
+
+        def get(self, _url):
+            return self.responses.pop(0)
+
+    accounts_path = tmp_path / "accounts.db"
+    store = AccountStore(accounts_path)
+    store.initialize()
+    account = store.create_registration(
+        edition="bedrock",
+        minecraft_name="Bedrock User",
+        server_player_name=".Bedrock_User",
+        discord_user_id=123,
+        discord_username="hoge",
+        source="self",
+        status="pending_add",
+        created_by=123,
+    )
+    bot = MinecraftDiscordBot(
+        Config(
+            discord_token="secret",
+            accounts_path=accounts_path,
+            minecraft_whitelist_path=tmp_path / "whitelist.json",
+        )
+    )
+    monkeypatch.setattr(bot_module.aiohttp, "ClientSession", JsonSession)
+
+    player_name, player_uuid = asyncio.run(bot._resolve_whitelist_profile(account))
+
+    assert player_name == ".Bedrock_User"
+    assert player_uuid == "00000000-0000-0000-0000-ffffffffffff"
+    assert store.get(account.id).player_uuid == player_uuid  # type: ignore[union-attr]
+
+
 def test_sync_repairs_managed_registration_missing_from_whitelist(tmp_path) -> None:
     whitelist_path = tmp_path / "whitelist.json"
     whitelist_path.write_text("[]", encoding="utf-8")

@@ -59,6 +59,7 @@ _VOICE_CONNECTED_SPEECH = "せつぞくしました"
 _VOICE_CHECK_SPEECH = "マインクラフトの読み上げは正常に動作しています"
 _MOJANG_PROFILE_URL = "https://api.mojang.com/users/profiles/minecraft/"
 _GEYSER_XUID_URL = "https://api.geysermc.org/v2/xbox/xuid/"
+_PLAYERDB_XBOX_URL = "https://playerdb.co/api/player/xbox/"
 
 
 class MinecraftDiscordBot(discord.Client):
@@ -1542,23 +1543,44 @@ class MinecraftDiscordBot(discord.Client):
                 else:
                     url = _GEYSER_XUID_URL + quote(account.minecraft_name, safe="")
                     async with session.get(url) as response:
-                        if response.status == 404:
-                            raise ValueError(
-                                f"Bedrock版アカウント {account.minecraft_name} が存在しません。"
-                                "ゲーマータグを確認してください"
-                            )
-                        if response.status != 200:
-                            raise RuntimeError(f"Geyser XUID API error {response.status}")
-                        payload = await response.json(content_type=None)
+                        payload = (
+                            await response.json(content_type=None) if response.status == 200 else {}
+                        )
                     raw_xuid = payload.get("xuid") if isinstance(payload, dict) else None
+                    canonical_name: str | None = None
+                    if not isinstance(raw_xuid, str):
+                        url = _PLAYERDB_XBOX_URL + quote(account.minecraft_name, safe="")
+                        async with session.get(url) as response:
+                            if response.status != 200:
+                                raise ValueError(
+                                    f"Bedrock版アカウント {account.minecraft_name} "
+                                    "が存在しません。ゲーマータグを確認してください"
+                                )
+                            payload = await response.json(content_type=None)
+                        player = (
+                            payload.get("data", {}).get("player")
+                            if isinstance(payload, dict) and isinstance(payload.get("data"), dict)
+                            else None
+                        )
+                        raw_xuid = player.get("id") if isinstance(player, dict) else None
+                        canonical_name = (
+                            player.get("username") if isinstance(player, dict) else None
+                        )
                     try:
                         xuid = int(raw_xuid)
                     except (TypeError, ValueError) as error:
-                        raise RuntimeError("Geyser XUID APIの応答形式が正しくありません") from error
+                        raise ValueError(
+                            f"Bedrock版アカウント {account.minecraft_name} が存在しません。"
+                            "ゲーマータグを確認してください"
+                        ) from error
                     if not 0 <= xuid < 2**64:
                         raise RuntimeError("Geyser XUID APIのXUIDが正しくありません")
                     player_uuid = str(uuid.UUID(int=xuid))
-                    player_name = account.server_player_name
+                    if isinstance(canonical_name, str) and canonical_name:
+                        normalized_name = canonical_name.replace(" ", "_")
+                        player_name = f"{self._config.floodgate_username_prefix}{normalized_name}"
+                    else:
+                        player_name = account.server_player_name
         except (TimeoutError, aiohttp.ClientError) as error:
             raise RuntimeError(f"MinecraftアカウントUUID APIへ接続できません: {error}") from error
 
