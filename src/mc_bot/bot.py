@@ -170,6 +170,7 @@ class MinecraftDiscordBot(discord.Client):
         if self._health_task is None or self._health_task.done():
             self._health_task = asyncio.create_task(self._health_loop(), name="health-monitor")
 
+        await self._refresh_access_panel()
         await self._refresh_admin_panel()
         channel_id = self._settings.channel_id
         if channel_id is None:
@@ -591,11 +592,12 @@ class MinecraftDiscordBot(discord.Client):
             await interaction.response.send_message(str(error), ephemeral=True)
             return
         edition_label = "Java版" if edition == "java" else "Bedrock版"
+        name_label = "Java版のプレイヤー名" if edition == "java" else "Xboxゲーマータグ"
         target_line = f"\nDiscordユーザー: {target.mention}" if source == "admin" else ""
         await interaction.response.send_message(
             f"次の内容で登録します。\n\n"
             f"エディション: **{edition_label}**\n"
-            f"アカウント名: **{discord.utils.escape_markdown(normalized_name)}**"
+            f"{name_label}: **{discord.utils.escape_markdown(normalized_name)}**"
             f"{target_line}",
             view=ConfirmRegistrationView(
                 self,

@@ -12,7 +12,13 @@ if TYPE_CHECKING:
 
 def access_panel_embed(approval_mode: str) -> discord.Embed:
     description = (
-        "このDiscordサーバーの参加者は、Java版またはBedrock版のアカウントを登録できます。\n"
+        "このDiscordサーバーの参加者は、Minecraftで使用している名前を登録できます。\n\n"
+        "☕ **Java版**\n"
+        "ゲーム内で自分のキャラクターの頭上に表示される名前"
+        "、つまりJava版のプレイヤー名を入力してください。\n\n"
+        "🪨 **Bedrock版**\n"
+        "Switch・Xbox・PlayStation・スマホ・Windowsのゲーム内で、自分のキャラクターの"
+        "頭上に表示される名前、つまりXboxゲーマータグを入力してください。\n\n"
         "複数のMinecraftアカウントを登録できます。"
     )
     if approval_mode == "automatic":
@@ -145,13 +151,6 @@ class AdminPanelView(discord.ui.View):
 
 
 class RegistrationModal(discord.ui.Modal):
-    minecraft_name = discord.ui.TextInput(
-        label="Minecraftアカウント名",
-        placeholder="ゲーム内で表示される名前",
-        min_length=1,
-        max_length=32,
-    )
-
     def __init__(
         self,
         bot: MinecraftDiscordBot,
@@ -167,10 +166,24 @@ class RegistrationModal(discord.ui.Modal):
         self.target = target
         self.source = source
         if edition == "java":
-            self.minecraft_name.placeholder = "例: Steve"
-            self.minecraft_name.max_length = 16
+            label = "Java版のプレイヤー名"
+            placeholder = "例: Steve123"
+            max_length = 16
         else:
-            self.minecraft_name.placeholder = "Xboxゲーマータグ (先頭の . は不要)"
+            label = "Xboxゲーマータグ"
+            placeholder = "Minecraftに表示されるゲーマータグ"
+            max_length = 32
+        self.minecraft_name = discord.ui.TextInput(
+            placeholder=placeholder,
+            min_length=1,
+            max_length=max_length,
+        )
+        self.minecraft_name_label = discord.ui.Label(
+            text=label,
+            description="ゲーム内で自分のキャラクターの頭上に表示される名前",
+            component=self.minecraft_name,
+        )
+        self.add_item(self.minecraft_name_label)
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         target = self.target

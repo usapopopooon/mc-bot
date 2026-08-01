@@ -8,7 +8,44 @@ from mc_bot.accounts import MinecraftAccount
 from mc_bot.bot import MinecraftDiscordBot
 from mc_bot.config import Config
 from mc_bot.settings import RuntimeSettings
-from mc_bot.ui import AdminPanelView, ServerControlView, VoiceControlView
+from mc_bot.ui import (
+    AdminPanelView,
+    RegistrationModal,
+    ServerControlView,
+    VoiceControlView,
+    access_panel_embed,
+)
+
+
+def test_access_panel_explains_edition_specific_names() -> None:
+    description = access_panel_embed("automatic").description
+
+    assert description is not None
+    assert "Java版のプレイヤー名" in description
+    assert "Xboxゲーマータグ" in description
+    assert description.count("自分のキャラクターの頭上に表示される名前") == 2
+    assert "Switch・Xbox・PlayStation・スマホ・Windows" in description
+    assert "Discordの表示名" not in description
+    assert "メールアドレス" not in description
+    assert "「.」" not in description
+
+
+def test_registration_modal_uses_edition_specific_labels() -> None:
+    async def build_modals() -> tuple[RegistrationModal, RegistrationModal]:
+        bot = MinecraftDiscordBot(Config(discord_token="secret"))
+        return RegistrationModal(bot, "java"), RegistrationModal(bot, "bedrock")
+
+    java_modal, bedrock_modal = asyncio.run(build_modals())
+
+    assert java_modal.minecraft_name_label.text == "Java版のプレイヤー名"
+    assert bedrock_modal.minecraft_name_label.text == "Xboxゲーマータグ"
+    assert "キャラクターの頭上に表示される名前" in (
+        java_modal.minecraft_name_label.description or ""
+    )
+    assert "キャラクターの頭上に表示される名前" in (
+        bedrock_modal.minecraft_name_label.description or ""
+    )
+    assert "." not in (bedrock_modal.minecraft_name.placeholder or "")
 
 
 def test_registers_manager_only_configuration_commands() -> None:
