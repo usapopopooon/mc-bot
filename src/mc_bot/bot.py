@@ -4,9 +4,12 @@ import asyncio
 import logging
 import re
 import time
+import uuid
 from dataclasses import replace
 from pathlib import Path
+from urllib.parse import quote
 
+import aiohttp
 import discord
 from discord import app_commands
 
@@ -26,8 +29,10 @@ from mc_bot.server_admin import (
     clean_rcon_output,
     kick_command,
     parse_online_players,
+    read_cached_player_profile,
     read_whitelist_enabled,
     read_whitelisted_players,
+    upsert_whitelisted_player,
     validate_rcon_response,
 )
 from mc_bot.settings import RuntimeSettings, SettingsStore
@@ -52,6 +57,8 @@ LOGGER = logging.getLogger(__name__)
 _JAVA_NAME = re.compile(r"[A-Za-z0-9_]{3,16}")
 _VOICE_CONNECTED_SPEECH = "せつぞくしました"
 _VOICE_CHECK_SPEECH = "マインクラフトの読み上げは正常に動作しています"
+_MOJANG_PROFILE_URL = "https://api.mojang.com/users/profiles/minecraft/"
+_GEYSER_XUID_URL = "https://api.geysermc.org/v2/xbox/xuid/"
 
 
 class MinecraftDiscordBot(discord.Client):
@@ -1457,14 +1464,106 @@ class MinecraftDiscordBot(discord.Client):
         async with self._whitelist_operation_lock:
             if await self._player_is_whitelisted(account.server_player_name) is expected:
                 return
-            await self._execute_checked_rcon(command)
+            response = await self._execute_checked_rcon(command)
             for attempt in range(20):
                 if await self._player_is_whitelisted(account.server_player_name) is expected:
                     return
                 if attempt < 19:
                     await asyncio.sleep(0.25)
+            if expected:
+                LOGGER.warning(
+                    "RCON whitelist add was not reflected for %s; using direct JSON fallback "
+                    "response=%r",
+                    account.minecraft_name,
+                    response,
+                )
+                await self._add_to_whitelist_file(account)
+                return
         state = "追加" if expected else "削除"
         raise RuntimeError(f"{account.server_player_name}のWhitelist{state}を確認できませんでした")
+
+    async def _add_to_whitelist_file(self, account: MinecraftAccount) -> None:
+        player_name, player_uuid = await self._resolve_whitelist_profile(account)
+        await asyncio.to_thread(
+            upsert_whitelisted_player,
+            self._config.minecraft_whitelist_path,
+            player_name,
+            player_uuid,
+        )
+        await self._execute_checked_rcon("whitelist reload")
+        if not await self._player_is_whitelisted(account.server_player_name):
+            raise RuntimeError(
+                f"{account.server_player_name}のWhitelist直接追加を確認できませんでした"
+            )
+
+    async def _resolve_whitelist_profile(self, account: MinecraftAccount) -> tuple[str, str]:
+        if account.player_uuid:
+            try:
+                return account.server_player_name, str(uuid.UUID(account.player_uuid))
+            except ValueError:
+                LOGGER.warning(
+                    "Ignoring invalid stored UUID for Minecraft account %s",
+                    account.minecraft_name,
+                )
+
+        cached_profile = await asyncio.to_thread(
+            read_cached_player_profile,
+            self._config.minecraft_whitelist_path.with_name("usercache.json"),
+            account.server_player_name,
+        )
+        if cached_profile is not None:
+            player_name, player_uuid = cached_profile
+            await asyncio.to_thread(self._accounts.update_player_uuid, account.id, player_uuid)
+            return player_name, player_uuid
+
+        timeout = aiohttp.ClientTimeout(total=10)
+        try:
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                if account.edition == "java":
+                    url = _MOJANG_PROFILE_URL + quote(account.minecraft_name, safe="")
+                    async with session.get(url) as response:
+                        if response.status in {204, 404}:
+                            raise ValueError(
+                                f"Java版アカウント {account.minecraft_name} が存在しません。"
+                                "エディションと名前を確認してください"
+                            )
+                        if response.status != 200:
+                            raise RuntimeError(f"Mojang UUID API error {response.status}")
+                        payload = await response.json(content_type=None)
+                    raw_uuid = payload.get("id") if isinstance(payload, dict) else None
+                    canonical_name = payload.get("name") if isinstance(payload, dict) else None
+                    if not isinstance(raw_uuid, str) or not isinstance(canonical_name, str):
+                        raise RuntimeError("Mojang UUID APIの応答形式が正しくありません")
+                    try:
+                        player_uuid = str(uuid.UUID(raw_uuid))
+                    except ValueError as error:
+                        raise RuntimeError("Mojang UUID APIのUUIDが正しくありません") from error
+                    player_name = canonical_name
+                else:
+                    url = _GEYSER_XUID_URL + quote(account.minecraft_name, safe="")
+                    async with session.get(url) as response:
+                        if response.status == 404:
+                            raise ValueError(
+                                f"Bedrock版アカウント {account.minecraft_name} が存在しません。"
+                                "ゲーマータグを確認してください"
+                            )
+                        if response.status != 200:
+                            raise RuntimeError(f"Geyser XUID API error {response.status}")
+                        payload = await response.json(content_type=None)
+                    raw_xuid = payload.get("xuid") if isinstance(payload, dict) else None
+                    try:
+                        xuid = int(raw_xuid)
+                    except (TypeError, ValueError) as error:
+                        raise RuntimeError("Geyser XUID APIの応答形式が正しくありません") from error
+                    if not 0 <= xuid < 2**64:
+                        raise RuntimeError("Geyser XUID APIのXUIDが正しくありません")
+                    player_uuid = str(uuid.UUID(int=xuid))
+                    player_name = account.server_player_name
+        except (TimeoutError, aiohttp.ClientError) as error:
+            raise RuntimeError(f"MinecraftアカウントUUID APIへ接続できません: {error}") from error
+
+        await asyncio.to_thread(self._accounts.update_player_uuid, account.id, player_uuid)
+        return player_name, player_uuid
 
     async def _player_is_whitelisted(self, player_name: str) -> bool:
         player_names = await asyncio.to_thread(

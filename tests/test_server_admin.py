@@ -1,8 +1,10 @@
 import asyncio
 import json
+from unittest.mock import AsyncMock
 
 import pytest
 
+import mc_bot.bot as bot_module
 from mc_bot.accounts import AccountStore
 from mc_bot.bot import MinecraftDiscordBot
 from mc_bot.config import Config
@@ -11,8 +13,10 @@ from mc_bot.server_admin import (
     clean_rcon_output,
     kick_command,
     parse_online_players,
+    read_cached_player_profile,
     read_whitelist_enabled,
     read_whitelisted_players,
+    upsert_whitelisted_player,
     validate_rcon_response,
 )
 from mc_bot.settings import RuntimeSettings, SettingsStore
@@ -62,6 +66,15 @@ class WhitelistRcon:
                 encoding="utf-8",
             )
         return self.response
+
+
+class NoopWhitelistRcon:
+    def __init__(self) -> None:
+        self.commands: list[str] = []
+
+    def execute(self, command: str) -> str:
+        self.commands.append(command)
+        return "ok"
 
 
 class FakeInteractionResponse:
@@ -122,6 +135,47 @@ def test_reads_and_sorts_whitelisted_players(tmp_path) -> None:
     )
 
     assert read_whitelisted_players(whitelist_path) == [".Bedrock_User", "alex", "Steve"]
+
+
+def test_atomically_upserts_whitelist_without_losing_existing_entries(tmp_path) -> None:
+    whitelist_path = tmp_path / "whitelist.json"
+    whitelist_path.write_text(
+        json.dumps([{"uuid": "8667ba71-b85a-4004-af54-457a9734eed7", "name": "Steve"}]),
+        encoding="utf-8",
+    )
+
+    upsert_whitelisted_player(
+        whitelist_path,
+        ".Bedrock_User",
+        "00000000-0000-0000-0009-123456789abc",
+    )
+
+    assert json.loads(whitelist_path.read_text(encoding="utf-8")) == [
+        {"uuid": "8667ba71-b85a-4004-af54-457a9734eed7", "name": "Steve"},
+        {"uuid": "00000000-0000-0000-0009-123456789abc", "name": ".Bedrock_User"},
+    ]
+
+
+def test_reads_bedrock_profile_from_minecraft_usercache(tmp_path) -> None:
+    usercache_path = tmp_path / "usercache.json"
+    usercache_path.write_text(
+        json.dumps(
+            [
+                {
+                    "name": ".Bedrock_User",
+                    "uuid": "00000000-0000-0000-0009-123456789abc",
+                    "expiresOn": "2026-09-01 00:00:00 +0900",
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    assert read_cached_player_profile(usercache_path, ".bedrock_user") == (
+        ".Bedrock_User",
+        "00000000-0000-0000-0009-123456789abc",
+    )
+    assert read_cached_player_profile(usercache_path, ".missing") is None
 
 
 def test_rejects_invalid_whitelist_file(tmp_path) -> None:
@@ -324,6 +378,50 @@ def test_keeps_registration_pending_when_rcon_command_fails(tmp_path) -> None:
 
     assert store.get(account.id).status == "pending_add"  # type: ignore[union-attr]
     assert read_whitelisted_players(whitelist_path) == []
+
+
+def test_falls_back_to_direct_whitelist_update_when_rcon_is_not_reflected(
+    tmp_path, monkeypatch
+) -> None:
+    whitelist_path = tmp_path / "whitelist.json"
+    whitelist_path.write_text("[]", encoding="utf-8")
+    (tmp_path / "usercache.json").write_text(
+        json.dumps([{"uuid": "8667ba71-b85a-4004-af54-457a9734eed7", "name": "Steve"}]),
+        encoding="utf-8",
+    )
+    accounts_path = tmp_path / "accounts.db"
+    store = AccountStore(accounts_path)
+    store.initialize()
+    account = store.create_registration(
+        edition="java",
+        minecraft_name="Steve",
+        server_player_name="Steve",
+        discord_user_id=123,
+        discord_username="hoge",
+        source="self",
+        status="pending_add",
+        created_by=123,
+    )
+    bot = MinecraftDiscordBot(
+        Config(
+            discord_token="secret",
+            accounts_path=accounts_path,
+            minecraft_whitelist_path=whitelist_path,
+            rcon_password="secret",
+        )
+    )
+    rcon = NoopWhitelistRcon()
+    bot._rcon = rcon  # type: ignore[assignment]
+
+    async def exercise() -> None:
+        monkeypatch.setattr(bot_module.asyncio, "sleep", AsyncMock())
+        await bot._add_to_whitelist(account)
+
+    asyncio.run(exercise())
+
+    assert rcon.commands == ["whitelist add Steve", "whitelist reload"]
+    assert read_whitelisted_players(whitelist_path) == ["Steve"]
+    assert store.get(account.id).status == "active"  # type: ignore[union-attr]
 
 
 def test_sync_repairs_managed_registration_missing_from_whitelist(tmp_path) -> None:

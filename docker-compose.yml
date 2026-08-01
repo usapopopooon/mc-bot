@@ -14,7 +14,7 @@ services:
       VOICEVOX_SPEAKER_ID: "${VOICEVOX_SPEAKER_ID:-46}"
       VOICEVOX_SPEED: "${VOICEVOX_SPEED:-1.0}"
     volumes:
-      - minecraft-data:/minecraft:ro
+      - minecraft-data:/minecraft
       - mc-bot-data:/data
     deploy:
       resources:

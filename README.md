@@ -111,6 +111,8 @@ Whitelistの再開予定時刻は永続化され、mc-botの再起動後も引�
 Minecraftへのアカウント追加・削除は、RCON応答だけでなく実際の `whitelist.json` への
 反映を確認してから登録状態を更新します。Botの登録情報と実Whitelistは定期的に照合され、
 未反映の管理対象アカウントは再追加されます。管理一覧では両方の件数と未反映状態を確認できます。
+RCON追加が実ファイルへ反映されない場合は、公式APIでJava UUIDまたはBedrock XUIDを確認し、
+既存項目を保持したまま `whitelist.json` を原子的に更新して `whitelist reload` を実行します。
 キック・告知・Whitelist・ワールド操作は、実行者のDiscordユーザーIDとともに
 mc-botのログへ記録されます。任意のMinecraftコマンドを入力する機能はありません。
 

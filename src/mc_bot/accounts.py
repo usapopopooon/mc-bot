@@ -370,6 +370,17 @@ class AccountStore:
                 (username, _now(), discord_user_id, username),
             )
 
+    def update_player_uuid(self, account_id: int, player_uuid: str) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE minecraft_accounts
+                SET player_uuid = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (player_uuid, _now(), account_id),
+            )
+
     def unlink_protected(self, account_id: int) -> None:
         with self._connect() as connection:
             cursor = connection.execute(

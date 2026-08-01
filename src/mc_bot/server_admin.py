@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 import json
+import os
 import re
+import tempfile
+import uuid
+from contextlib import suppress
 from pathlib import Path
 
 _FORMATTING_CODE = re.compile(r"§[0-9A-FK-OR]", re.IGNORECASE)
@@ -58,6 +62,77 @@ def read_whitelisted_players(whitelist_path: Path) -> list[str]:
             raise ValueError("whitelist.jsonの登録者を読み取れませんでした")
         players.append(name)
     return sorted(players, key=str.casefold)
+
+
+def read_cached_player_profile(usercache_path: Path, player_name: str) -> tuple[str, str] | None:
+    try:
+        data = json.loads(usercache_path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError(f"usercache.jsonを読み取れませんでした: {error}") from error
+    if not isinstance(data, list):
+        raise ValueError("usercache.jsonの形式が正しくありません")
+    normalized_name = player_name.casefold()
+    for entry in data:
+        if not isinstance(entry, dict):
+            continue
+        name = entry.get("name")
+        raw_uuid = entry.get("uuid")
+        if not isinstance(name, str) or name.casefold() != normalized_name:
+            continue
+        try:
+            return name, str(uuid.UUID(raw_uuid))
+        except (AttributeError, TypeError, ValueError) as error:
+            raise ValueError(f"usercache.jsonのUUIDが正しくありません: {name}") from error
+    return None
+
+
+def upsert_whitelisted_player(whitelist_path: Path, player_name: str, player_uuid: str) -> None:
+    try:
+        normalized_uuid = str(uuid.UUID(player_uuid))
+        data = json.loads(whitelist_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, json.JSONDecodeError) as error:
+        raise ValueError(f"whitelist.jsonを更新できませんでした: {error}") from error
+    if not isinstance(data, list) or any(not isinstance(entry, dict) for entry in data):
+        raise ValueError("whitelist.jsonを更新できませんでした: 形式が正しくありません")
+
+    normalized_name = player_name.casefold()
+    replacement = {"uuid": normalized_uuid, "name": player_name}
+    for index, entry in enumerate(data):
+        entry_name = entry.get("name")
+        entry_uuid = entry.get("uuid")
+        same_name = isinstance(entry_name, str) and entry_name.casefold() == normalized_name
+        same_uuid = (
+            isinstance(entry_uuid, str) and entry_uuid.casefold() == normalized_uuid.casefold()
+        )
+        if same_name or same_uuid:
+            data[index] = replacement
+            break
+    else:
+        data.append(replacement)
+
+    serialized = json.dumps(data, ensure_ascii=False, indent=2) + "\n"
+    temporary_path: str | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=whitelist_path.parent,
+            prefix=f".{whitelist_path.name}.",
+            delete=False,
+        ) as temporary:
+            temporary.write(serialized)
+            temporary.flush()
+            os.fsync(temporary.fileno())
+            temporary_path = temporary.name
+        os.chmod(temporary_path, whitelist_path.stat().st_mode & 0o777)
+        os.replace(temporary_path, whitelist_path)
+    except OSError as error:
+        if temporary_path is not None:
+            with suppress(OSError):
+                os.unlink(temporary_path)
+        raise ValueError(f"whitelist.jsonを更新できませんでした: {error}") from error
 
 
 def validate_rcon_response(response: str) -> str:

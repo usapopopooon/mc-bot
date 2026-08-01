@@ -68,6 +68,25 @@ def test_links_multiple_accounts_to_one_discord_user(tmp_path) -> None:
     assert {account.managed for account in linked} == {False, True}
 
 
+def test_updates_resolved_player_uuid(tmp_path) -> None:
+    store = AccountStore(tmp_path / "accounts.db")
+    store.initialize()
+    account = store.create_registration(
+        edition="java",
+        minecraft_name="Steve",
+        server_player_name="Steve",
+        discord_user_id=123,
+        discord_username="hoge",
+        source="self",
+        status="pending_add",
+        created_by=123,
+    )
+
+    store.update_player_uuid(account.id, "8667ba71-b85a-4004-af54-457a9734eed7")
+
+    assert store.get(account.id).player_uuid == "8667ba71-b85a-4004-af54-457a9734eed7"  # type: ignore[union-attr]
+
+
 def test_unlinking_protected_account_preserves_whitelist_record(tmp_path) -> None:
     whitelist = tmp_path / "whitelist.json"
     whitelist.write_text(
