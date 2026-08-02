@@ -4,6 +4,7 @@ import discord
 
 from mc_bot.deaths import translate_death
 from mc_bot.events import EventType, LogEvent
+from mc_bot.experience import MinecraftLevelUpEvent
 from mc_bot.translations import AdvancementTranslator
 
 _DISCORD_EMBED_DESCRIPTION_LIMIT = 4_096
@@ -46,6 +47,17 @@ def format_event(
     if len(message) > _DISCORD_EMBED_DESCRIPTION_LIMIT:
         message = f"{message[: _DISCORD_EMBED_DESCRIPTION_LIMIT - 1]}…"
     return discord.Embed(description=message, color=color)
+
+
+def format_level_up_event(event: MinecraftLevelUpEvent) -> discord.Embed:
+    """Minecraft内へ転送したDiscordレベルアップをログ用Embedにする。"""
+    guild_name = _escape_markdown(event.guild_name)
+    display_name = _escape_markdown(event.display_name)
+    return discord.Embed(
+        title=f"🎉 {guild_name}",
+        description=(f"**{display_name}さん** がDiscordレベル **{event.level}** になりました!"),
+        color=discord.Color.gold(),
+    )
 
 
 def _escape_markdown(value: str) -> str:

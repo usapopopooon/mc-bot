@@ -20,10 +20,11 @@ from mc_bot.events import EventType, LogEvent, parse_log_line
 from mc_bot.experience import (
     LevelBotXpClient,
     experience_query_command,
+    level_up_tellraw_command,
     parse_experience_query,
     total_experience_points,
 )
-from mc_bot.formatting import format_event
+from mc_bot.formatting import format_event, format_level_up_event
 from mc_bot.player_count import (
     PLAYER_COUNT_CHANNEL_NAME,
     PLAYER_COUNT_DISABLED_STATUS,
@@ -223,7 +224,13 @@ class MinecraftDiscordBot(discord.Client):
         for account in accounts:
             try:
                 await self._remove_from_whitelist(account)
-            except (OSError, RconError, RuntimeError, ValueError) as error:
+            except (
+                OSError,
+                RconError,
+                RuntimeError,
+                ValueError,
+                discord.DiscordException,
+            ) as error:
                 await asyncio.to_thread(self._accounts.update_status, account.id, "pending_remove")
                 LOGGER.error(
                     "Could not revoke Minecraft account %s after Discord departure: %s",
@@ -1904,10 +1911,39 @@ class MinecraftDiscordBot(discord.Client):
     async def _minecraft_xp_loop(self) -> None:
         while not self.is_closed():
             try:
+                await self._sync_minecraft_level_up_announcements()
                 await self._sync_minecraft_xp()
             except (OSError, RconError, RuntimeError, ValueError) as error:
                 LOGGER.warning("Minecraft XP synchronization failed: %s", error)
             await asyncio.sleep(self._config.minecraft_xp_poll_seconds)
+
+    async def _sync_minecraft_level_up_announcements(self) -> None:
+        guild_id = self._settings.guild_id
+        if guild_id is None:
+            return
+        events = await self._level_bot_xp.fetch_level_ups(guild_id)
+        if events is None:
+            return
+        for event in events:
+            if event.guild_id != guild_id:
+                LOGGER.warning(
+                    "Ignored level-up event for another guild event=%d guild=%d",
+                    event.id,
+                    event.guild_id,
+                )
+                continue
+            if not event.minecraft_delivered:
+                command = level_up_tellraw_command(event)
+                await asyncio.to_thread(self._require_rcon().execute, command)
+                if not await self._level_bot_xp.acknowledge_level_up(
+                    event.id, guild_id, "minecraft"
+                ):
+                    # ACK失敗時は次回再送する。通知欠落より稀な重複を優先する。
+                    return
+            if not event.discord_delivered:
+                await self._send(format_level_up_event(event))
+                if not await self._level_bot_xp.acknowledge_level_up(event.id, guild_id, "discord"):
+                    return
 
     async def _sync_minecraft_xp(self) -> None:
         guild_id = self._settings.guild_id

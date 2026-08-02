@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import json
 import logging
 import re
+from dataclasses import dataclass
 
 import aiohttp
 
@@ -10,6 +12,18 @@ from mc_bot.accounts import MinecraftXpOutboxEvent
 LOGGER = logging.getLogger(__name__)
 _QUERY_RESULT = re.compile(r"\bhas\s+(\d+)\s+experience\s+(levels?|points?)\b", re.I)
 _SAFE_PLAYER_NAME = re.compile(r"\.?[A-Za-z0-9_]{1,32}")
+
+
+@dataclass(frozen=True, slots=True)
+class MinecraftLevelUpEvent:
+    id: int
+    guild_id: int
+    guild_name: str
+    user_id: int
+    display_name: str
+    level: int
+    minecraft_delivered: bool
+    discord_delivered: bool
 
 
 def parse_experience_query(response: str, unit: str) -> int:
@@ -52,9 +66,24 @@ def experience_query_command(player_name: str, unit: str) -> str:
     return f"experience query {player_name} {unit}"
 
 
+def level_up_tellraw_command(event: MinecraftLevelUpEvent) -> str:
+    """Discordサーバー名と表示名を使った安全な色付きtellrawを作る。"""
+    components = [
+        {"text": "["},
+        {"text": event.guild_name, "color": "aqua"},
+        {"text": "] "},
+        {"text": event.display_name, "color": "yellow"},
+        {"text": "さんがレベル "},
+        {"text": str(event.level), "color": "green", "bold": True},
+        {"text": " になりました!"},
+    ]
+    return f"tellraw @a {json.dumps(components, ensure_ascii=False, separators=(',', ':'))}"
+
+
 class LevelBotXpClient:
     def __init__(self, base_url: str, token: str) -> None:
-        self._url = f"{base_url.rstrip('/')}/api/v1/integrations/minecraft/xp-events"
+        self._base_url = base_url.rstrip("/")
+        self._url = f"{self._base_url}/api/v1/integrations/minecraft/xp-events"
         self._token = token
         self._session: aiohttp.ClientSession | None = None
 
@@ -66,9 +95,7 @@ class LevelBotXpClient:
     async def send(self, event: MinecraftXpOutboxEvent) -> bool:
         if not self._token:
             return False
-        if self._session is None or self._session.closed:
-            timeout = aiohttp.ClientTimeout(total=10)
-            self._session = aiohttp.ClientSession(timeout=timeout)
+        session = self._require_session()
         payload = {
             "event_id": event.event_id,
             "guild_id": str(event.guild_id),
@@ -78,7 +105,7 @@ class LevelBotXpClient:
             "observed_at": event.observed_at,
         }
         try:
-            async with self._session.post(
+            async with session.post(
                 self._url,
                 headers={"Authorization": f"Bearer {self._token}"},
                 json=payload,
@@ -94,3 +121,92 @@ class LevelBotXpClient:
         except (aiohttp.ClientError, TimeoutError) as error:
             LOGGER.warning("Could not send Minecraft XP to level-bot: %s", error)
         return False
+
+    async def fetch_level_ups(self, guild_id: int) -> list[MinecraftLevelUpEvent] | None:
+        if not self._token:
+            return None
+        session = self._require_session()
+        try:
+            async with session.get(
+                f"{self._base_url}/api/v1/integrations/minecraft/level-up-events",
+                headers={"Authorization": f"Bearer {self._token}"},
+                params={"guild_id": str(guild_id), "limit": "20"},
+            ) as response:
+                if response.status != 200:
+                    body = await response.text()
+                    LOGGER.warning(
+                        "level-bot level-up API rejected fetch status=%d body=%s",
+                        response.status,
+                        body[:300],
+                    )
+                    return None
+                payload = await response.json()
+            if not isinstance(payload, list):
+                raise ValueError("level-up response must be a list")
+            return [self._parse_level_up_event(item) for item in payload]
+        except (
+            aiohttp.ClientError,
+            TimeoutError,
+            KeyError,
+            ValueError,
+            TypeError,
+        ) as error:
+            LOGGER.warning("Could not fetch level-ups from level-bot: %s", error)
+            return None
+
+    async def acknowledge_level_up(self, event_id: int, guild_id: int, destination: str) -> bool:
+        if destination not in {"minecraft", "discord"}:
+            raise ValueError("unknown level-up destination")
+        if not self._token:
+            return False
+        session = self._require_session()
+        try:
+            async with session.post(
+                f"{self._base_url}/api/v1/integrations/minecraft/level-up-events/{event_id}/ack",
+                headers={"Authorization": f"Bearer {self._token}"},
+                json={"guild_id": str(guild_id), "destination": destination},
+            ) as response:
+                if response.status == 204:
+                    return True
+                body = await response.text()
+                LOGGER.warning(
+                    "level-bot level-up API rejected ack status=%d body=%s",
+                    response.status,
+                    body[:300],
+                )
+        except (aiohttp.ClientError, TimeoutError) as error:
+            LOGGER.warning("Could not acknowledge level-up to level-bot: %s", error)
+        return False
+
+    def _require_session(self) -> aiohttp.ClientSession:
+        if self._session is None or self._session.closed:
+            timeout = aiohttp.ClientTimeout(total=10)
+            self._session = aiohttp.ClientSession(timeout=timeout)
+        return self._session
+
+    @staticmethod
+    def _parse_level_up_event(item: object) -> MinecraftLevelUpEvent:
+        if not isinstance(item, dict):
+            raise ValueError("level-up event must be an object")
+        event = MinecraftLevelUpEvent(
+            id=int(item["id"]),
+            guild_id=int(item["guild_id"]),
+            guild_name=str(item["guild_name"]),
+            user_id=int(item["user_id"]),
+            display_name=str(item["display_name"]),
+            level=int(item["level"]),
+            minecraft_delivered=item["minecraft_delivered"],
+            discord_delivered=item["discord_delivered"],
+        )
+        if (
+            event.id <= 0
+            or event.guild_id <= 0
+            or event.user_id <= 0
+            or event.level <= 0
+            or not event.guild_name
+            or not event.display_name
+            or not isinstance(event.minecraft_delivered, bool)
+            or not isinstance(event.discord_delivered, bool)
+        ):
+            raise ValueError("level-up event contains invalid values")
+        return event

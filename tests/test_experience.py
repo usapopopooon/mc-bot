@@ -1,8 +1,12 @@
+import json
+
 import pytest
 
 from mc_bot.experience import (
+    MinecraftLevelUpEvent,
     experience_query_command,
     experience_to_next_level,
+    level_up_tellraw_command,
     parse_experience_query,
     total_experience_points,
 )
@@ -45,3 +49,23 @@ def test_builds_safe_player_query_command() -> None:
     )
     with pytest.raises(ValueError):
         experience_query_command("Steve run kill @a", "levels")
+
+
+def test_builds_level_up_tellraw_with_discord_guild_name() -> None:
+    event = MinecraftLevelUpEvent(
+        id=1,
+        guild_id=1001,
+        guild_name='うさぽ"サーバー',
+        user_id=2001,
+        display_name="うさぽ",
+        level=10,
+        minecraft_delivered=False,
+        discord_delivered=False,
+    )
+
+    command = level_up_tellraw_command(event)
+    components = json.loads(command.removeprefix("tellraw @a "))
+
+    assert components[1] == {"text": 'うさぽ"サーバー', "color": "aqua"}
+    assert components[3] == {"text": "うさぽ", "color": "yellow"}
+    assert components[5] == {"text": "10", "color": "green", "bold": True}
