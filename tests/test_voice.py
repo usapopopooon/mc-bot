@@ -71,7 +71,7 @@ def test_formats_minecraft_events_for_speech() -> None:
     )
     assert (
         event_speech_text(LogEvent(EventType.DEATH, "Steve", "tried to swim in lava"), translator)
-        == "Steveさんが溶岩に落ちました"
+        == "Steveさんは溶岩遊泳を試みた"
     )
 
 
@@ -123,7 +123,7 @@ def test_death_speech_prefers_linked_discord_name() -> None:
             AdvancementTranslator.load(),
             discord_username="discord_name",
         )
-        == "discord_nameさんが溺れました"
+        == "discord_nameさんは溺死した"
     )
 
 
@@ -133,7 +133,7 @@ def test_death_speech_translates_vanilla_mob_name() -> None:
             LogEvent(EventType.DEATH, "Steve", "was blown up by Creeper"),
             AdvancementTranslator.load(),
         )
-        == "Steveさんがクリーパーに爆破されました"
+        == "Steveさんはクリーパーに爆破された"
     )
 
 

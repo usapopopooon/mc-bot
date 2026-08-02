@@ -40,7 +40,7 @@ def format_event(
             color = discord.Color.red()
         case EventType.DEATH:
             death = _escape_markdown(translate_death(event.detail))
-            message = f"💀 {identity} が{death}"
+            message = f"💀 {identity} は{death}"
             color = discord.Color.dark_red()
 
     if len(message) > _DISCORD_EMBED_DESCRIPTION_LIMIT:

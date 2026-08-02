@@ -78,7 +78,7 @@ def test_formats_death_with_linked_identity_without_notification_ping() -> None:
         123456789,
     )
 
-    assert embed.description == "💀 **Steve (<@123456789>) さん** がゾンビに倒されました"
+    assert embed.description == "💀 **Steve (<@123456789>) さん** はゾンビに殺害された"
     assert embed.color.value == 0x992D22
 
 
@@ -88,7 +88,7 @@ def test_formats_environmental_death_in_japanese() -> None:
         AdvancementTranslator.load(),
     )
 
-    assert embed.description == r"💀 **.Bedrock\_Playerさん** が高い場所から落下しました"
+    assert embed.description == r"💀 **.Bedrock\_Playerさん** は高い所から落ちた"
 
 
 def test_escapes_attacker_markdown_in_death_log() -> None:
@@ -97,7 +97,7 @@ def test_escapes_attacker_markdown_in_death_log() -> None:
         AdvancementTranslator.load(),
     )
 
-    assert embed.description == r"💀 **Steveさん** がBad\_Nameに倒されました"
+    assert embed.description == r"💀 **Steveさん** はBad\_Nameに殺害された"
 
 
 def test_translates_vanilla_mob_attacker_names() -> None:
@@ -106,4 +106,4 @@ def test_translates_vanilla_mob_attacker_names() -> None:
         AdvancementTranslator.load(),
     )
 
-    assert embed.description == "💀 **Steveさん** がスケルトンに射抜かれました"
+    assert embed.description == "💀 **Steveさん** はスケルトンに射抜かれた"

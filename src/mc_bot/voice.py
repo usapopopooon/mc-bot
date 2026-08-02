@@ -50,7 +50,7 @@ def event_speech_text(
         case EventType.LEAVE:
             text = f"{honored_name}がゲームから退出しました"
         case EventType.DEATH:
-            text = f"{honored_name}が{translate_death(event.detail)}"
+            text = f"{honored_name}は{translate_death(event.detail)}"
     if len(text) <= _MAX_SPEECH_LENGTH:
         return text
     return text[: _MAX_SPEECH_LENGTH - 1] + "…"
