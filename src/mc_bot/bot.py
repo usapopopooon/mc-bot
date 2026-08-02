@@ -74,6 +74,7 @@ _VOICE_CHECK_SPEECH = "マインクラフトの読み上げは正常に動作し
 _MOJANG_PROFILE_URL = "https://api.mojang.com/users/profiles/minecraft/"
 _GEYSER_XUID_URL = "https://api.geysermc.org/v2/xbox/xuid/"
 _PLAYERDB_XBOX_URL = "https://playerdb.co/api/player/xbox/"
+_STATUS_PANEL_REFRESH_SECONDS = 5 * 60
 
 
 class MinecraftDiscordBot(discord.Client):
@@ -134,6 +135,7 @@ class MinecraftDiscordBot(discord.Client):
         self._closing = False
         self._health_path = Path("/tmp/mc-bot-healthy")
         self._sync_ticks = 0
+        self._next_status_panel_refresh_at = time.monotonic() + _STATUS_PANEL_REFRESH_SECONDS
 
     def _register_commands(self) -> None:
         group = app_commands.Group(
@@ -1983,7 +1985,7 @@ class MinecraftDiscordBot(discord.Client):
                 if self._settings.voice_enabled:
                     await self._restore_voice_connection()
             self._schedule_player_count_refresh(delay=0)
-            self._schedule_status_panel_refresh(delay=0)
+            self._schedule_periodic_status_panel_refresh()
             self._ensure_minecraft_xp_started()
             await asyncio.sleep(10)
 
@@ -2286,6 +2288,13 @@ class MinecraftDiscordBot(discord.Client):
             self._refresh_status_panel_after_delay(delay),
             name="status-panel-refresh",
         )
+
+    def _schedule_periodic_status_panel_refresh(self) -> None:
+        now = time.monotonic()
+        if now < self._next_status_panel_refresh_at:
+            return
+        self._next_status_panel_refresh_at = now + _STATUS_PANEL_REFRESH_SECONDS
+        self._schedule_status_panel_refresh(delay=0)
 
     async def _refresh_status_panel_after_delay(self, delay: float) -> None:
         if delay:

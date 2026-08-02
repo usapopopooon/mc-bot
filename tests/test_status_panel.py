@@ -1,6 +1,6 @@
 import asyncio
 from datetime import UTC, datetime
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -148,3 +148,24 @@ def test_refresh_creates_then_reuses_same_status_message(tmp_path) -> None:
     assert len(channel.sent) == 1
     assert channel.message is not None
     assert len(channel.message.edits) == 1
+
+
+def test_periodic_refresh_runs_every_five_minutes(tmp_path, monkeypatch) -> None:
+    bot = MinecraftDiscordBot(
+        Config(
+            discord_token="secret",
+            settings_path=tmp_path / "settings.json",
+        )
+    )
+    bot._next_status_panel_refresh_at = 300
+    schedule = Mock()
+    bot._schedule_status_panel_refresh = schedule  # type: ignore[method-assign]
+
+    monkeypatch.setattr("mc_bot.bot.time.monotonic", lambda: 299)
+    bot._schedule_periodic_status_panel_refresh()
+    schedule.assert_not_called()
+
+    monkeypatch.setattr("mc_bot.bot.time.monotonic", lambda: 300)
+    bot._schedule_periodic_status_panel_refresh()
+    schedule.assert_called_once_with(delay=0)
+    assert bot._next_status_panel_refresh_at == 600
