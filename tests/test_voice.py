@@ -127,6 +127,16 @@ def test_death_speech_prefers_linked_discord_name() -> None:
     )
 
 
+def test_death_speech_translates_vanilla_mob_name() -> None:
+    assert (
+        event_speech_text(
+            LogEvent(EventType.DEATH, "Steve", "was blown up by Creeper"),
+            AdvancementTranslator.load(),
+        )
+        == "Steveさんがクリーパーに爆破されました"
+    )
+
+
 def test_limits_speech_to_internal_api_default_limit() -> None:
     text = event_speech_text(
         LogEvent(EventType.CHAT, "Steve", "x" * 200),
