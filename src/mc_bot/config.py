@@ -24,6 +24,9 @@ class Config:
     voicevox_tts_api_token: str = ""
     voicevox_speaker_id: int = 46
     voicevox_speed: float = 1.0
+    level_bot_api_url: str = ""
+    level_bot_api_token: str = ""
+    minecraft_xp_poll_seconds: int = 30
 
     @classmethod
     def from_environment(cls, environment: Mapping[str, str] | None = None) -> Config:
@@ -53,6 +56,19 @@ class Config:
             raise ValueError("VOICEVOX_SPEED must be a number") from error
         if not math.isfinite(speed) or not 0.5 <= speed <= 2.0:
             raise ValueError("VOICEVOX_SPEED must be between 0.5 and 2.0")
+        level_bot_url = values.get("LEVEL_BOT_API_URL", "").strip().rstrip("/")
+        level_bot_token = values.get("LEVEL_BOT_API_TOKEN", "").strip()
+        if bool(level_bot_url) != bool(level_bot_token):
+            raise ValueError("LEVEL_BOT_API_URL and LEVEL_BOT_API_TOKEN must be set together")
+        if level_bot_url and not level_bot_url.startswith(("http://", "https://")):
+            raise ValueError("LEVEL_BOT_API_URL must be an HTTP or HTTPS URL")
+        poll_text = values.get("MINECRAFT_XP_POLL_SECONDS", "30").strip()
+        try:
+            poll_seconds = int(poll_text)
+        except ValueError as error:
+            raise ValueError("MINECRAFT_XP_POLL_SECONDS must be an integer") from error
+        if not 10 <= poll_seconds <= 3600:
+            raise ValueError("MINECRAFT_XP_POLL_SECONDS must be between 10 and 3600")
         return cls(
             discord_token=token,
             rcon_host=values.get("MINECRAFT_RCON_HOST", "minecraft").strip() or "minecraft",
@@ -63,6 +79,9 @@ class Config:
             voicevox_tts_api_token=values.get("VOICEVOX_TTS_API_TOKEN", "").strip(),
             voicevox_speaker_id=speaker_id,
             voicevox_speed=speed,
+            level_bot_api_url=level_bot_url,
+            level_bot_api_token=level_bot_token,
+            minecraft_xp_poll_seconds=poll_seconds,
         )
 
 

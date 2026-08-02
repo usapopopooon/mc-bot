@@ -227,3 +227,51 @@ def test_preserves_removed_protected_whitelist_registration(tmp_path) -> None:
     updated = store.get(account.id)
     assert updated is not None
     assert updated.status == "active"
+
+
+def test_persists_minecraft_xp_observation_and_outbox(tmp_path) -> None:
+    store = AccountStore(tmp_path / "accounts.db")
+    store.initialize()
+    account = store.create_registration(
+        edition="java",
+        minecraft_name="Steve",
+        server_player_name="Steve",
+        discord_user_id=123,
+        discord_username="hoge",
+        source="self",
+        status="active",
+        created_by=123,
+    )
+
+    baseline = store.observe_minecraft_xp(
+        account_id=account.id,
+        discord_user_id=123,
+        guild_id=456,
+        current_xp=100,
+        observed_at="2026-08-02T00:00:00+00:00",
+    )
+    gained = store.observe_minecraft_xp(
+        account_id=account.id,
+        discord_user_id=123,
+        guild_id=456,
+        current_xp=350,
+        observed_at="2026-08-02T00:00:30+00:00",
+    )
+    spent = store.observe_minecraft_xp(
+        account_id=account.id,
+        discord_user_id=123,
+        guild_id=456,
+        current_xp=50,
+        observed_at="2026-08-02T00:01:00+00:00",
+    )
+
+    assert baseline is None
+    assert gained is not None
+    assert gained.minecraft_xp == 250
+    assert spent is None
+    assert store.list_linked_active() == [account]
+    assert store.list_minecraft_xp_outbox() == [gained]
+
+    store.mark_minecraft_xp_delivered(gained.event_id)
+
+    assert store.list_minecraft_xp_outbox() == []

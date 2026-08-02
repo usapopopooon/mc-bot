@@ -6,6 +6,7 @@ import re
 import time
 import uuid
 from dataclasses import replace
+from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import quote
 
@@ -16,6 +17,12 @@ from discord import app_commands
 from mc_bot.accounts import AccountStore, MinecraftAccount
 from mc_bot.config import Config
 from mc_bot.events import EventType, LogEvent, parse_log_line
+from mc_bot.experience import (
+    LevelBotXpClient,
+    experience_query_command,
+    parse_experience_query,
+    total_experience_points,
+)
 from mc_bot.formatting import format_event
 from mc_bot.player_count import (
     PLAYER_COUNT_CHANNEL_NAME,
@@ -84,6 +91,10 @@ class MinecraftDiscordBot(discord.Client):
             speaker_id=config.voicevox_speaker_id,
             speed=config.voicevox_speed,
         )
+        self._level_bot_xp = LevelBotXpClient(
+            config.level_bot_api_url,
+            config.level_bot_api_token,
+        )
         self._rcon = (
             RconClient(
                 config.rcon_host,
@@ -104,6 +115,7 @@ class MinecraftDiscordBot(discord.Client):
         self._health_task: asyncio.Task[None] | None = None
         self._player_count_task: asyncio.Task[None] | None = None
         self._player_count_name_task: asyncio.Task[None] | None = None
+        self._minecraft_xp_task: asyncio.Task[None] | None = None
         self._player_count_update_lock = asyncio.Lock()
         self._whitelist_operation_lock = asyncio.Lock()
         self._voice_disconnect_lock = asyncio.Lock()
@@ -196,6 +208,7 @@ class MinecraftDiscordBot(discord.Client):
             self._schedule_player_count_name_normalization()
         if self._settings.voice_enabled:
             await self._restore_voice_connection()
+        self._ensure_minecraft_xp_started()
 
         LOGGER.info(
             "Discord connected as %s; loaded %d advancement translations",
@@ -267,11 +280,16 @@ class MinecraftDiscordBot(discord.Client):
             self._player_count_name_task.cancel()
             await asyncio.gather(self._player_count_name_task, return_exceptions=True)
             self._player_count_name_task = None
+        if self._minecraft_xp_task is not None:
+            self._minecraft_xp_task.cancel()
+            await asyncio.gather(self._minecraft_xp_task, return_exceptions=True)
+            self._minecraft_xp_task = None
         if self._tailer_task is not None:
             self._tailer_task.cancel()
             await asyncio.gather(self._tailer_task, return_exceptions=True)
             self._tailer_task = None
         await self._voice_player.close()
+        await self._level_bot_xp.close()
         await super().close()
 
     @app_commands.describe(channel="通知先。省略時はコマンドを実行したチャンネル")
@@ -1867,7 +1885,84 @@ class MinecraftDiscordBot(discord.Client):
                 if self._settings.voice_enabled:
                     await self._restore_voice_connection()
             self._schedule_player_count_refresh(delay=0)
+            self._ensure_minecraft_xp_started()
             await asyncio.sleep(10)
+
+    def _ensure_minecraft_xp_started(self) -> None:
+        if (
+            not self._config.level_bot_api_url
+            or not self._config.level_bot_api_token
+            or self._rcon is None
+        ):
+            return
+        if self._minecraft_xp_task is not None and not self._minecraft_xp_task.done():
+            return
+        self._minecraft_xp_task = asyncio.create_task(
+            self._minecraft_xp_loop(), name="minecraft-xp-sync"
+        )
+
+    async def _minecraft_xp_loop(self) -> None:
+        while not self.is_closed():
+            try:
+                await self._sync_minecraft_xp()
+            except (OSError, RconError, RuntimeError, ValueError) as error:
+                LOGGER.warning("Minecraft XP synchronization failed: %s", error)
+            await asyncio.sleep(self._config.minecraft_xp_poll_seconds)
+
+    async def _sync_minecraft_xp(self) -> None:
+        guild_id = self._settings.guild_id
+        if guild_id is None:
+            return
+        if not await self._deliver_minecraft_xp_outbox():
+            # API障害中は観測を止める。復旧時に前回値との差分をまとめて送ることで、
+            # outboxがポーリング回数に比例して増え続けるのを防ぐ。
+            return
+
+        response = await asyncio.to_thread(self._require_rcon().execute, "list")
+        online = parse_online_players(response)
+        linked = {
+            account.server_player_name.casefold(): account
+            for account in await asyncio.to_thread(self._accounts.list_linked_active)
+        }
+        observed_at = datetime.now(UTC).isoformat()
+        for player_name in online:
+            account = linked.get(player_name.casefold())
+            if account is None or account.discord_user_id is None:
+                continue
+            try:
+                current_xp = await self._query_player_experience(player_name)
+            except (OSError, RconError, ValueError) as error:
+                LOGGER.debug("Could not query XP for %s: %s", player_name, error)
+                continue
+            await asyncio.to_thread(
+                self._accounts.observe_minecraft_xp,
+                account_id=account.id,
+                discord_user_id=account.discord_user_id,
+                guild_id=guild_id,
+                current_xp=current_xp,
+                observed_at=observed_at,
+            )
+        await self._deliver_minecraft_xp_outbox()
+
+    async def _query_player_experience(self, player_name: str) -> int:
+        rcon = self._require_rcon()
+        levels_response = await asyncio.to_thread(
+            rcon.execute, experience_query_command(player_name, "levels")
+        )
+        points_response = await asyncio.to_thread(
+            rcon.execute, experience_query_command(player_name, "points")
+        )
+        levels = parse_experience_query(levels_response, "levels")
+        points = parse_experience_query(points_response, "points")
+        return total_experience_points(levels, points)
+
+    async def _deliver_minecraft_xp_outbox(self) -> bool:
+        while events := await asyncio.to_thread(self._accounts.list_minecraft_xp_outbox):
+            for event in events:
+                if not await self._level_bot_xp.send(event):
+                    return False
+                await asyncio.to_thread(self._accounts.mark_minecraft_xp_delivered, event.event_id)
+        return True
 
     async def _enable_player_count_channel(
         self,

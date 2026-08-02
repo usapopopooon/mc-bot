@@ -22,6 +22,9 @@ def test_loads_required_and_default_configuration() -> None:
     assert config.voicevox_tts_api_token == ""
     assert config.voicevox_speaker_id == 46
     assert config.voicevox_speed == 1.0
+    assert config.level_bot_api_url == ""
+    assert config.level_bot_api_token == ""
+    assert config.minecraft_xp_poll_seconds == 30
 
 
 def test_rejects_missing_token() -> None:
@@ -66,6 +69,41 @@ def test_loads_voicevox_configuration() -> None:
     assert config.voicevox_tts_api_token == "tts-secret"
     assert config.voicevox_speaker_id == 3
     assert config.voicevox_speed == 1.25
+
+
+def test_loads_level_bot_xp_configuration() -> None:
+    config = Config.from_environment(
+        {
+            "DISCORD_TOKEN": "secret",
+            "LEVEL_BOT_API_URL": "https://levels.example.test/",
+            "LEVEL_BOT_API_TOKEN": "xp-secret",
+            "MINECRAFT_XP_POLL_SECONDS": "60",
+        }
+    )
+
+    assert config.level_bot_api_url == "https://levels.example.test"
+    assert config.level_bot_api_token == "xp-secret"
+    assert config.minecraft_xp_poll_seconds == 60
+
+
+@pytest.mark.parametrize(
+    "environment",
+    [
+        {"LEVEL_BOT_API_URL": "https://levels.example.test"},
+        {"LEVEL_BOT_API_TOKEN": "xp-secret"},
+        {
+            "LEVEL_BOT_API_URL": "ftp://levels.example.test",
+            "LEVEL_BOT_API_TOKEN": "xp-secret",
+        },
+        {"MINECRAFT_XP_POLL_SECONDS": "9"},
+        {"MINECRAFT_XP_POLL_SECONDS": "invalid"},
+    ],
+)
+def test_rejects_invalid_level_bot_xp_configuration(
+    environment: dict[str, str],
+) -> None:
+    with pytest.raises(ValueError):
+        Config.from_environment({"DISCORD_TOKEN": "secret", **environment})
 
 
 @pytest.mark.parametrize(

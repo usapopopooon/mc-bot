@@ -13,6 +13,9 @@ services:
       VOICEVOX_TTS_API_TOKEN: "${VOICEVOX_TTS_API_TOKEN:-}"
       VOICEVOX_SPEAKER_ID: "${VOICEVOX_SPEAKER_ID:-46}"
       VOICEVOX_SPEED: "${VOICEVOX_SPEED:-1.0}"
+      LEVEL_BOT_API_URL: "${LEVEL_BOT_API_URL:-}"
+      LEVEL_BOT_API_TOKEN: "${LEVEL_BOT_API_TOKEN:-}"
+      MINECRAFT_XP_POLL_SECONDS: "${MINECRAFT_XP_POLL_SECONDS:-30}"
     volumes:
       - minecraft-data:/minecraft
       - mc-bot-data:/data

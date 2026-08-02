@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -21,6 +22,16 @@ class MinecraftAccount:
     status: str
     created_by: int | None
     approval_message_id: int | None
+
+
+@dataclass(frozen=True, slots=True)
+class MinecraftXpOutboxEvent:
+    event_id: str
+    account_id: int
+    discord_user_id: int
+    guild_id: int
+    minecraft_xp: int
+    observed_at: str
 
 
 class AccountStore:
@@ -57,6 +68,23 @@ class AccountStore:
                     ON minecraft_accounts(discord_user_id);
                 CREATE INDEX IF NOT EXISTS accounts_status
                     ON minecraft_accounts(status);
+                CREATE TABLE IF NOT EXISTS minecraft_xp_observations (
+                    account_id INTEGER PRIMARY KEY
+                        REFERENCES minecraft_accounts(id) ON DELETE CASCADE,
+                    current_xp INTEGER NOT NULL CHECK (current_xp >= 0),
+                    observed_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS minecraft_xp_outbox (
+                    event_id TEXT PRIMARY KEY,
+                    account_id INTEGER NOT NULL,
+                    discord_user_id INTEGER NOT NULL,
+                    guild_id INTEGER NOT NULL,
+                    minecraft_xp INTEGER NOT NULL CHECK (minecraft_xp > 0),
+                    observed_at TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS minecraft_xp_outbox_created
+                    ON minecraft_xp_outbox(created_at);
                 """
             )
 
@@ -303,6 +331,105 @@ class AccountStore:
                 (discord_user_id,),
             ).fetchall()
         return [_account(row) for row in rows]
+
+    def list_linked_active(self) -> list[MinecraftAccount]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM minecraft_accounts
+                WHERE discord_user_id IS NOT NULL AND status = 'active'
+                ORDER BY id
+                """
+            ).fetchall()
+        return [_account(row) for row in rows]
+
+    def observe_minecraft_xp(
+        self,
+        *,
+        account_id: int,
+        discord_user_id: int,
+        guild_id: int,
+        current_xp: int,
+        observed_at: str,
+    ) -> MinecraftXpOutboxEvent | None:
+        """観測値更新と正の差分outbox作成を同一transactionで行う。"""
+        if current_xp < 0:
+            raise ValueError("current_xp must not be negative")
+        with self._connect() as connection:
+            previous = connection.execute(
+                "SELECT current_xp FROM minecraft_xp_observations WHERE account_id = ?",
+                (account_id,),
+            ).fetchone()
+            connection.execute(
+                """
+                INSERT INTO minecraft_xp_observations (account_id, current_xp, observed_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(account_id) DO UPDATE SET
+                    current_xp = excluded.current_xp,
+                    observed_at = excluded.observed_at
+                """,
+                (account_id, current_xp, observed_at),
+            )
+            if previous is None or current_xp <= int(previous["current_xp"]):
+                return None
+
+            event = MinecraftXpOutboxEvent(
+                event_id=str(uuid.uuid4()),
+                account_id=account_id,
+                discord_user_id=discord_user_id,
+                guild_id=guild_id,
+                minecraft_xp=current_xp - int(previous["current_xp"]),
+                observed_at=observed_at,
+            )
+            connection.execute(
+                """
+                INSERT INTO minecraft_xp_outbox (
+                    event_id, account_id, discord_user_id, guild_id,
+                    minecraft_xp, observed_at, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    event.event_id,
+                    event.account_id,
+                    event.discord_user_id,
+                    event.guild_id,
+                    event.minecraft_xp,
+                    event.observed_at,
+                    _now(),
+                ),
+            )
+        return event
+
+    def list_minecraft_xp_outbox(self, limit: int = 100) -> list[MinecraftXpOutboxEvent]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT event_id, account_id, discord_user_id, guild_id,
+                       minecraft_xp, observed_at
+                FROM minecraft_xp_outbox
+                ORDER BY created_at, event_id
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        return [
+            MinecraftXpOutboxEvent(
+                event_id=row["event_id"],
+                account_id=row["account_id"],
+                discord_user_id=row["discord_user_id"],
+                guild_id=row["guild_id"],
+                minecraft_xp=row["minecraft_xp"],
+                observed_at=row["observed_at"],
+            )
+            for row in rows
+        ]
+
+    def mark_minecraft_xp_delivered(self, event_id: str) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                "DELETE FROM minecraft_xp_outbox WHERE event_id = ?",
+                (event_id,),
+            )
 
     def link_existing(
         self,
