@@ -69,7 +69,7 @@ def test_refreshes_status_from_rcon_only_when_count_changes() -> None:
     )
     rcon = FakeRcon("There are 2 of a max of 20 players online: Steve, Alex")
     bot._rcon = rcon  # type: ignore[assignment]
-    channel = FakeVoiceChannel("マイクラステータス")
+    channel = FakeVoiceChannel("マイクラオンライン数")
 
     asyncio.run(bot._refresh_player_count_channel(channel))  # type: ignore[arg-type]
     asyncio.run(bot._refresh_player_count_channel(channel))  # type: ignore[arg-type]
@@ -86,7 +86,7 @@ def test_marks_channel_stopped_when_rcon_is_unavailable() -> None:
         player_count_enabled=True,
     )
     bot._rcon = FakeRcon(OSError("offline"))  # type: ignore[assignment]
-    channel = FakeVoiceChannel("マイクラステータス")
+    channel = FakeVoiceChannel("マイクラオンライン数")
 
     asyncio.run(bot._refresh_player_count_channel(channel))  # type: ignore[arg-type]
 

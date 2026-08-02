@@ -6,7 +6,7 @@ _ONLINE_COUNT = re.compile(
     r"\bThere are\s+(\d+)\s+of a max of\s+\d+\s+players online\b",
     re.IGNORECASE,
 )
-PLAYER_COUNT_CHANNEL_NAME = "マイクラステータス"
+PLAYER_COUNT_CHANNEL_NAME = "マイクラオンライン数"
 PLAYER_COUNT_DISABLED_STATUS = "⚫人数表示停止"
 
 

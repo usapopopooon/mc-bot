@@ -44,6 +44,12 @@ from mc_bot.server_admin import (
     validate_rcon_response,
 )
 from mc_bot.settings import RuntimeSettings, SettingsStore
+from mc_bot.status_panel import (
+    ServerStatusSnapshot,
+    StatusPlayer,
+    parse_server_list_response,
+    status_panel_embed,
+)
 from mc_bot.tailer import LogTailer
 from mc_bot.translations import AdvancementTranslator
 from mc_bot.ui import (
@@ -116,8 +122,10 @@ class MinecraftDiscordBot(discord.Client):
         self._health_task: asyncio.Task[None] | None = None
         self._player_count_task: asyncio.Task[None] | None = None
         self._player_count_name_task: asyncio.Task[None] | None = None
+        self._status_panel_task: asyncio.Task[None] | None = None
         self._minecraft_xp_task: asyncio.Task[None] | None = None
         self._player_count_update_lock = asyncio.Lock()
+        self._status_panel_update_lock = asyncio.Lock()
         self._whitelist_operation_lock = asyncio.Lock()
         self._voice_disconnect_lock = asyncio.Lock()
         self._last_player_count_status: str | None = None
@@ -154,6 +162,10 @@ class MinecraftDiscordBot(discord.Client):
             name="player-count",
             description="オンライン人数チャンネルを管理します",
         )(self._configure_player_count)
+        group.command(
+            name="status-panel",
+            description="公開Minecraftステータスパネルを設置します",
+        )(self._configure_status_panel)
         group.command(
             name="show",
             description="現在のBot設定と稼働状態を表示します",
@@ -207,6 +219,7 @@ class MinecraftDiscordBot(discord.Client):
         if self._settings.player_count_enabled:
             self._schedule_player_count_refresh(delay=0)
             self._schedule_player_count_name_normalization()
+        self._schedule_status_panel_refresh(delay=0)
         if self._settings.voice_enabled:
             await self._restore_voice_connection()
         self._ensure_minecraft_xp_started()
@@ -287,6 +300,10 @@ class MinecraftDiscordBot(discord.Client):
             self._player_count_name_task.cancel()
             await asyncio.gather(self._player_count_name_task, return_exceptions=True)
             self._player_count_name_task = None
+        if self._status_panel_task is not None:
+            self._status_panel_task.cancel()
+            await asyncio.gather(self._status_panel_task, return_exceptions=True)
+            self._status_panel_task = None
         if self._minecraft_xp_task is not None:
             self._minecraft_xp_task.cancel()
             await asyncio.gather(self._minecraft_xp_task, return_exceptions=True)
@@ -357,6 +374,75 @@ class MinecraftDiscordBot(discord.Client):
         channel: discord.TextChannel | None = None,
     ) -> None:
         await self._configure_panel(interaction, channel, admin=True)
+
+    @app_commands.describe(channel="公開ステータスパネルの投稿先。省略時は現在のチャンネル")
+    async def _configure_status_panel(
+        self,
+        interaction: discord.Interaction,
+        channel: discord.TextChannel | None = None,
+    ) -> None:
+        if not await self._require_server_manager(interaction):
+            return
+        target = channel or interaction.channel
+        if not isinstance(target, discord.TextChannel):
+            await interaction.response.send_message(
+                "パネルの投稿先にはテキストチャンネルを指定してください。",
+                ephemeral=True,
+            )
+            return
+        await interaction.response.defer(ephemeral=True)
+        try:
+            self._ensure_same_guild(target.guild.id)
+            self._require_rcon()
+            await self._resolve_and_validate_channel(
+                target.id,
+                require_embeds=True,
+                require_message_history=True,
+            )
+            if not target.permissions_for(target.guild.default_role).view_channel:
+                raise RuntimeError(
+                    "全員が見られるよう、投稿先で@everyoneの「チャンネルを見る」を許可してください"
+                )
+            snapshot = await self._read_server_status_snapshot()
+            embed = status_panel_embed(snapshot)
+            old_channel_id: int | None = None
+            old_message_id: int | None = None
+            message: discord.Message | None = None
+            async with self._status_panel_update_lock:
+                old_channel_id = self._settings.status_panel_channel_id
+                old_message_id = self._settings.status_panel_message_id
+                if old_channel_id == target.id and old_message_id is not None:
+                    try:
+                        message = await target.fetch_message(old_message_id)
+                        await message.edit(
+                            embed=embed,
+                            allowed_mentions=discord.AllowedMentions.none(),
+                        )
+                    except discord.NotFound:
+                        message = None
+                if message is None:
+                    message = await target.send(
+                        embed=embed,
+                        allowed_mentions=discord.AllowedMentions.none(),
+                    )
+                updated = replace(
+                    self._settings,
+                    guild_id=target.guild.id,
+                    status_panel_channel_id=target.id,
+                    status_panel_message_id=message.id,
+                )
+                await self._save_settings(updated)
+            if old_message_id != message.id or old_channel_id != target.id:
+                await self._delete_old_status_panel(old_channel_id, old_message_id)
+        except (OSError, RuntimeError, ValueError, discord.DiscordException) as error:
+            LOGGER.warning("Could not configure status panel: %s", error)
+            await interaction.followup.send(f"設置できませんでした: {error}", ephemeral=True)
+            return
+        await interaction.followup.send(
+            f"公開Minecraftステータスパネルを {target.mention} に設置しました。",
+            ephemeral=True,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
 
     @app_commands.describe(
         mode="自動承認または管理者承認",
@@ -493,6 +579,8 @@ class MinecraftDiscordBot(discord.Client):
                     f"ログ通知先: {self._channel_text(self._settings.channel_id)}",
                     f"参加パネル: {self._channel_text(self._settings.panel_channel_id)}",
                     f"管理パネル: {self._channel_text(self._settings.admin_panel_channel_id)}",
+                    "ステータスパネル: "
+                    f"{self._channel_text(self._settings.status_panel_channel_id)}",
                     f"承認方式: {mode}",
                     f"申請確認先: {self._channel_text(self._settings.approval_channel_id)}",
                     "人数表示: "
@@ -1767,6 +1855,7 @@ class MinecraftDiscordBot(discord.Client):
             embed = format_event(event, self._translator, discord_user_id)
             if event.type in {EventType.JOIN, EventType.LEAVE}:
                 self._schedule_player_count_refresh()
+                self._schedule_status_panel_refresh()
             retry_delay = 1
             while not self.is_closed():
                 await self.wait_until_ready()
@@ -1823,7 +1912,11 @@ class MinecraftDiscordBot(discord.Client):
         )
 
     async def _resolve_and_validate_channel(
-        self, channel_id: int, *, require_embeds: bool = False
+        self,
+        channel_id: int,
+        *,
+        require_embeds: bool = False,
+        require_message_history: bool = False,
     ) -> discord.TextChannel:
         channel = self.get_channel(channel_id)
         if channel is None:
@@ -1838,6 +1931,8 @@ class MinecraftDiscordBot(discord.Client):
             raise RuntimeError("Botに「チャンネルを見る」「メッセージを送信」権限が必要です")
         if require_embeds and not permissions.embed_links:
             raise RuntimeError("Botに「埋め込みリンク」権限が必要です")
+        if require_message_history and not permissions.read_message_history:
+            raise RuntimeError("Botに「メッセージ履歴を読む」権限が必要です")
         return channel
 
     async def _connect_voice_channel(self, channel: discord.VoiceChannel) -> bool:
@@ -1892,6 +1987,7 @@ class MinecraftDiscordBot(discord.Client):
                 if self._settings.voice_enabled:
                     await self._restore_voice_connection()
             self._schedule_player_count_refresh(delay=0)
+            self._schedule_status_panel_refresh(delay=0)
             self._ensure_minecraft_xp_started()
             await asyncio.sleep(10)
 
@@ -2107,6 +2203,113 @@ class MinecraftDiscordBot(discord.Client):
             await self._refresh_player_count_channel()
         except (RuntimeError, discord.DiscordException) as error:
             LOGGER.warning("Could not update player count channel: %s", error)
+
+    async def _read_server_status_snapshot(self) -> ServerStatusSnapshot:
+        checked_at = datetime.now(UTC)
+        try:
+            response = await asyncio.to_thread(self._require_rcon().execute, "list")
+            player_names, max_players = parse_server_list_response(response)
+        except (OSError, RconError, RuntimeError, ValueError) as error:
+            LOGGER.warning("Could not read Minecraft server status: %s", error)
+            return ServerStatusSnapshot(
+                online=False,
+                players=(),
+                max_players=None,
+                checked_at=checked_at,
+            )
+
+        linked = {
+            account.server_player_name.casefold(): account
+            for account in await asyncio.to_thread(self._accounts.list_linked_active)
+        }
+        players = tuple(
+            StatusPlayer(
+                minecraft_name=player_name,
+                discord_user_id=(
+                    linked[player_name.casefold()].discord_user_id
+                    if player_name.casefold() in linked
+                    else None
+                ),
+            )
+            for player_name in sorted(player_names, key=str.casefold)
+        )
+        return ServerStatusSnapshot(
+            online=True,
+            players=players,
+            max_players=max_players,
+            checked_at=checked_at,
+        )
+
+    async def _refresh_status_panel(self) -> None:
+        async with self._status_panel_update_lock:
+            channel_id = self._settings.status_panel_channel_id
+            if channel_id is None:
+                return
+            channel = await self._resolve_and_validate_channel(
+                channel_id,
+                require_embeds=True,
+                require_message_history=True,
+            )
+            snapshot = await self._read_server_status_snapshot()
+            embed = status_panel_embed(snapshot)
+            message: discord.Message | None = None
+            message_id = self._settings.status_panel_message_id
+            if message_id is not None:
+                try:
+                    message = await channel.fetch_message(message_id)
+                except discord.NotFound:
+                    message = None
+            if message is None:
+                message = await channel.send(
+                    embed=embed,
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+                await self._save_settings(
+                    replace(self._settings, status_panel_message_id=message.id)
+                )
+                return
+            await message.edit(
+                embed=embed,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+
+    async def _refresh_status_panel_safely(self) -> None:
+        if self._settings.status_panel_channel_id is None:
+            return
+        try:
+            await self._refresh_status_panel()
+        except (OSError, RuntimeError, ValueError, discord.DiscordException) as error:
+            LOGGER.warning("Could not update Minecraft status panel: %s", error)
+
+    def _schedule_status_panel_refresh(self, *, delay: float = 1) -> None:
+        if self._settings.status_panel_channel_id is None:
+            return
+        if self._status_panel_task is not None and not self._status_panel_task.done():
+            return
+        self._status_panel_task = asyncio.create_task(
+            self._refresh_status_panel_after_delay(delay),
+            name="status-panel-refresh",
+        )
+
+    async def _refresh_status_panel_after_delay(self, delay: float) -> None:
+        if delay:
+            await asyncio.sleep(delay)
+        await self._refresh_status_panel_safely()
+
+    async def _delete_old_status_panel(
+        self, channel_id: int | None, message_id: int | None
+    ) -> None:
+        if channel_id is None or message_id is None:
+            return
+        try:
+            channel = await self._resolve_and_validate_channel(
+                channel_id, require_message_history=True
+            )
+            message = await channel.fetch_message(message_id)
+            if self.user is not None and message.author.id == self.user.id:
+                await message.delete()
+        except RuntimeError, discord.NotFound, discord.DiscordException:
+            return
 
     def _schedule_player_count_refresh(self, *, delay: float = 1) -> None:
         if not self._settings.player_count_enabled:

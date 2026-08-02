@@ -63,6 +63,7 @@ def test_registers_manager_only_configuration_commands() -> None:
         "panel",
         "player-count",
         "show",
+        "status-panel",
     }
     player_count = group.get_command("player-count")
     assert isinstance(player_count, app_commands.Command)
