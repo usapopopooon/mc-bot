@@ -375,7 +375,7 @@ class MinecraftDiscordBot(discord.Client):
     ) -> None:
         await self._configure_panel(interaction, channel, admin=True)
 
-    @app_commands.describe(channel="公開ステータスパネルの投稿先。省略時は現在のチャンネル")
+    @app_commands.describe(channel="ステータスパネルの投稿先。省略時は現在のチャンネル")
     async def _configure_status_panel(
         self,
         interaction: discord.Interaction,
@@ -399,10 +399,6 @@ class MinecraftDiscordBot(discord.Client):
                 require_embeds=True,
                 require_message_history=True,
             )
-            if not target.permissions_for(target.guild.default_role).view_channel:
-                raise RuntimeError(
-                    "全員が見られるよう、投稿先で@everyoneの「チャンネルを見る」を許可してください"
-                )
             snapshot = await self._read_server_status_snapshot()
             embed = status_panel_embed(snapshot)
             old_channel_id: int | None = None
@@ -439,7 +435,7 @@ class MinecraftDiscordBot(discord.Client):
             await interaction.followup.send(f"設置できませんでした: {error}", ephemeral=True)
             return
         await interaction.followup.send(
-            f"公開Minecraftステータスパネルを {target.mention} に設置しました。",
+            f"Minecraftステータスパネルを {target.mention} に設置しました。",
             ephemeral=True,
             allowed_mentions=discord.AllowedMentions.none(),
         )
