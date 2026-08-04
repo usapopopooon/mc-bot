@@ -96,6 +96,7 @@ def test_loads_level_bot_xp_configuration() -> None:
             "LEVEL_BOT_API_TOKEN": "xp-secret",
         },
         {"MINECRAFT_XP_POLL_SECONDS": "9"},
+        {"MINECRAFT_XP_POLL_SECONDS": "61"},
         {"MINECRAFT_XP_POLL_SECONDS": "invalid"},
     ],
 )

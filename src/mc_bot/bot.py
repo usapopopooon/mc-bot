@@ -1871,6 +1871,12 @@ class MinecraftDiscordBot(discord.Client):
                 self._online_player_names.discard(event.player_name.casefold())
             account = await asyncio.to_thread(self._accounts.find_by_player_name, event.player_name)
             discord_user_id, discord_username = await self._discord_identity(account)
+            if (
+                event.type is EventType.LEAVE
+                and account is not None
+                and account.discord_user_id is not None
+            ):
+                await self._send_voice_bonus_final_heartbeat(account)
             embed = format_event(event, self._translator, discord_user_id)
             reward_embed: discord.Embed | None = None
             reward_command: str | None = None
@@ -1961,11 +1967,12 @@ class MinecraftDiscordBot(discord.Client):
                 await asyncio.to_thread(self._tailer.acknowledge, pending_line)
                 self._delivery_healthy = True
                 self._queue_voice_event(event, discord_username)
-                if account is not None and account.discord_user_id is not None:
-                    if event.type is EventType.JOIN:
-                        await self._sync_voice_bonus_for_account(account)
-                    elif event.type is EventType.LEAVE:
-                        await self._set_voice_bonus_state(account, active=False)
+                if (
+                    account is not None
+                    and account.discord_user_id is not None
+                    and event.type is EventType.JOIN
+                ):
+                    await self._sync_voice_bonus_for_account(account)
                 break
 
     def _queue_voice_event(self, event: LogEvent, discord_username: str | None) -> None:
@@ -2161,7 +2168,7 @@ class MinecraftDiscordBot(discord.Client):
             account.server_player_name.casefold(): account
             for account in await asyncio.to_thread(self._accounts.list_linked_active)
         }
-        observed_at = datetime.now(UTC).isoformat()
+        observed_at = datetime.now(UTC).replace(microsecond=0).isoformat()
         previously_active_users = set(self._voice_bonus_active_users)
         active_bonus_users = await self._sync_voice_bonus_heartbeats(
             online,
@@ -2239,7 +2246,7 @@ class MinecraftDiscordBot(discord.Client):
         if guild_id is None or user_id is None:
             return
         was_active = user_id in self._voice_bonus_active_users
-        observed_at = datetime.now(UTC).isoformat()
+        observed_at = datetime.now(UTC).replace(microsecond=0).isoformat()
         if was_active:
             await self._observe_minecraft_xp_for_account(
                 account,
@@ -2262,6 +2269,18 @@ class MinecraftDiscordBot(discord.Client):
                     double_in_game_xp=False,
                 )
             await self._set_voice_bonus_state(account, active=result.bonus_active)
+
+    async def _send_voice_bonus_final_heartbeat(self, account: MinecraftAccount) -> None:
+        guild_id = self._settings.guild_id
+        user_id = account.discord_user_id
+        if guild_id is not None and user_id is not None:
+            await self._level_bot_xp.send_voice_heartbeat(
+                guild_id=guild_id,
+                discord_user_id=user_id,
+                account_id=account.id,
+                observed_at=datetime.now(UTC).replace(microsecond=0).isoformat(),
+            )
+        await self._set_voice_bonus_state(account, active=False)
 
     async def _observe_minecraft_xp_for_account(
         self,

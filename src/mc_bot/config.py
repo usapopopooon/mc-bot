@@ -67,8 +67,8 @@ class Config:
             poll_seconds = int(poll_text)
         except ValueError as error:
             raise ValueError("MINECRAFT_XP_POLL_SECONDS must be an integer") from error
-        if not 10 <= poll_seconds <= 3600:
-            raise ValueError("MINECRAFT_XP_POLL_SECONDS must be between 10 and 3600")
+        if not 10 <= poll_seconds <= 60:
+            raise ValueError("MINECRAFT_XP_POLL_SECONDS must be between 10 and 60")
         return cls(
             discord_token=token,
             rcon_host=values.get("MINECRAFT_RCON_HOST", "minecraft").strip() or "minecraft",

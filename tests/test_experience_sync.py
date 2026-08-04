@@ -471,6 +471,54 @@ def test_advancement_keeps_original_log_then_sends_reward_everywhere(tmp_path) -
     assert bot._accounts.list_minecraft_xp_outbox() == []
 
 
+def test_minecraft_leave_sends_final_voice_heartbeat_before_discord_log(tmp_path) -> None:
+    config = Config(
+        discord_token="test",
+        accounts_path=tmp_path / "accounts.db",
+        rcon_password="test",
+        level_bot_api_url="https://levels.example.test",
+        level_bot_api_token="xp-secret",
+    )
+    bot = MinecraftDiscordBot(config)
+    bot._accounts.initialize()
+    bot._accounts.create_registration(
+        edition="java",
+        minecraft_name="Steve",
+        server_player_name="Steve",
+        discord_user_id=123,
+        discord_username="hoge",
+        source="self",
+        status="active",
+        created_by=123,
+    )
+    bot._settings = RuntimeSettings(guild_id=456)
+    bot._voice_bonus_active_users.add(123)
+    line = PendingLine(
+        "[12:34:56] [Server thread/INFO]: Steve left the game",
+        Cursor("device:inode", 100),
+    )
+    tailer = OneLineTailer(line)
+    bot._tailer = tailer  # type: ignore[assignment]
+    bot.wait_until_ready = AsyncMock()  # type: ignore[method-assign]
+    delivery_order: list[str] = []
+
+    async def heartbeat(**_kwargs):  # type: ignore[no-untyped-def]
+        delivery_order.append("heartbeat")
+        return MinecraftVoiceHeartbeatResult(10, True)
+
+    async def send_log(_embed):  # type: ignore[no-untyped-def]
+        delivery_order.append("discord")
+
+    bot._level_bot_xp.send_voice_heartbeat = heartbeat  # type: ignore[method-assign]
+    bot._send = send_log  # type: ignore[method-assign]
+
+    asyncio.run(bot._forward_logs())
+
+    assert delivery_order == ["heartbeat", "discord"]
+    assert 123 not in bot._voice_bonus_active_users
+    assert tailer.acknowledged == [line]
+
+
 def test_sync_pauses_observation_while_api_outbox_is_blocked(tmp_path) -> None:
     config = Config(
         discord_token="test",
