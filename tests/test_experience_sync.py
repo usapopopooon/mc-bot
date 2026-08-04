@@ -132,8 +132,12 @@ def test_sync_announces_voice_bonus_start_once_with_cooldown(tmp_path) -> None:
 
     async def exercise() -> None:
         await bot._sync_minecraft_xp()
+        send_log.assert_not_awaited()
+        assert not any(command.startswith("tellraw @a ") for command in rcon.commands)
         await bot._sync_minecraft_xp()
+        send_log.assert_not_awaited()
         await bot._sync_minecraft_xp()
+        send_log.assert_not_awaited()
         await bot._sync_minecraft_xp()
 
     asyncio.run(exercise())

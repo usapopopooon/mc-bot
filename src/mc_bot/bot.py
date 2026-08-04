@@ -145,6 +145,7 @@ class MinecraftDiscordBot(discord.Client):
         self._minecraft_xp_observation_lock = asyncio.Lock()
         self._online_player_names: set[str] = set()
         self._voice_bonus_active_users: set[int] = set()
+        self._voice_bonus_initialized_users: set[int] = set()
         self._voice_bonus_last_notified: dict[int, float] = {}
         self._last_player_count_status: str | None = None
         self._channel: discord.TextChannel | None = None
@@ -2215,18 +2216,24 @@ class MinecraftDiscordBot(discord.Client):
             self._voice_bonus_active_users.discard(user_id)
         active_users: set[int] = set()
         for account in by_user.values():
+            user_id = account.discord_user_id
+            if user_id is None:
+                continue
             result = await self._level_bot_xp.send_voice_heartbeat(
                 guild_id=guild_id,
-                discord_user_id=account.discord_user_id or 0,
+                discord_user_id=user_id,
                 account_id=account.id,
                 observed_at=observed_at,
             )
             if result is not None:
                 if result.bonus_active:
-                    active_users.add(account.discord_user_id or 0)
+                    active_users.add(user_id)
+                notify = user_id in self._voice_bonus_initialized_users
+                self._voice_bonus_initialized_users.add(user_id)
                 await self._set_voice_bonus_state(
                     account,
                     active=result.bonus_active,
+                    notify=notify,
                 )
         return active_users
 
@@ -2279,6 +2286,7 @@ class MinecraftDiscordBot(discord.Client):
                     observed_at=observed_at,
                     double_in_game_xp=False,
                 )
+            self._voice_bonus_initialized_users.add(user_id)
             await self._set_voice_bonus_state(account, active=result.bonus_active)
             if announce_standard_xp and not result.bonus_active:
                 await self._announce_server_xp_started(account)
@@ -2356,7 +2364,13 @@ class MinecraftDiscordBot(discord.Client):
                 error,
             )
 
-    async def _set_voice_bonus_state(self, account: MinecraftAccount, *, active: bool) -> None:
+    async def _set_voice_bonus_state(
+        self,
+        account: MinecraftAccount,
+        *,
+        active: bool,
+        notify: bool = True,
+    ) -> None:
         user_id = account.discord_user_id
         if user_id is None:
             return
@@ -2368,6 +2382,8 @@ class MinecraftDiscordBot(discord.Client):
             if user_id in self._voice_bonus_active_users:
                 return
             self._voice_bonus_active_users.add(user_id)
+            if not notify:
+                return
             now = time.monotonic()
             last_notified = self._voice_bonus_last_notified.get(user_id)
             if (
