@@ -43,7 +43,8 @@ def test_formats_voice_bonus_started_without_ping() -> None:
     assert embed.description == (
         "🎮🔊 **[うさぽサーバー] Steve (<@123>) さん** が"
         "MinecraftとVCに同時接続しました\n"
-        "同時接続中は、サーバーでのVC XPが **2倍** になります!"
+        "同時接続中は、サーバーでの **VC XP** と "
+        "**Minecraft内の経験値** が2倍になります!"
     )
     assert embed.color.value == 0x2ECC71
 

@@ -42,7 +42,8 @@ level-bot XPを100付与します。Minecraft内では標準の進捗通知の�
 同じアカウントの同じ進捗に報酬を重複付与しません。
 
 Discord連携済みのプレイヤーがMinecraftとDiscord VCに同時接続している間は、
-level-botのVC XPが2倍になります。同時接続が始まった時だけ、Minecraft内の
+level-botのVC XPと、通常プレイで獲得したMinecraft内の経験値が2倍になります。
+同時接続が始まった時だけ、Minecraft内の
 `tellraw` とDiscordの通知チャンネルへ開始通知を送ります。短時間の再接続は60秒の
 クールダウンで連投を防ぎ、終了通知は送りません。
 

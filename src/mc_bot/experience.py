@@ -76,6 +76,14 @@ def experience_query_command(player_name: str, unit: str) -> str:
     return f"experience query {player_name} {unit}"
 
 
+def experience_add_points_command(player_name: str, points: int) -> str:
+    if _SAFE_PLAYER_NAME.fullmatch(player_name) is None:
+        raise ValueError("player_name contains unsafe RCON characters")
+    if points <= 0:
+        raise ValueError("points must be positive")
+    return f"experience add {player_name} {points} points"
+
+
 def level_up_tellraw_command(event: MinecraftLevelUpEvent) -> str:
     """Discordサーバー名と表示名を使った安全な色付きtellrawを作る。"""
     components = [
@@ -119,7 +127,11 @@ def voice_bonus_started_tellraw_command(server_name: str, player_name: str) -> s
         {"text": "] "},
         {"text": player_name, "color": "yellow"},
         {"text": "さんがMinecraftとVCに同時接続したので、"},
-        {"text": "VC XPが2倍", "color": "green", "bold": True},
+        {
+            "text": "VC XPとMinecraft内の経験値が2倍",
+            "color": "green",
+            "bold": True,
+        },
         {"text": "になりました!"},
     ]
     return f"tellraw @a {json.dumps(components, ensure_ascii=False, separators=(',', ':'))}"

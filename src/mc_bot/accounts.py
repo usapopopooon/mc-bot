@@ -362,8 +362,14 @@ class AccountStore:
         guild_id: int,
         current_xp: int,
         observed_at: str,
+        double_in_game_xp: bool = False,
     ) -> MinecraftXpOutboxEvent | None:
-        """観測値更新と正の差分outbox作成を同一transactionで行う。"""
+        """観測値更新と正の差分outbox作成を同一transactionで行う。
+
+        ``double_in_game_xp`` の場合は、正の差分と同量をRCONで追加する前提で
+        追加後の値を観測基準にする。mc-bot自身の追加分を次回また増分として
+        扱わないための処理で、outboxにはプレイヤーが得た元の差分だけを入れる。
+        """
         if current_xp < 0:
             raise ValueError("current_xp must not be negative")
         with self._connect() as connection:
@@ -371,6 +377,12 @@ class AccountStore:
                 "SELECT current_xp FROM minecraft_xp_observations WHERE account_id = ?",
                 (account_id,),
             ).fetchone()
+            gained_xp = (
+                current_xp - int(previous["current_xp"])
+                if previous is not None and current_xp > int(previous["current_xp"])
+                else 0
+            )
+            expected_xp = current_xp + gained_xp if double_in_game_xp else current_xp
             connection.execute(
                 """
                 INSERT INTO minecraft_xp_observations (account_id, current_xp, observed_at)
@@ -379,9 +391,9 @@ class AccountStore:
                     current_xp = excluded.current_xp,
                     observed_at = excluded.observed_at
                 """,
-                (account_id, current_xp, observed_at),
+                (account_id, expected_xp, observed_at),
             )
-            if previous is None or current_xp <= int(previous["current_xp"]):
+            if gained_xp <= 0:
                 return None
 
             event = MinecraftXpOutboxEvent(
@@ -389,7 +401,7 @@ class AccountStore:
                 account_id=account_id,
                 discord_user_id=discord_user_id,
                 guild_id=guild_id,
-                minecraft_xp=current_xp - int(previous["current_xp"]),
+                minecraft_xp=gained_xp,
                 observed_at=observed_at,
             )
             connection.execute(
@@ -410,6 +422,24 @@ class AccountStore:
                 ),
             )
         return event
+
+    def set_minecraft_xp_observation(
+        self, *, account_id: int, current_xp: int, observed_at: str
+    ) -> None:
+        """XP観測基準だけを更新する。RCONボーナス失敗時の復元にも使う。"""
+        if current_xp < 0:
+            raise ValueError("current_xp must not be negative")
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO minecraft_xp_observations (account_id, current_xp, observed_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(account_id) DO UPDATE SET
+                    current_xp = excluded.current_xp,
+                    observed_at = excluded.observed_at
+                """,
+                (account_id, current_xp, observed_at),
+            )
 
     def claim_advancement_reward(
         self,

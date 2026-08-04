@@ -95,7 +95,8 @@ def format_voice_bonus_started(
         description=(
             f"🎮🔊 **[{server_name}] {player_name} (<@{discord_user_id}>) さん** が"
             "MinecraftとVCに同時接続しました\n"
-            "同時接続中は、サーバーでのVC XPが **2倍** になります!"
+            "同時接続中は、サーバーでの **VC XP** と "
+            "**Minecraft内の経験値** が2倍になります!"
         ),
         color=discord.Color.green(),
     )

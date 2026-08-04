@@ -192,6 +192,8 @@ def test_validates_rcon_command_response() -> None:
     assert validate_rcon_response("§aSet the time to 1000") == "Set the time to 1000"
     with pytest.raises(ValueError, match="Unknown command"):
         validate_rcon_response("Unknown command. Type /help for help.")
+    with pytest.raises(ValueError, match="No entity"):
+        validate_rcon_response("No entity was found")
 
 
 def test_reads_actual_whitelist_state(tmp_path) -> None:

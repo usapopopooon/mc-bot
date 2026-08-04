@@ -277,6 +277,63 @@ def test_persists_minecraft_xp_observation_and_outbox(tmp_path) -> None:
     assert store.list_minecraft_xp_outbox() == []
 
 
+def test_doubled_minecraft_xp_is_not_observed_again(tmp_path) -> None:
+    store = AccountStore(tmp_path / "accounts.db")
+    store.initialize()
+    account = store.create_registration(
+        edition="java",
+        minecraft_name="Steve",
+        server_player_name="Steve",
+        discord_user_id=123,
+        discord_username="hoge",
+        source="self",
+        status="active",
+        created_by=123,
+    )
+
+    assert (
+        store.observe_minecraft_xp(
+            account_id=account.id,
+            discord_user_id=123,
+            guild_id=456,
+            current_xp=100,
+            observed_at="2026-08-02T00:00:00+00:00",
+            double_in_game_xp=True,
+        )
+        is None
+    )
+    gained = store.observe_minecraft_xp(
+        account_id=account.id,
+        discord_user_id=123,
+        guild_id=456,
+        current_xp=110,
+        observed_at="2026-08-02T00:00:30+00:00",
+        double_in_game_xp=True,
+    )
+    bonus_observed = store.observe_minecraft_xp(
+        account_id=account.id,
+        discord_user_id=123,
+        guild_id=456,
+        current_xp=120,
+        observed_at="2026-08-02T00:01:00+00:00",
+        double_in_game_xp=True,
+    )
+    gained_again = store.observe_minecraft_xp(
+        account_id=account.id,
+        discord_user_id=123,
+        guild_id=456,
+        current_xp=125,
+        observed_at="2026-08-02T00:01:30+00:00",
+        double_in_game_xp=True,
+    )
+
+    assert gained is not None
+    assert gained.minecraft_xp == 10
+    assert bonus_observed is None
+    assert gained_again is not None
+    assert gained_again.minecraft_xp == 5
+
+
 def test_claims_each_advancement_reward_once_and_replays_same_log(tmp_path) -> None:
     store = AccountStore(tmp_path / "accounts.db")
     store.initialize()

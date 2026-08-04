@@ -5,6 +5,7 @@ import pytest
 from mc_bot.experience import (
     MinecraftLevelUpEvent,
     advancement_reward_tellraw_command,
+    experience_add_points_command,
     experience_query_command,
     experience_to_next_level,
     level_up_tellraw_command,
@@ -36,6 +37,19 @@ def test_calculates_total_experience_at_level_floor(level: int, expected: int) -
 
 def test_adds_points_within_current_level() -> None:
     assert total_experience_points(30, 55) == 1450
+
+
+def test_builds_safe_experience_add_points_command() -> None:
+    assert experience_add_points_command(".Bedrock_User", 25) == (
+        "experience add .Bedrock_User 25 points"
+    )
+
+
+def test_rejects_invalid_experience_add_points_command() -> None:
+    with pytest.raises(ValueError):
+        experience_add_points_command("@a", 25)
+    with pytest.raises(ValueError):
+        experience_add_points_command("Steve", 0)
     assert experience_to_next_level(30) == 112
 
 
@@ -89,4 +103,8 @@ def test_builds_voice_bonus_started_tellraw_like_level_up_message() -> None:
 
     assert components[1] == {"text": "うさぽサーバー", "color": "aqua"}
     assert components[3] == {"text": "Steve", "color": "yellow"}
-    assert components[5] == {"text": "VC XPが2倍", "color": "green", "bold": True}
+    assert components[5] == {
+        "text": "VC XPとMinecraft内の経験値が2倍",
+        "color": "green",
+        "bold": True,
+    }

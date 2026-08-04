@@ -21,6 +21,7 @@ from mc_bot.experience import (
     ADVANCEMENT_REWARD_MINECRAFT_XP,
     LevelBotXpClient,
     advancement_reward_tellraw_command,
+    experience_add_points_command,
     experience_query_command,
     level_up_tellraw_command,
     parse_experience_query,
@@ -139,6 +140,7 @@ class MinecraftDiscordBot(discord.Client):
         self._whitelist_operation_lock = asyncio.Lock()
         self._voice_disconnect_lock = asyncio.Lock()
         self._voice_bonus_lock = asyncio.Lock()
+        self._minecraft_xp_observation_lock = asyncio.Lock()
         self._online_player_names: set[str] = set()
         self._voice_bonus_active_users: set[int] = set()
         self._voice_bonus_last_notified: dict[int, float] = {}
@@ -2160,7 +2162,8 @@ class MinecraftDiscordBot(discord.Client):
             for account in await asyncio.to_thread(self._accounts.list_linked_active)
         }
         observed_at = datetime.now(UTC).isoformat()
-        await self._sync_voice_bonus_heartbeats(
+        previously_active_users = set(self._voice_bonus_active_users)
+        active_bonus_users = await self._sync_voice_bonus_heartbeats(
             online,
             linked=linked,
             guild_id=guild_id,
@@ -2170,18 +2173,14 @@ class MinecraftDiscordBot(discord.Client):
             account = linked.get(player_name.casefold())
             if account is None or account.discord_user_id is None:
                 continue
-            try:
-                current_xp = await self._query_player_experience(player_name)
-            except (OSError, RconError, ValueError) as error:
-                LOGGER.debug("Could not query XP for %s: %s", player_name, error)
-                continue
-            await asyncio.to_thread(
-                self._accounts.observe_minecraft_xp,
-                account_id=account.id,
-                discord_user_id=account.discord_user_id,
+            await self._observe_minecraft_xp_for_account(
+                account,
                 guild_id=guild_id,
-                current_xp=current_xp,
                 observed_at=observed_at,
+                double_in_game_xp=(
+                    account.discord_user_id in active_bonus_users
+                    and account.discord_user_id in previously_active_users
+                ),
             )
         await self._deliver_minecraft_xp_outbox()
 
@@ -2192,7 +2191,7 @@ class MinecraftDiscordBot(discord.Client):
         linked: dict[str, MinecraftAccount],
         guild_id: int,
         observed_at: str,
-    ) -> None:
+    ) -> set[int]:
         by_user: dict[int, MinecraftAccount] = {}
         for player_name in online:
             account = linked.get(player_name.casefold())
@@ -2201,6 +2200,7 @@ class MinecraftDiscordBot(discord.Client):
 
         for user_id in self._voice_bonus_active_users - set(by_user):
             self._voice_bonus_active_users.discard(user_id)
+        active_users: set[int] = set()
         for account in by_user.values():
             result = await self._level_bot_xp.send_voice_heartbeat(
                 guild_id=guild_id,
@@ -2209,10 +2209,13 @@ class MinecraftDiscordBot(discord.Client):
                 observed_at=observed_at,
             )
             if result is not None:
+                if result.bonus_active:
+                    active_users.add(account.discord_user_id or 0)
                 await self._set_voice_bonus_state(
                     account,
                     active=result.bonus_active,
                 )
+        return active_users
 
     async def _sync_voice_bonus_for_discord_user(self, user_id: int) -> None:
         accounts = await asyncio.to_thread(self._accounts.list_linked_active)
@@ -2235,14 +2238,91 @@ class MinecraftDiscordBot(discord.Client):
         user_id = account.discord_user_id
         if guild_id is None or user_id is None:
             return
+        was_active = user_id in self._voice_bonus_active_users
+        observed_at = datetime.now(UTC).isoformat()
+        if was_active:
+            await self._observe_minecraft_xp_for_account(
+                account,
+                guild_id=guild_id,
+                observed_at=observed_at,
+                double_in_game_xp=True,
+            )
         result = await self._level_bot_xp.send_voice_heartbeat(
             guild_id=guild_id,
             discord_user_id=user_id,
             account_id=account.id,
-            observed_at=datetime.now(UTC).isoformat(),
+            observed_at=observed_at,
         )
         if result is not None:
+            if result.bonus_active and not was_active:
+                await self._observe_minecraft_xp_for_account(
+                    account,
+                    guild_id=guild_id,
+                    observed_at=observed_at,
+                    double_in_game_xp=False,
+                )
             await self._set_voice_bonus_state(account, active=result.bonus_active)
+
+    async def _observe_minecraft_xp_for_account(
+        self,
+        account: MinecraftAccount,
+        *,
+        guild_id: int,
+        observed_at: str,
+        double_in_game_xp: bool,
+    ) -> None:
+        async with self._minecraft_xp_observation_lock:
+            await self._observe_minecraft_xp_for_account_locked(
+                account,
+                guild_id=guild_id,
+                observed_at=observed_at,
+                double_in_game_xp=double_in_game_xp,
+            )
+
+    async def _observe_minecraft_xp_for_account_locked(
+        self,
+        account: MinecraftAccount,
+        *,
+        guild_id: int,
+        observed_at: str,
+        double_in_game_xp: bool,
+    ) -> None:
+        user_id = account.discord_user_id
+        if user_id is None:
+            return
+        try:
+            current_xp = await self._query_player_experience(account.server_player_name)
+        except (OSError, RconError, ValueError) as error:
+            LOGGER.debug("Could not query XP for %s: %s", account.server_player_name, error)
+            return
+        gained_event = await asyncio.to_thread(
+            self._accounts.observe_minecraft_xp,
+            account_id=account.id,
+            discord_user_id=user_id,
+            guild_id=guild_id,
+            current_xp=current_xp,
+            observed_at=observed_at,
+            double_in_game_xp=double_in_game_xp,
+        )
+        if gained_event is None or not double_in_game_xp:
+            return
+        command = experience_add_points_command(
+            account.server_player_name, gained_event.minecraft_xp
+        )
+        try:
+            await self._execute_checked_rcon(command)
+        except (OSError, RconError, RuntimeError, ValueError) as error:
+            await asyncio.to_thread(
+                self._accounts.set_minecraft_xp_observation,
+                account_id=account.id,
+                current_xp=current_xp,
+                observed_at=observed_at,
+            )
+            LOGGER.warning(
+                "Could not apply doubled Minecraft XP to %s: %s",
+                account.server_player_name,
+                error,
+            )
 
     async def _set_voice_bonus_state(self, account: MinecraftAccount, *, active: bool) -> None:
         user_id = account.discord_user_id

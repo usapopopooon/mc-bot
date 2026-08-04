@@ -19,6 +19,7 @@ _RCON_ERROR_MARKERS = (
     "unknown or incomplete command",
     "incorrect argument",
     "no player was found",
+    "no entity was found",
     "you do not have permission",
     "an unexpected error occurred",
 )
