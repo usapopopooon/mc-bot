@@ -10,6 +10,7 @@ from mc_bot.experience import (
     experience_to_next_level,
     level_up_tellraw_command,
     parse_experience_query,
+    server_xp_started_tellraw_command,
     total_experience_points,
     voice_bonus_started_tellraw_command,
 )
@@ -108,3 +109,17 @@ def test_builds_voice_bonus_started_tellraw_like_level_up_message() -> None:
         "color": "green",
         "bold": True,
     }
+
+
+def test_builds_server_xp_started_tellraw() -> None:
+    command = server_xp_started_tellraw_command("うさぽサーバー", "Steve")
+    components = json.loads(command.removeprefix("tellraw @a "))
+
+    assert components[1] == {"text": "うさぽサーバー", "color": "aqua"}
+    assert components[3] == {"text": "Steve", "color": "yellow"}
+    assert components[5] == {
+        "text": "サーバーXP",
+        "color": "green",
+        "bold": True,
+    }
+    assert components[6] == {"text": "を獲得します!"}

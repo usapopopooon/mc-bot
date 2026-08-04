@@ -51,11 +51,12 @@ def format_event(
 
 def format_level_up_event(event: MinecraftLevelUpEvent) -> discord.Embed:
     """Minecraft内へ転送したlevel-botのレベルアップをログ用Embedにする。"""
+    guild_name = _escape_markdown(event.guild_name)
     display_name = _escape_markdown(event.display_name)
     return discord.Embed(
         description=(
-            f"🎉 **{display_name} (<@{event.user_id}>) さん** が"
-            f"level-botでレベル **{event.level}** になりました!"
+            f"🎉 **[{guild_name}] {display_name} (<@{event.user_id}>) さん** が"
+            f"レベル **{event.level}** になりました!"
         ),
         color=discord.Color.gold(),
     )
@@ -94,9 +95,26 @@ def format_voice_bonus_started(
     return discord.Embed(
         description=(
             f"🎮🔊 **[{server_name}] {player_name} (<@{discord_user_id}>) さん** が"
-            "MinecraftとVCに同時接続しました\n"
-            "同時接続中は、サーバーでの **VC XP** と "
-            "**Minecraft内の経験値** が2倍になります!"
+            "MinecraftとVCに同時接続したので、"
+            "**VC XPとMinecraft内の経験値が2倍**になりました!"
+        ),
+        color=discord.Color.green(),
+    )
+
+
+def format_server_xp_started(
+    *,
+    server_name: str,
+    player_name: str,
+    discord_user_id: int,
+) -> discord.Embed:
+    """Minecraft参加中にサーバーXPを獲得することを知らせるログ。"""
+    server_name = _escape_markdown(server_name)
+    player_name = _escape_markdown(player_name)
+    return discord.Embed(
+        description=(
+            f"🎮 **[{server_name}] {player_name} (<@{discord_user_id}>) さん** は"
+            "マイクラで遊んでいる間、**サーバーXP**を獲得します!"
         ),
         color=discord.Color.green(),
     )

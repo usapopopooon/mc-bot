@@ -137,6 +137,20 @@ def voice_bonus_started_tellraw_command(server_name: str, player_name: str) -> s
     return f"tellraw @a {json.dumps(components, ensure_ascii=False, separators=(',', ':'))}"
 
 
+def server_xp_started_tellraw_command(server_name: str, player_name: str) -> str:
+    """Minecraft参加中にサーバーXPを獲得することをMinecraft内へ流す。"""
+    components = [
+        {"text": "["},
+        {"text": server_name, "color": "aqua"},
+        {"text": "] "},
+        {"text": player_name, "color": "yellow"},
+        {"text": "さんはマイクラで遊んでいる間、"},
+        {"text": "サーバーXP", "color": "green", "bold": True},
+        {"text": "を獲得します!"},
+    ]
+    return f"tellraw @a {json.dumps(components, ensure_ascii=False, separators=(',', ':'))}"
+
+
 class LevelBotXpClient:
     def __init__(self, base_url: str, token: str) -> None:
         self._base_url = base_url.rstrip("/")

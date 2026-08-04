@@ -145,9 +145,8 @@ def test_sync_announces_voice_bonus_start_once_with_cooldown(tmp_path) -> None:
     send_log.assert_awaited_once()
     assert send_log.await_args.args[0].description == (
         "🎮🔊 **[うさぽサーバー] Steve (<@123>) さん** が"
-        "MinecraftとVCに同時接続しました\n"
-        "同時接続中は、サーバーでの **VC XP** と "
-        "**Minecraft内の経験値** が2倍になります!"
+        "MinecraftとVCに同時接続したので、"
+        "**VC XPとMinecraft内の経験値が2倍**になりました!"
     )
 
 
@@ -519,6 +518,65 @@ def test_minecraft_leave_sends_final_voice_heartbeat_before_discord_log(tmp_path
     assert tailer.acknowledged == [line]
 
 
+def test_minecraft_join_announces_standard_server_xp_when_voice_bonus_is_inactive(
+    tmp_path,
+) -> None:
+    config = Config(
+        discord_token="test",
+        accounts_path=tmp_path / "accounts.db",
+        rcon_password="test",
+        level_bot_api_url="https://levels.example.test",
+        level_bot_api_token="xp-secret",
+    )
+    bot = MinecraftDiscordBot(config)
+    bot._accounts.initialize()
+    bot._accounts.create_registration(
+        edition="java",
+        minecraft_name="Steve",
+        server_player_name="Steve",
+        discord_user_id=123,
+        discord_username="hoge",
+        source="self",
+        status="active",
+        created_by=123,
+    )
+    bot._settings = RuntimeSettings(guild_id=456)
+    rcon = ExperienceRcon()
+    bot._rcon = rcon  # type: ignore[assignment]
+    line = PendingLine(
+        "[12:34:56] [Server thread/INFO]: Steve joined the game",
+        Cursor("device:inode", 100),
+    )
+    tailer = OneLineTailer(line)
+    bot._tailer = tailer  # type: ignore[assignment]
+    bot.wait_until_ready = AsyncMock()  # type: ignore[method-assign]
+    bot._level_bot_xp.send_voice_heartbeat = AsyncMock(  # type: ignore[method-assign]
+        return_value=MinecraftVoiceHeartbeatResult(0, False)
+    )
+    send_log = AsyncMock()
+    bot._send = send_log  # type: ignore[method-assign]
+    guild = MagicMock()
+    guild.name = "うさぽサーバー"
+    guild.get_member.return_value = None
+    bot.get_guild = MagicMock(return_value=guild)  # type: ignore[method-assign]
+
+    asyncio.run(bot._forward_logs())
+
+    assert [call.args[0].description for call in send_log.await_args_list] == [
+        "🟢 **Steve (<@123>) さん** が参加しました",
+        (
+            "🎮 **[うさぽサーバー] Steve (<@123>) さん** は"
+            "マイクラで遊んでいる間、**サーバーXP**を獲得します!"
+        ),
+    ]
+    tellraw_commands = [command for command in rcon.commands if command.startswith("tellraw @a ")]
+    assert len(tellraw_commands) == 1
+    assert "Steve" in tellraw_commands[0]
+    assert "さんはマイクラで遊んでいる間、" in tellraw_commands[0]
+    assert "サーバーXP" in tellraw_commands[0]
+    assert tailer.acknowledged == [line]
+
+
 def test_sync_pauses_observation_while_api_outbox_is_blocked(tmp_path) -> None:
     config = Config(
         discord_token="test",
@@ -615,7 +673,7 @@ def test_sync_announces_level_up_with_guild_name_then_acknowledges(tmp_path) -> 
     embed = send_log.await_args.args[0]
     assert embed.title is None
     assert embed.description == (
-        "🎉 **うさぽ (<@123>) さん** がlevel-botでレベル **10** になりました!"
+        "🎉 **[うさぽサーバー] うさぽ (<@123>) さん** がレベル **10** になりました!"
     )
 
 
@@ -665,7 +723,7 @@ def test_sync_skips_minecraft_level_up_for_user_who_is_not_online(tmp_path) -> N
     assert rcon.commands == ["list"]
     assert ack.await_args_list[0].args == (9, 456, "minecraft")
     assert ack.await_args_list[1].args == (9, 456, "discord")
-    send_log.assert_awaited_once()
+    send_log.assert_not_awaited()
 
 
 def test_sync_does_not_repeat_already_delivered_minecraft_message(tmp_path) -> None:
@@ -677,6 +735,17 @@ def test_sync_does_not_repeat_already_delivered_minecraft_message(tmp_path) -> N
         level_bot_api_token="xp-secret",
     )
     bot = MinecraftDiscordBot(config)
+    bot._accounts.initialize()
+    bot._accounts.create_registration(
+        edition="java",
+        minecraft_name="Steve",
+        server_player_name="Steve",
+        discord_user_id=123,
+        discord_username="hoge",
+        source="self",
+        status="active",
+        created_by=123,
+    )
     bot._settings = RuntimeSettings(guild_id=456)
     rcon = ExperienceRcon()
     bot._rcon = rcon  # type: ignore[assignment]
@@ -699,5 +768,6 @@ def test_sync_does_not_repeat_already_delivered_minecraft_message(tmp_path) -> N
 
     asyncio.run(bot._sync_minecraft_level_up_announcements())
 
-    assert rcon.commands == []
+    assert rcon.commands == ["list"]
     ack.assert_awaited_once_with(8, 456, "discord")
+    bot._send.assert_awaited_once()  # type: ignore[attr-defined]

@@ -4,6 +4,7 @@ from mc_bot.formatting import (
     format_advancement_reward,
     format_event,
     format_level_up_event,
+    format_server_xp_started,
     format_voice_bonus_started,
 )
 from mc_bot.translations import AdvancementTranslator
@@ -42,9 +43,22 @@ def test_formats_voice_bonus_started_without_ping() -> None:
 
     assert embed.description == (
         "🎮🔊 **[うさぽサーバー] Steve (<@123>) さん** が"
-        "MinecraftとVCに同時接続しました\n"
-        "同時接続中は、サーバーでの **VC XP** と "
-        "**Minecraft内の経験値** が2倍になります!"
+        "MinecraftとVCに同時接続したので、"
+        "**VC XPとMinecraft内の経験値が2倍**になりました!"
+    )
+    assert embed.color.value == 0x2ECC71
+
+
+def test_formats_server_xp_started() -> None:
+    embed = format_server_xp_started(
+        server_name="うさぽサーバー",
+        player_name="Steve",
+        discord_user_id=123,
+    )
+
+    assert embed.description == (
+        "🎮 **[うさぽサーバー] Steve (<@123>) さん** は"
+        "マイクラで遊んでいる間、**サーバーXP**を獲得します!"
     )
     assert embed.color.value == 0x2ECC71
 
@@ -65,7 +79,8 @@ def test_formats_level_bot_level_up_as_linked_log_without_title() -> None:
 
     assert embed.title is None
     assert embed.description == (
-        r"🎉 **\*うさぽ\* (<@123>) さん** がlevel-botでレベル **10** になりました!"
+        r"🎉 **[うさぽサーバー] \*うさぽ\* (<@123>) さん** が"
+        "レベル **10** になりました!"
     )
     assert embed.color.value == 0xF1C40F
 

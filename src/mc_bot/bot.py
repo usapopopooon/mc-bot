@@ -25,6 +25,7 @@ from mc_bot.experience import (
     experience_query_command,
     level_up_tellraw_command,
     parse_experience_query,
+    server_xp_started_tellraw_command,
     total_experience_points,
     voice_bonus_started_tellraw_command,
 )
@@ -32,6 +33,7 @@ from mc_bot.formatting import (
     format_advancement_reward,
     format_event,
     format_level_up_event,
+    format_server_xp_started,
     format_voice_bonus_started,
 )
 from mc_bot.player_count import (
@@ -1972,7 +1974,10 @@ class MinecraftDiscordBot(discord.Client):
                     and account.discord_user_id is not None
                     and event.type is EventType.JOIN
                 ):
-                    await self._sync_voice_bonus_for_account(account)
+                    await self._sync_voice_bonus_for_account(
+                        account,
+                        announce_standard_xp=True,
+                    )
                 break
 
     def _queue_voice_event(self, event: LogEvent, discord_username: str | None) -> None:
@@ -2120,7 +2125,7 @@ class MinecraftDiscordBot(discord.Client):
         if events is None:
             return
         online_user_ids: set[int] = set()
-        if any(not event.minecraft_delivered for event in events):
+        if any(not event.minecraft_delivered or not event.discord_delivered for event in events):
             response = await asyncio.to_thread(self._require_rcon().execute, "list")
             online_names = {name.casefold() for name in parse_online_players(response)}
             self._online_player_names = online_names
@@ -2148,7 +2153,8 @@ class MinecraftDiscordBot(discord.Client):
                     # ACK失敗時は次回再送する。通知欠落より稀な重複を優先する。
                     return
             if not event.discord_delivered:
-                await self._send(format_level_up_event(event))
+                if event.user_id in online_user_ids:
+                    await self._send(format_level_up_event(event))
                 if not await self._level_bot_xp.acknowledge_level_up(event.id, guild_id, "discord"):
                     return
 
@@ -2240,7 +2246,12 @@ class MinecraftDiscordBot(discord.Client):
             return
         await self._sync_voice_bonus_for_account(account)
 
-    async def _sync_voice_bonus_for_account(self, account: MinecraftAccount) -> None:
+    async def _sync_voice_bonus_for_account(
+        self,
+        account: MinecraftAccount,
+        *,
+        announce_standard_xp: bool = False,
+    ) -> None:
         guild_id = self._settings.guild_id
         user_id = account.discord_user_id
         if guild_id is None or user_id is None:
@@ -2269,6 +2280,8 @@ class MinecraftDiscordBot(discord.Client):
                     double_in_game_xp=False,
                 )
             await self._set_voice_bonus_state(account, active=result.bonus_active)
+            if announce_standard_xp and not result.bonus_active:
+                await self._announce_server_xp_started(account)
 
     async def _send_voice_bonus_final_heartbeat(self, account: MinecraftAccount) -> None:
         guild_id = self._settings.guild_id
@@ -2388,6 +2401,32 @@ class MinecraftDiscordBot(discord.Client):
             )
         except (RuntimeError, discord.DiscordException) as error:
             LOGGER.warning("Could not announce voice bonus in Discord: %s", error)
+
+    async def _announce_server_xp_started(self, account: MinecraftAccount) -> None:
+        guild_id = self._settings.guild_id
+        user_id = account.discord_user_id
+        if guild_id is None or user_id is None:
+            return
+        guild = self.get_guild(guild_id)
+        server_name = guild.name if guild is not None else "サーバー"
+        try:
+            command = server_xp_started_tellraw_command(
+                server_name,
+                account.server_player_name,
+            )
+            await asyncio.to_thread(self._require_rcon().execute, command)
+        except (OSError, RconError, RuntimeError) as error:
+            LOGGER.warning("Could not announce server XP in Minecraft: %s", error)
+        try:
+            await self._send(
+                format_server_xp_started(
+                    server_name=server_name,
+                    player_name=account.server_player_name,
+                    discord_user_id=user_id,
+                )
+            )
+        except (RuntimeError, discord.DiscordException) as error:
+            LOGGER.warning("Could not announce server XP in Discord: %s", error)
 
     async def _query_player_experience(self, player_name: str) -> int:
         rcon = self._require_rcon()
