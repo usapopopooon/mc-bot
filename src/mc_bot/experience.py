@@ -11,7 +11,10 @@ from mc_bot.accounts import MinecraftXpOutboxEvent
 
 ADVANCEMENT_REWARD_LEVEL_BOT_XP = 100
 MINECRAFT_XP_PER_LEVEL_BOT_XP = 100
-ADVANCEMENT_REWARD_MINECRAFT_XP = ADVANCEMENT_REWARD_LEVEL_BOT_XP * MINECRAFT_XP_PER_LEVEL_BOT_XP
+ADVANCEMENT_REWARD_LEVEL_BOT_SOURCE_XP = (
+    ADVANCEMENT_REWARD_LEVEL_BOT_XP * MINECRAFT_XP_PER_LEVEL_BOT_XP
+)
+ADVANCEMENT_REWARD_IN_GAME_XP = 100
 
 LOGGER = logging.getLogger(__name__)
 _QUERY_RESULT = re.compile(r"\bhas\s+(\d+)\s+experience\s+(levels?|points?)\b", re.I)
@@ -102,7 +105,8 @@ def advancement_reward_tellraw_command(
     server_name: str,
     player_name: str,
     advancement: str,
-    reward_xp: int = ADVANCEMENT_REWARD_LEVEL_BOT_XP,
+    server_reward_xp: int = ADVANCEMENT_REWARD_LEVEL_BOT_XP,
+    minecraft_reward_xp: int = ADVANCEMENT_REWARD_IN_GAME_XP,
 ) -> str:
     """進捗達成報酬をMinecraft内へ別メッセージとして流す。"""
     components = [
@@ -113,7 +117,9 @@ def advancement_reward_tellraw_command(
         {"text": "さんが進捗「"},
         {"text": advancement, "color": "gold"},
         {"text": "」を達成したので、サーバーでの "},
-        {"text": f"{reward_xp} XP", "color": "green", "bold": True},
+        {"text": f"{server_reward_xp} XP", "color": "green", "bold": True},
+        {"text": "とMinecraft内の "},
+        {"text": f"{minecraft_reward_xp} XP", "color": "green", "bold": True},
         {"text": "を獲得しました!"},
     ]
     return f"tellraw @a {json.dumps(components, ensure_ascii=False, separators=(',', ':'))}"

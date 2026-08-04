@@ -89,13 +89,20 @@ def test_builds_level_up_tellraw_with_discord_guild_name() -> None:
 
 
 def test_builds_separate_advancement_reward_tellraw() -> None:
-    command = advancement_reward_tellraw_command('うさぽ"サーバー', 'Steve"', "Stone Age", 100)
+    command = advancement_reward_tellraw_command(
+        'うさぽ"サーバー',
+        'Steve"',
+        "Stone Age",
+        100,
+        100,
+    )
     components = json.loads(command.removeprefix("tellraw @a "))
 
     assert components[1] == {"text": 'うさぽ"サーバー', "color": "aqua"}
     assert components[3] == {"text": 'Steve"', "color": "yellow"}
     assert components[5] == {"text": "Stone Age", "color": "gold"}
     assert components[7] == {"text": "100 XP", "color": "green", "bold": True}
+    assert components[9] == {"text": "100 XP", "color": "green", "bold": True}
 
 
 def test_builds_voice_bonus_started_tellraw_like_level_up_message() -> None:

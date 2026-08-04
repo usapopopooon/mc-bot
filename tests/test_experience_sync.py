@@ -1,6 +1,8 @@
 import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
+
 from mc_bot.bot import MinecraftDiscordBot
 from mc_bot.config import Config
 from mc_bot.experience import MinecraftLevelUpEvent, MinecraftVoiceHeartbeatResult
@@ -465,13 +467,182 @@ def test_advancement_keeps_original_log_then_sends_reward_everywhere(tmp_path) -
     assert original.description == ("🏆 **Steve (<@123>) さん** が進捗「石器時代」を達成しました")
     assert reward.description == (
         "✨ **[うさぽサーバー] Steve (<@123>) さん** が進捗「石器時代」を"
-        "達成したので、サーバーでの **100 XP**を獲得しました!"
+        "達成したので、サーバーでの **100 XP**とMinecraft内の "
+        "**100 XP**を獲得しました!"
     )
-    assert rcon.commands[0].startswith("tellraw @a ")
-    assert "うさぽサーバー" in rcon.commands[0]
-    assert "100 XP" in rcon.commands[0]
+    assert rcon.commands[0] == "experience add Steve 100 points"
+    assert rcon.commands[1].startswith("tellraw @a ")
+    assert "うさぽサーバー" in rcon.commands[1]
+    assert rcon.commands[1].count("100 XP") == 2
+    assert rcon.points == 100
     assert tailer.acknowledged == [line]
     assert bot._accounts.list_minecraft_xp_outbox() == []
+
+
+def test_advancement_without_rcon_only_announces_server_xp(tmp_path) -> None:
+    config = Config(
+        discord_token="test",
+        accounts_path=tmp_path / "accounts.db",
+        level_bot_api_url="https://levels.example.test",
+        level_bot_api_token="xp-secret",
+    )
+    bot = MinecraftDiscordBot(config)
+    bot._accounts.initialize()
+    bot._accounts.create_registration(
+        edition="java",
+        minecraft_name="Steve",
+        server_player_name="Steve",
+        discord_user_id=123,
+        discord_username="hoge",
+        source="self",
+        status="active",
+        created_by=123,
+    )
+    bot._settings = RuntimeSettings(guild_id=456)
+    line = PendingLine(
+        "[12:34:56] [Server thread/INFO]: Steve has made the advancement [Stone Age]",
+        Cursor("device:inode", 100),
+    )
+    tailer = OneLineTailer(line)
+    bot._tailer = tailer  # type: ignore[assignment]
+    bot._level_bot_xp.send = AsyncMock(return_value=True)  # type: ignore[method-assign]
+    send_log = AsyncMock()
+    bot._send = send_log  # type: ignore[method-assign]
+    bot.wait_until_ready = AsyncMock()  # type: ignore[method-assign]
+    guild = MagicMock()
+    guild.name = "うさぽサーバー"
+    guild.get_member.return_value = None
+    bot.get_guild = MagicMock(return_value=guild)  # type: ignore[method-assign]
+
+    asyncio.run(bot._forward_logs())
+
+    reward = send_log.await_args_list[1].args[0]
+    assert reward.description == (
+        "✨ **[うさぽサーバー] Steve (<@123>) さん** が進捗「石器時代」を"
+        "達成したので、サーバーでの **100 XP**を獲得しました!"
+    )
+    assert tailer.acknowledged == [line]
+
+
+def test_advancement_minecraft_reward_is_not_granted_twice(tmp_path) -> None:
+    config = Config(
+        discord_token="test",
+        accounts_path=tmp_path / "accounts.db",
+        rcon_password="test",
+    )
+    bot = MinecraftDiscordBot(config)
+    bot._accounts.initialize()
+    account = bot._accounts.create_registration(
+        edition="java",
+        minecraft_name="Steve",
+        server_player_name="Steve",
+        discord_user_id=123,
+        discord_username="hoge",
+        source="self",
+        status="active",
+        created_by=123,
+    )
+    reward = bot._accounts.claim_advancement_reward(
+        event_id="advancement-event-1",
+        account_id=account.id,
+        advancement="Stone Age",
+        discord_user_id=123,
+        guild_id=456,
+        minecraft_xp=10_000,
+        observed_at="2026-08-04T00:00:00+00:00",
+    )
+    assert reward is not None
+    bot._accounts.set_minecraft_xp_observation(
+        account_id=account.id,
+        current_xp=0,
+        observed_at="2026-08-04T00:00:00+00:00",
+    )
+    rcon = ExperienceRcon()
+    rcon.level = 0
+    bot._rcon = rcon  # type: ignore[assignment]
+
+    async def exercise() -> None:
+        for _ in range(2):
+            await bot._grant_advancement_minecraft_reward(
+                account,
+                event_id=reward.event_id,
+                observed_at=reward.observed_at,
+            )
+
+    asyncio.run(exercise())
+
+    assert rcon.commands == ["experience add Steve 100 points"]
+    assert rcon.points == 100
+    assert bot._accounts.is_advancement_minecraft_reward_delivered(reward.event_id)
+    assert (
+        bot._accounts.observe_minecraft_xp(
+            account_id=account.id,
+            discord_user_id=123,
+            guild_id=456,
+            current_xp=100,
+            observed_at="2026-08-04T00:00:30+00:00",
+            double_in_game_xp=True,
+        )
+        is None
+    )
+
+
+def test_advancement_minecraft_reward_retries_after_explicit_command_failure(tmp_path) -> None:
+    config = Config(
+        discord_token="test",
+        accounts_path=tmp_path / "accounts.db",
+        rcon_password="test",
+    )
+    bot = MinecraftDiscordBot(config)
+    bot._accounts.initialize()
+    account = bot._accounts.create_registration(
+        edition="java",
+        minecraft_name="Steve",
+        server_player_name="Steve",
+        discord_user_id=123,
+        discord_username="hoge",
+        source="self",
+        status="active",
+        created_by=123,
+    )
+    reward = bot._accounts.claim_advancement_reward(
+        event_id="advancement-event-1",
+        account_id=account.id,
+        advancement="Stone Age",
+        discord_user_id=123,
+        guild_id=456,
+        minecraft_xp=10_000,
+        observed_at="2026-08-04T00:00:00+00:00",
+    )
+    assert reward is not None
+    bot._accounts.set_minecraft_xp_observation(
+        account_id=account.id,
+        current_xp=0,
+        observed_at=reward.observed_at,
+    )
+    rcon = ExperienceRcon()
+    rcon.add_error_response = "No player was found"
+    bot._rcon = rcon  # type: ignore[assignment]
+
+    with pytest.raises(ValueError):
+        asyncio.run(
+            bot._grant_advancement_minecraft_reward(
+                account,
+                event_id=reward.event_id,
+                observed_at=reward.observed_at,
+            )
+        )
+
+    assert not bot._accounts.is_advancement_minecraft_reward_delivered(reward.event_id)
+    rcon.add_error_response = None
+    asyncio.run(
+        bot._grant_advancement_minecraft_reward(
+            account,
+            event_id=reward.event_id,
+            observed_at=reward.observed_at,
+        )
+    )
+    assert rcon.points == 100
 
 
 def test_minecraft_leave_sends_final_voice_heartbeat_before_discord_log(tmp_path) -> None:

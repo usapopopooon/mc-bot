@@ -1,6 +1,38 @@
 import json
+import sqlite3
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
 
 from mc_bot.accounts import AccountStore
+
+
+def test_initialize_adds_minecraft_reward_delivery_column_to_existing_database(
+    tmp_path,
+) -> None:
+    database = tmp_path / "accounts.db"
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            """
+            CREATE TABLE minecraft_advancement_rewards (
+                account_id INTEGER NOT NULL,
+                advancement TEXT NOT NULL,
+                event_id TEXT NOT NULL UNIQUE,
+                discord_user_id INTEGER NOT NULL,
+                guild_id INTEGER NOT NULL,
+                minecraft_xp INTEGER NOT NULL CHECK (minecraft_xp > 0),
+                observed_at TEXT NOT NULL,
+                PRIMARY KEY (account_id, advancement)
+            )
+            """
+        )
+
+    AccountStore(database).initialize()
+
+    with sqlite3.connect(database) as connection:
+        columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(minecraft_advancement_rewards)")
+        }
+    assert "minecraft_reward_delivered" in columns
 
 
 def test_imports_existing_whitelist_as_protected_and_unlinked(tmp_path) -> None:
@@ -366,3 +398,145 @@ def test_claims_each_advancement_reward_once_and_replays_same_log(tmp_path) -> N
     assert replayed == claimed
     assert duplicate is None
     assert store.list_minecraft_xp_outbox() == [claimed]
+    assert not store.is_advancement_minecraft_reward_delivered(claimed.event_id)
+
+    store.set_minecraft_xp_observation(
+        account_id=account.id,
+        current_xp=50,
+        observed_at="2026-08-04T00:00:00+00:00",
+    )
+    assert store.reserve_advancement_minecraft_reward_delivery(
+        event_id=claimed.event_id,
+        account_id=account.id,
+        reward_xp=100,
+        observed_at="2026-08-04T00:00:01+00:00",
+    )
+    assert not store.reserve_advancement_minecraft_reward_delivery(
+        event_id=claimed.event_id,
+        account_id=account.id,
+        reward_xp=100,
+        observed_at="2026-08-04T00:00:02+00:00",
+    )
+
+    assert store.is_advancement_minecraft_reward_delivered(claimed.event_id)
+    assert (
+        store.observe_minecraft_xp(
+            account_id=account.id,
+            discord_user_id=123,
+            guild_id=456,
+            current_xp=150,
+            observed_at="2026-08-04T00:00:30+00:00",
+            double_in_game_xp=True,
+        )
+        is None
+    )
+
+
+def test_releases_advancement_minecraft_reward_after_explicit_failure(tmp_path) -> None:
+    store = AccountStore(tmp_path / "accounts.db")
+    store.initialize()
+    account = store.create_registration(
+        edition="java",
+        minecraft_name="Steve",
+        server_player_name="Steve",
+        discord_user_id=123,
+        discord_username="hoge",
+        source="self",
+        status="active",
+        created_by=123,
+    )
+    reward = store.claim_advancement_reward(
+        event_id="advancement-event-1",
+        account_id=account.id,
+        advancement="Stone Age",
+        discord_user_id=123,
+        guild_id=456,
+        minecraft_xp=10_000,
+        observed_at="2026-08-04T00:00:00+00:00",
+    )
+    assert reward is not None
+    store.set_minecraft_xp_observation(
+        account_id=account.id,
+        current_xp=50,
+        observed_at="2026-08-04T00:00:00+00:00",
+    )
+
+    assert store.reserve_advancement_minecraft_reward_delivery(
+        event_id=reward.event_id,
+        account_id=account.id,
+        reward_xp=100,
+        observed_at=reward.observed_at,
+    )
+    store.release_advancement_minecraft_reward_delivery(
+        event_id=reward.event_id,
+        account_id=account.id,
+        reward_xp=100,
+    )
+
+    assert not store.is_advancement_minecraft_reward_delivered(reward.event_id)
+    gained = store.observe_minecraft_xp(
+        account_id=account.id,
+        discord_user_id=123,
+        guild_id=456,
+        current_xp=50,
+        observed_at="2026-08-04T00:00:30+00:00",
+        double_in_game_xp=True,
+    )
+    assert gained is None
+
+
+def test_only_one_store_can_reserve_advancement_minecraft_reward(tmp_path) -> None:
+    database = tmp_path / "accounts.db"
+    store = AccountStore(database)
+    store.initialize()
+    account = store.create_registration(
+        edition="java",
+        minecraft_name="Steve",
+        server_player_name="Steve",
+        discord_user_id=123,
+        discord_username="hoge",
+        source="self",
+        status="active",
+        created_by=123,
+    )
+    reward = store.claim_advancement_reward(
+        event_id="advancement-event-1",
+        account_id=account.id,
+        advancement="Stone Age",
+        discord_user_id=123,
+        guild_id=456,
+        minecraft_xp=10_000,
+        observed_at="2026-08-04T00:00:00+00:00",
+    )
+    assert reward is not None
+    store.set_minecraft_xp_observation(
+        account_id=account.id,
+        current_xp=0,
+        observed_at=reward.observed_at,
+    )
+    barrier = Barrier(2)
+
+    def reserve() -> bool:
+        barrier.wait()
+        return AccountStore(database).reserve_advancement_minecraft_reward_delivery(
+            event_id=reward.event_id,
+            account_id=account.id,
+            reward_xp=100,
+            observed_at=reward.observed_at,
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(lambda _: reserve(), range(2)))
+
+    assert sorted(results) == [False, True]
+    assert (
+        store.observe_minecraft_xp(
+            account_id=account.id,
+            discord_user_id=123,
+            guild_id=456,
+            current_xp=100,
+            observed_at="2026-08-04T00:00:30+00:00",
+            double_in_game_xp=True,
+        )
+        is None
+    )

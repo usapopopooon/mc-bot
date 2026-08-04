@@ -4,7 +4,11 @@ import discord
 
 from mc_bot.deaths import translate_death
 from mc_bot.events import EventType, LogEvent
-from mc_bot.experience import ADVANCEMENT_REWARD_LEVEL_BOT_XP, MinecraftLevelUpEvent
+from mc_bot.experience import (
+    ADVANCEMENT_REWARD_IN_GAME_XP,
+    ADVANCEMENT_REWARD_LEVEL_BOT_XP,
+    MinecraftLevelUpEvent,
+)
 from mc_bot.translations import AdvancementTranslator
 
 _DISCORD_EMBED_DESCRIPTION_LIMIT = 4_096
@@ -67,17 +71,21 @@ def format_advancement_reward(
     advancement: str,
     server_name: str,
     discord_user_id: int,
-    reward_xp: int = ADVANCEMENT_REWARD_LEVEL_BOT_XP,
+    server_reward_xp: int = ADVANCEMENT_REWARD_LEVEL_BOT_XP,
+    minecraft_reward_xp: int | None = ADVANCEMENT_REWARD_IN_GAME_XP,
 ) -> discord.Embed:
     """既存の進捗ログに続けて送るlevel-bot XP報酬Embed。"""
     player = _escape_markdown(event.player_name)
     advancement = _escape_markdown(advancement)
     server_name = _escape_markdown(server_name)
+    reward = f"**{server_reward_xp} XP**"
+    if minecraft_reward_xp is not None:
+        reward += f"とMinecraft内の **{minecraft_reward_xp} XP**"
     return discord.Embed(
         description=(
             f"✨ **[{server_name}] {player} (<@{discord_user_id}>) さん** が"
             f"進捗「{advancement}」を達成したので、サーバーでの "
-            f"**{reward_xp} XP**を獲得しました!"
+            f"{reward}を獲得しました!"
         ),
         color=discord.Color.green(),
     )

@@ -37,9 +37,10 @@ Geyser/Floodgate経由のBedrockプレイヤーを含む次のログを扱いま
 SHA-1は次のとおりです。
 
 Discord連携済みのプレイヤーが進捗を達成すると、既存の進捗ログはそのままに、
-level-bot XPを100付与します。Minecraft内では標準の進捗通知の後に `tellraw`
-の報酬通知を流し、Discordでは進捗Embedの次に報酬Embedを別投稿します。
-同じアカウントの同じ進捗に報酬を重複付与しません。
+level-bot XPを100、RCON設定時はMinecraft内の経験値ポイントも100付与します。Minecraft内では
+標準の進捗通知の後に `tellraw` の報酬通知を流し、Discordでは進捗Embedの次に
+報酬Embedを別投稿します。固定の進捗報酬はVCボーナスで倍化せず、同じアカウントの
+同じ進捗に重複付与しません。
 
 Discord連携済みのプレイヤーがMinecraftとDiscord VCに同時接続している間は、
 level-botのVC XPと、通常プレイで獲得したMinecraft内の経験値が2倍になります。

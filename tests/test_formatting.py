@@ -29,9 +29,25 @@ def test_formats_advancement_reward_as_a_separate_embed() -> None:
 
     assert embed.description == (
         "✨ **[うさぽサーバー] Steve (<@123>) さん** が進捗「石器時代」を"
-        "達成したので、サーバーでの **100 XP**を獲得しました!"
+        "達成したので、サーバーでの **100 XP**とMinecraft内の "
+        "**100 XP**を獲得しました!"
     )
     assert embed.color.value == 0x2ECC71
+
+
+def test_advancement_reward_omits_minecraft_xp_without_rcon() -> None:
+    embed = format_advancement_reward(
+        LogEvent(EventType.ADVANCEMENT, "Steve", "Stone Age"),
+        "石器時代",
+        "うさぽサーバー",
+        123,
+        minecraft_reward_xp=None,
+    )
+
+    assert embed.description == (
+        "✨ **[うさぽサーバー] Steve (<@123>) さん** が進捗「石器時代」を"
+        "達成したので、サーバーでの **100 XP**を獲得しました!"
+    )
 
 
 def test_formats_voice_bonus_started_without_ping() -> None:

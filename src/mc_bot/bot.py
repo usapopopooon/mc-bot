@@ -18,7 +18,8 @@ from mc_bot.accounts import AccountStore, MinecraftAccount
 from mc_bot.config import Config
 from mc_bot.events import EventType, LogEvent, parse_log_line
 from mc_bot.experience import (
-    ADVANCEMENT_REWARD_MINECRAFT_XP,
+    ADVANCEMENT_REWARD_IN_GAME_XP,
+    ADVANCEMENT_REWARD_LEVEL_BOT_SOURCE_XP,
     LevelBotXpClient,
     advancement_reward_tellraw_command,
     experience_add_points_command,
@@ -1911,12 +1912,18 @@ class MinecraftDiscordBot(discord.Client):
                     advancement=event.detail,
                     discord_user_id=discord_user_id,
                     guild_id=guild_id,
-                    minecraft_xp=ADVANCEMENT_REWARD_MINECRAFT_XP,
+                    minecraft_xp=ADVANCEMENT_REWARD_LEVEL_BOT_SOURCE_XP,
                     observed_at=datetime.now(UTC).isoformat(),
                 )
                 if reward_event is not None:
                     reward_embed = format_advancement_reward(
-                        event, advancement, server_name, discord_user_id
+                        event,
+                        advancement,
+                        server_name,
+                        discord_user_id,
+                        minecraft_reward_xp=(
+                            ADVANCEMENT_REWARD_IN_GAME_XP if self._rcon is not None else None
+                        ),
                     )
                     if self._rcon is not None:
                         reward_command = advancement_reward_tellraw_command(
@@ -1931,15 +1938,16 @@ class MinecraftDiscordBot(discord.Client):
             reward_log_sent = False
             while not self.is_closed():
                 await self.wait_until_ready()
-                if reward_event is not None and not await self._deliver_minecraft_xp_outbox():
-                    self._delivery_healthy = False
-                    await asyncio.sleep(retry_delay)
-                    retry_delay = min(retry_delay * 2, 30)
-                    continue
                 if reward_command is not None and not minecraft_reward_sent:
                     try:
+                        if reward_event is not None and account is not None:
+                            await self._grant_advancement_minecraft_reward(
+                                account,
+                                event_id=reward_event.event_id,
+                                observed_at=reward_event.observed_at,
+                            )
                         await asyncio.to_thread(self._require_rcon().execute, reward_command)
-                    except (OSError, RconError, RuntimeError) as error:
+                    except (OSError, RconError, RuntimeError, ValueError) as error:
                         self._delivery_healthy = False
                         LOGGER.warning(
                             "Minecraft advancement reward send failed; retrying in %ds: %s",
@@ -1950,6 +1958,11 @@ class MinecraftDiscordBot(discord.Client):
                         retry_delay = min(retry_delay * 2, 30)
                         continue
                     minecraft_reward_sent = True
+                if reward_event is not None and not await self._deliver_minecraft_xp_outbox():
+                    self._delivery_healthy = False
+                    await asyncio.sleep(retry_delay)
+                    retry_delay = min(retry_delay * 2, 30)
+                    continue
                 try:
                     if not event_log_sent:
                         await self._send(embed)
@@ -2318,6 +2331,41 @@ class MinecraftDiscordBot(discord.Client):
                 observed_at=observed_at,
                 double_in_game_xp=double_in_game_xp,
             )
+
+    async def _grant_advancement_minecraft_reward(
+        self,
+        account: MinecraftAccount,
+        *,
+        event_id: str,
+        observed_at: str,
+    ) -> None:
+        """進捗の固定ゲーム内XPを一度だけ付与し、通常の増加観測から除外する。"""
+        async with self._minecraft_xp_observation_lock:
+            reserved = await asyncio.to_thread(
+                self._accounts.reserve_advancement_minecraft_reward_delivery,
+                event_id=event_id,
+                account_id=account.id,
+                reward_xp=ADVANCEMENT_REWARD_IN_GAME_XP,
+                observed_at=observed_at,
+            )
+            if not reserved:
+                return
+            try:
+                await self._execute_checked_rcon(
+                    experience_add_points_command(
+                        account.server_player_name,
+                        ADVANCEMENT_REWARD_IN_GAME_XP,
+                    )
+                )
+            except ValueError:
+                # Minecraftが明示的に失敗を返した場合は未付与と断定できるため再試行可能にする。
+                await asyncio.to_thread(
+                    self._accounts.release_advancement_minecraft_reward_delivery,
+                    event_id=event_id,
+                    account_id=account.id,
+                    reward_xp=ADVANCEMENT_REWARD_IN_GAME_XP,
+                )
+                raise
 
     async def _observe_minecraft_xp_for_account_locked(
         self,

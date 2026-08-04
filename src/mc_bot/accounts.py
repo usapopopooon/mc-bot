@@ -94,10 +94,24 @@ class AccountStore:
                     guild_id INTEGER NOT NULL,
                     minecraft_xp INTEGER NOT NULL CHECK (minecraft_xp > 0),
                     observed_at TEXT NOT NULL,
+                    minecraft_reward_delivered INTEGER NOT NULL DEFAULT 0
+                        CHECK (minecraft_reward_delivered IN (0, 1)),
                     PRIMARY KEY (account_id, advancement)
                 );
                 """
             )
+            advancement_columns = {
+                row["name"]
+                for row in connection.execute("PRAGMA table_info(minecraft_advancement_rewards)")
+            }
+            if "minecraft_reward_delivered" not in advancement_columns:
+                connection.execute(
+                    """
+                    ALTER TABLE minecraft_advancement_rewards
+                    ADD COLUMN minecraft_reward_delivered INTEGER NOT NULL DEFAULT 0
+                        CHECK (minecraft_reward_delivered IN (0, 1))
+                    """
+                )
 
     def import_whitelist(self, whitelist_path: Path, bedrock_prefix: str = ".") -> int:
         if not whitelist_path.exists():
@@ -543,6 +557,94 @@ class AccountStore:
             connection.execute(
                 "DELETE FROM minecraft_xp_outbox WHERE event_id = ?",
                 (event_id,),
+            )
+
+    def is_advancement_minecraft_reward_delivered(self, event_id: str) -> bool:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT minecraft_reward_delivered
+                FROM minecraft_advancement_rewards
+                WHERE event_id = ?
+                """,
+                (event_id,),
+            ).fetchone()
+        if row is None:
+            raise ValueError("進捗報酬イベントが見つかりません。")
+        return bool(row["minecraft_reward_delivered"])
+
+    def reserve_advancement_minecraft_reward_delivery(
+        self,
+        *,
+        event_id: str,
+        account_id: int,
+        reward_xp: int,
+        observed_at: str,
+    ) -> bool:
+        """ゲーム内報酬の付与権を原子的に確保し、XP観測基準へ加える。"""
+        if reward_xp <= 0:
+            raise ValueError("reward_xp must be positive")
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE minecraft_advancement_rewards
+                SET minecraft_reward_delivered = 1
+                WHERE event_id = ? AND account_id = ?
+                  AND minecraft_reward_delivered = 0
+                """,
+                (event_id, account_id),
+            )
+            if cursor.rowcount != 1:
+                row = connection.execute(
+                    """
+                    SELECT minecraft_reward_delivered
+                    FROM minecraft_advancement_rewards
+                    WHERE event_id = ? AND account_id = ?
+                    """,
+                    (event_id, account_id),
+                ).fetchone()
+                if row is not None and row["minecraft_reward_delivered"]:
+                    return False
+                raise ValueError("進捗報酬イベントが見つかりません。")
+            connection.execute(
+                """
+                UPDATE minecraft_xp_observations
+                SET current_xp = current_xp + ?, observed_at = ?
+                WHERE account_id = ?
+                """,
+                (reward_xp, observed_at, account_id),
+            )
+        return True
+
+    def release_advancement_minecraft_reward_delivery(
+        self,
+        *,
+        event_id: str,
+        account_id: int,
+        reward_xp: int,
+    ) -> None:
+        """コマンドが明確に失敗した場合だけ付与権とXP観測基準を戻す。"""
+        if reward_xp <= 0:
+            raise ValueError("reward_xp must be positive")
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE minecraft_advancement_rewards
+                SET minecraft_reward_delivered = 0
+                WHERE event_id = ? AND account_id = ?
+                  AND minecraft_reward_delivered = 1
+                """,
+                (event_id, account_id),
+            )
+            if cursor.rowcount != 1:
+                return
+            connection.execute(
+                """
+                UPDATE minecraft_xp_observations
+                SET current_xp = MAX(current_xp - ?, 0)
+                WHERE account_id = ?
+                """,
+                (reward_xp, account_id),
             )
 
     def link_existing(
