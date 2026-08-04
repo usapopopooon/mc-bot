@@ -2110,6 +2110,17 @@ class MinecraftDiscordBot(discord.Client):
         events = await self._level_bot_xp.fetch_level_ups(guild_id)
         if events is None:
             return
+        online_user_ids: set[int] = set()
+        if any(not event.minecraft_delivered for event in events):
+            response = await asyncio.to_thread(self._require_rcon().execute, "list")
+            online_names = {name.casefold() for name in parse_online_players(response)}
+            self._online_player_names = online_names
+            online_user_ids = {
+                account.discord_user_id
+                for account in await asyncio.to_thread(self._accounts.list_linked_active)
+                if account.discord_user_id is not None
+                and account.server_player_name.casefold() in online_names
+            }
         for event in events:
             if event.guild_id != guild_id:
                 LOGGER.warning(
@@ -2119,8 +2130,9 @@ class MinecraftDiscordBot(discord.Client):
                 )
                 continue
             if not event.minecraft_delivered:
-                command = level_up_tellraw_command(event)
-                await asyncio.to_thread(self._require_rcon().execute, command)
+                if event.user_id in online_user_ids:
+                    command = level_up_tellraw_command(event)
+                    await asyncio.to_thread(self._require_rcon().execute, command)
                 if not await self._level_bot_xp.acknowledge_level_up(
                     event.id, guild_id, "minecraft"
                 ):

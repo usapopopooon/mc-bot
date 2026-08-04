@@ -254,6 +254,17 @@ def test_sync_announces_level_up_with_guild_name_then_acknowledges(tmp_path) -> 
         level_bot_api_token="xp-secret",
     )
     bot = MinecraftDiscordBot(config)
+    bot._accounts.initialize()
+    bot._accounts.create_registration(
+        edition="java",
+        minecraft_name="Steve",
+        server_player_name="Steve",
+        discord_user_id=123,
+        discord_username="hoge",
+        source="self",
+        status="active",
+        created_by=123,
+    )
     bot._settings = RuntimeSettings(guild_id=456)
     rcon = ExperienceRcon()
     bot._rcon = rcon  # type: ignore[assignment]
@@ -277,9 +288,10 @@ def test_sync_announces_level_up_with_guild_name_then_acknowledges(tmp_path) -> 
 
     asyncio.run(bot._sync_minecraft_level_up_announcements())
 
-    assert len(rcon.commands) == 1
-    assert rcon.commands[0].startswith("tellraw @a ")
-    assert "うさぽサーバー" in rcon.commands[0]
+    assert len(rcon.commands) == 2
+    assert rcon.commands[0] == "list"
+    assert rcon.commands[1].startswith("tellraw @a ")
+    assert "うさぽサーバー" in rcon.commands[1]
     assert ack.await_args_list[0].args == (7, 456, "minecraft")
     assert ack.await_args_list[1].args == (7, 456, "discord")
     send_log.assert_awaited_once()
@@ -288,6 +300,55 @@ def test_sync_announces_level_up_with_guild_name_then_acknowledges(tmp_path) -> 
     assert embed.description == (
         "🎉 **うさぽ (<@123>) さん** がlevel-botでレベル **10** になりました!"
     )
+
+
+def test_sync_skips_minecraft_level_up_for_user_who_is_not_online(tmp_path) -> None:
+    config = Config(
+        discord_token="test",
+        accounts_path=tmp_path / "accounts.db",
+        rcon_password="test",
+        level_bot_api_url="https://levels.example.test",
+        level_bot_api_token="xp-secret",
+    )
+    bot = MinecraftDiscordBot(config)
+    bot._accounts.initialize()
+    bot._accounts.create_registration(
+        edition="java",
+        minecraft_name="Alex",
+        server_player_name="Alex",
+        discord_user_id=123,
+        discord_username="hoge",
+        source="self",
+        status="active",
+        created_by=123,
+    )
+    bot._settings = RuntimeSettings(guild_id=456)
+    rcon = ExperienceRcon()
+    bot._rcon = rcon  # type: ignore[assignment]
+    event = MinecraftLevelUpEvent(
+        id=9,
+        guild_id=456,
+        guild_name="うさぽサーバー",
+        user_id=123,
+        display_name="うさぽ",
+        level=12,
+        minecraft_delivered=False,
+        discord_delivered=False,
+    )
+    bot._level_bot_xp.fetch_level_ups = AsyncMock(  # type: ignore[method-assign]
+        return_value=[event]
+    )
+    ack = AsyncMock(return_value=True)
+    bot._level_bot_xp.acknowledge_level_up = ack  # type: ignore[method-assign]
+    send_log = AsyncMock()
+    bot._send = send_log  # type: ignore[method-assign]
+
+    asyncio.run(bot._sync_minecraft_level_up_announcements())
+
+    assert rcon.commands == ["list"]
+    assert ack.await_args_list[0].args == (9, 456, "minecraft")
+    assert ack.await_args_list[1].args == (9, 456, "discord")
+    send_log.assert_awaited_once()
 
 
 def test_sync_does_not_repeat_already_delivered_minecraft_message(tmp_path) -> None:
