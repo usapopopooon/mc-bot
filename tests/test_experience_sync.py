@@ -148,8 +148,10 @@ def test_sync_announces_level_up_with_guild_name_then_acknowledges(tmp_path) -> 
     assert ack.await_args_list[1].args == (7, 456, "discord")
     send_log.assert_awaited_once()
     embed = send_log.await_args.args[0]
-    assert embed.title == "🎉 うさぽサーバー"
-    assert embed.description == "**うさぽさん** がDiscordレベル **10** になりました!"
+    assert embed.title is None
+    assert embed.description == (
+        "🎉 **うさぽ (<@123>) さん** がlevel-botでレベル **10** になりました!"
+    )
 
 
 def test_sync_does_not_repeat_already_delivered_minecraft_message(tmp_path) -> None:

@@ -1,5 +1,6 @@
 from mc_bot.events import EventType, LogEvent
-from mc_bot.formatting import format_event
+from mc_bot.experience import MinecraftLevelUpEvent
+from mc_bot.formatting import format_event, format_level_up_event
 from mc_bot.translations import AdvancementTranslator
 
 
@@ -9,6 +10,27 @@ def test_formats_japanese_advancement() -> None:
         AdvancementTranslator.load(),
     )
     assert embed.description == "🏆 **Steveさん** が進捗「石器時代」を達成しました"
+    assert embed.color.value == 0xF1C40F
+
+
+def test_formats_level_bot_level_up_as_linked_log_without_title() -> None:
+    embed = format_level_up_event(
+        MinecraftLevelUpEvent(
+            id=1,
+            guild_id=456,
+            guild_name="うさぽサーバー",
+            user_id=123,
+            display_name="*うさぽ*",
+            level=10,
+            minecraft_delivered=True,
+            discord_delivered=False,
+        )
+    )
+
+    assert embed.title is None
+    assert embed.description == (
+        r"🎉 **\*うさぽ\* (<@123>) さん** がlevel-botでレベル **10** になりました!"
+    )
     assert embed.color.value == 0xF1C40F
 
 

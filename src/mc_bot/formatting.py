@@ -50,12 +50,13 @@ def format_event(
 
 
 def format_level_up_event(event: MinecraftLevelUpEvent) -> discord.Embed:
-    """Minecraft内へ転送したDiscordレベルアップをログ用Embedにする。"""
-    guild_name = _escape_markdown(event.guild_name)
+    """Minecraft内へ転送したlevel-botのレベルアップをログ用Embedにする。"""
     display_name = _escape_markdown(event.display_name)
     return discord.Embed(
-        title=f"🎉 {guild_name}",
-        description=(f"**{display_name}さん** がDiscordレベル **{event.level}** になりました!"),
+        description=(
+            f"🎉 **{display_name} (<@{event.user_id}>) さん** が"
+            f"level-botでレベル **{event.level}** になりました!"
+        ),
         color=discord.Color.gold(),
     )
 
