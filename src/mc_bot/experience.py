@@ -30,6 +30,12 @@ class MinecraftLevelUpEvent:
     discord_delivered: bool
 
 
+@dataclass(frozen=True, slots=True)
+class MinecraftVoiceHeartbeatResult:
+    awarded_bonus_seconds: int
+    bonus_active: bool
+
+
 def parse_experience_query(response: str, unit: str) -> int:
     """``experience query`` の英語RCON応答から値を取り出す。"""
     match = _QUERY_RESULT.search(response)
@@ -105,6 +111,20 @@ def advancement_reward_tellraw_command(
     return f"tellraw @a {json.dumps(components, ensure_ascii=False, separators=(',', ':'))}"
 
 
+def voice_bonus_started_tellraw_command(server_name: str, player_name: str) -> str:
+    """MinecraftとVCの同時接続ボーナス開始をMinecraft内へ流す。"""
+    components = [
+        {"text": "["},
+        {"text": server_name, "color": "aqua"},
+        {"text": "] "},
+        {"text": player_name, "color": "yellow"},
+        {"text": "さんがMinecraftとVCに同時接続したので、"},
+        {"text": "VC XPが2倍", "color": "green", "bold": True},
+        {"text": "になりました!"},
+    ]
+    return f"tellraw @a {json.dumps(components, ensure_ascii=False, separators=(',', ':'))}"
+
+
 class LevelBotXpClient:
     def __init__(self, base_url: str, token: str) -> None:
         self._base_url = base_url.rstrip("/")
@@ -146,6 +166,55 @@ class LevelBotXpClient:
         except (aiohttp.ClientError, TimeoutError) as error:
             LOGGER.warning("Could not send Minecraft XP to level-bot: %s", error)
         return False
+
+    async def send_voice_heartbeat(
+        self,
+        *,
+        guild_id: int,
+        discord_user_id: int,
+        account_id: int,
+        observed_at: str,
+    ) -> MinecraftVoiceHeartbeatResult | None:
+        if not self._token:
+            return None
+        session = self._require_session()
+        try:
+            async with session.post(
+                f"{self._base_url}/api/v1/integrations/minecraft/voice-heartbeats",
+                headers={"Authorization": f"Bearer {self._token}"},
+                json={
+                    "guild_id": str(guild_id),
+                    "user_id": str(discord_user_id),
+                    "minecraft_account_id": f"mc-bot:{account_id}",
+                    "observed_at": observed_at,
+                },
+            ) as response:
+                if response.status != 200:
+                    body = await response.text()
+                    LOGGER.warning(
+                        "level-bot voice heartbeat rejected status=%d body=%s",
+                        response.status,
+                        body[:300],
+                    )
+                    return None
+                payload = await response.json()
+            awarded = payload["awarded_bonus_seconds"]
+            active = payload["bonus_active"]
+            if not isinstance(awarded, int) or awarded < 0 or not isinstance(active, bool):
+                raise ValueError("voice heartbeat response contains invalid values")
+            return MinecraftVoiceHeartbeatResult(
+                awarded_bonus_seconds=awarded,
+                bonus_active=active,
+            )
+        except (
+            aiohttp.ClientError,
+            TimeoutError,
+            KeyError,
+            TypeError,
+            ValueError,
+        ) as error:
+            LOGGER.warning("Could not send voice heartbeat to level-bot: %s", error)
+            return None
 
     async def fetch_level_ups(self, guild_id: int) -> list[MinecraftLevelUpEvent] | None:
         if not self._token:

@@ -10,6 +10,7 @@ from mc_bot.experience import (
     level_up_tellraw_command,
     parse_experience_query,
     total_experience_points,
+    voice_bonus_started_tellraw_command,
 )
 
 
@@ -80,3 +81,12 @@ def test_builds_separate_advancement_reward_tellraw() -> None:
     assert components[3] == {"text": 'Steve"', "color": "yellow"}
     assert components[5] == {"text": "Stone Age", "color": "gold"}
     assert components[7] == {"text": "100 XP", "color": "green", "bold": True}
+
+
+def test_builds_voice_bonus_started_tellraw_like_level_up_message() -> None:
+    command = voice_bonus_started_tellraw_command("うさぽサーバー", "Steve")
+    components = json.loads(command.removeprefix("tellraw @a "))
+
+    assert components[1] == {"text": "うさぽサーバー", "color": "aqua"}
+    assert components[3] == {"text": "Steve", "color": "yellow"}
+    assert components[5] == {"text": "VC XPが2倍", "color": "green", "bold": True}

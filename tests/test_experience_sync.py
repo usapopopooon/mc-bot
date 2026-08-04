@@ -3,7 +3,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 from mc_bot.bot import MinecraftDiscordBot
 from mc_bot.config import Config
-from mc_bot.experience import MinecraftLevelUpEvent
+from mc_bot.experience import MinecraftLevelUpEvent, MinecraftVoiceHeartbeatResult
 from mc_bot.settings import RuntimeSettings
 from mc_bot.tailer import Cursor, PendingLine
 
@@ -64,6 +64,9 @@ def test_sync_baselines_then_delivers_positive_xp_delta(tmp_path) -> None:
     bot._rcon = rcon  # type: ignore[assignment]
     send = AsyncMock(return_value=True)
     bot._level_bot_xp.send = send  # type: ignore[method-assign]
+    bot._level_bot_xp.send_voice_heartbeat = AsyncMock(  # type: ignore[method-assign]
+        return_value=MinecraftVoiceHeartbeatResult(0, False)
+    )
 
     async def exercise() -> None:
         await bot._sync_minecraft_xp()
@@ -80,6 +83,64 @@ def test_sync_baselines_then_delivers_positive_xp_delta(tmp_path) -> None:
     assert event.discord_user_id == 123
     assert event.guild_id == 456
     assert bot._accounts.list_minecraft_xp_outbox() == []
+
+
+def test_sync_announces_voice_bonus_start_once_with_cooldown(tmp_path) -> None:
+    config = Config(
+        discord_token="test",
+        accounts_path=tmp_path / "accounts.db",
+        rcon_password="test",
+        level_bot_api_url="https://levels.example.test",
+        level_bot_api_token="xp-secret",
+    )
+    bot = MinecraftDiscordBot(config)
+    bot._accounts.initialize()
+    bot._accounts.create_registration(
+        edition="java",
+        minecraft_name="Steve",
+        server_player_name="Steve",
+        discord_user_id=123,
+        discord_username="hoge",
+        source="self",
+        status="active",
+        created_by=123,
+    )
+    bot._settings = RuntimeSettings(guild_id=456)
+    rcon = ExperienceRcon()
+    bot._rcon = rcon  # type: ignore[assignment]
+    bot._level_bot_xp.send = AsyncMock(return_value=True)  # type: ignore[method-assign]
+    bot._level_bot_xp.send_voice_heartbeat = AsyncMock(  # type: ignore[method-assign]
+        side_effect=[
+            MinecraftVoiceHeartbeatResult(0, True),
+            MinecraftVoiceHeartbeatResult(30, True),
+            MinecraftVoiceHeartbeatResult(0, False),
+            MinecraftVoiceHeartbeatResult(0, True),
+        ]
+    )
+    send_log = AsyncMock()
+    bot._send = send_log  # type: ignore[method-assign]
+    guild = MagicMock()
+    guild.name = "うさぽサーバー"
+    bot.get_guild = MagicMock(return_value=guild)  # type: ignore[method-assign]
+
+    async def exercise() -> None:
+        await bot._sync_minecraft_xp()
+        await bot._sync_minecraft_xp()
+        await bot._sync_minecraft_xp()
+        await bot._sync_minecraft_xp()
+
+    asyncio.run(exercise())
+
+    tellraw_commands = [command for command in rcon.commands if command.startswith("tellraw @a ")]
+    assert len(tellraw_commands) == 1
+    assert "うさぽサーバー" in tellraw_commands[0]
+    assert "VC XPが2倍" in tellraw_commands[0]
+    send_log.assert_awaited_once()
+    assert send_log.await_args.args[0].description == (
+        "🎮🔊 **[うさぽサーバー] Steve (<@123>) さん** が"
+        "MinecraftとVCに同時接続しました\n"
+        "同時接続中は、サーバーでのVC XPが **2倍** になります!"
+    )
 
 
 def test_advancement_keeps_original_log_then_sends_reward_everywhere(tmp_path) -> None:
@@ -166,6 +227,9 @@ def test_sync_pauses_observation_while_api_outbox_is_blocked(tmp_path) -> None:
     bot._rcon = rcon  # type: ignore[assignment]
     send = AsyncMock(return_value=False)
     bot._level_bot_xp.send = send  # type: ignore[method-assign]
+    bot._level_bot_xp.send_voice_heartbeat = AsyncMock(  # type: ignore[method-assign]
+        return_value=MinecraftVoiceHeartbeatResult(0, False)
+    )
 
     async def exercise() -> int:
         await bot._sync_minecraft_xp()

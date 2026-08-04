@@ -25,11 +25,13 @@ from mc_bot.experience import (
     level_up_tellraw_command,
     parse_experience_query,
     total_experience_points,
+    voice_bonus_started_tellraw_command,
 )
 from mc_bot.formatting import (
     format_advancement_reward,
     format_event,
     format_level_up_event,
+    format_voice_bonus_started,
 )
 from mc_bot.player_count import (
     PLAYER_COUNT_CHANNEL_NAME,
@@ -81,6 +83,7 @@ _MOJANG_PROFILE_URL = "https://api.mojang.com/users/profiles/minecraft/"
 _GEYSER_XUID_URL = "https://api.geysermc.org/v2/xbox/xuid/"
 _PLAYERDB_XBOX_URL = "https://playerdb.co/api/player/xbox/"
 _STATUS_PANEL_REFRESH_SECONDS = 5 * 60
+_VOICE_BONUS_NOTIFICATION_COOLDOWN_SECONDS = 60.0
 
 
 class MinecraftDiscordBot(discord.Client):
@@ -135,6 +138,10 @@ class MinecraftDiscordBot(discord.Client):
         self._status_panel_update_lock = asyncio.Lock()
         self._whitelist_operation_lock = asyncio.Lock()
         self._voice_disconnect_lock = asyncio.Lock()
+        self._voice_bonus_lock = asyncio.Lock()
+        self._online_player_names: set[str] = set()
+        self._voice_bonus_active_users: set[int] = set()
+        self._voice_bonus_last_notified: dict[int, float] = {}
         self._last_player_count_status: str | None = None
         self._channel: discord.TextChannel | None = None
         self._delivery_healthy = True
@@ -265,6 +272,8 @@ class MinecraftDiscordBot(discord.Client):
         _before: discord.VoiceState,
         _after: discord.VoiceState,
     ) -> None:
+        if member.guild.id == self._settings.guild_id and not member.bot:
+            await self._sync_voice_bonus_for_discord_user(member.id)
         if not self._settings.voice_enabled:
             return
         async with self._voice_disconnect_lock:
@@ -1854,6 +1863,10 @@ class MinecraftDiscordBot(discord.Client):
             if event is None:
                 await asyncio.to_thread(self._tailer.acknowledge, pending_line)
                 continue
+            if event.type is EventType.JOIN:
+                self._online_player_names.add(event.player_name.casefold())
+            elif event.type is EventType.LEAVE:
+                self._online_player_names.discard(event.player_name.casefold())
             account = await asyncio.to_thread(self._accounts.find_by_player_name, event.player_name)
             discord_user_id, discord_username = await self._discord_identity(account)
             embed = format_event(event, self._translator, discord_user_id)
@@ -1946,6 +1959,11 @@ class MinecraftDiscordBot(discord.Client):
                 await asyncio.to_thread(self._tailer.acknowledge, pending_line)
                 self._delivery_healthy = True
                 self._queue_voice_event(event, discord_username)
+                if account is not None and account.discord_user_id is not None:
+                    if event.type is EventType.JOIN:
+                        await self._sync_voice_bonus_for_account(account)
+                    elif event.type is EventType.LEAVE:
+                        await self._set_voice_bonus_state(account, active=False)
                 break
 
     def _queue_voice_event(self, event: LogEvent, discord_username: str | None) -> None:
@@ -2124,11 +2142,18 @@ class MinecraftDiscordBot(discord.Client):
 
         response = await asyncio.to_thread(self._require_rcon().execute, "list")
         online = parse_online_players(response)
+        self._online_player_names = {name.casefold() for name in online}
         linked = {
             account.server_player_name.casefold(): account
             for account in await asyncio.to_thread(self._accounts.list_linked_active)
         }
         observed_at = datetime.now(UTC).isoformat()
+        await self._sync_voice_bonus_heartbeats(
+            online,
+            linked=linked,
+            guild_id=guild_id,
+            observed_at=observed_at,
+        )
         for player_name in online:
             account = linked.get(player_name.casefold())
             if account is None or account.discord_user_id is None:
@@ -2147,6 +2172,111 @@ class MinecraftDiscordBot(discord.Client):
                 observed_at=observed_at,
             )
         await self._deliver_minecraft_xp_outbox()
+
+    async def _sync_voice_bonus_heartbeats(
+        self,
+        online: list[str],
+        *,
+        linked: dict[str, MinecraftAccount],
+        guild_id: int,
+        observed_at: str,
+    ) -> None:
+        by_user: dict[int, MinecraftAccount] = {}
+        for player_name in online:
+            account = linked.get(player_name.casefold())
+            if account is not None and account.discord_user_id is not None:
+                by_user.setdefault(account.discord_user_id, account)
+
+        for user_id in self._voice_bonus_active_users - set(by_user):
+            self._voice_bonus_active_users.discard(user_id)
+        for account in by_user.values():
+            result = await self._level_bot_xp.send_voice_heartbeat(
+                guild_id=guild_id,
+                discord_user_id=account.discord_user_id or 0,
+                account_id=account.id,
+                observed_at=observed_at,
+            )
+            if result is not None:
+                await self._set_voice_bonus_state(
+                    account,
+                    active=result.bonus_active,
+                )
+
+    async def _sync_voice_bonus_for_discord_user(self, user_id: int) -> None:
+        accounts = await asyncio.to_thread(self._accounts.list_linked_active)
+        account = next(
+            (
+                candidate
+                for candidate in accounts
+                if candidate.discord_user_id == user_id
+                and candidate.server_player_name.casefold() in self._online_player_names
+            ),
+            None,
+        )
+        if account is None:
+            self._voice_bonus_active_users.discard(user_id)
+            return
+        await self._sync_voice_bonus_for_account(account)
+
+    async def _sync_voice_bonus_for_account(self, account: MinecraftAccount) -> None:
+        guild_id = self._settings.guild_id
+        user_id = account.discord_user_id
+        if guild_id is None or user_id is None:
+            return
+        result = await self._level_bot_xp.send_voice_heartbeat(
+            guild_id=guild_id,
+            discord_user_id=user_id,
+            account_id=account.id,
+            observed_at=datetime.now(UTC).isoformat(),
+        )
+        if result is not None:
+            await self._set_voice_bonus_state(account, active=result.bonus_active)
+
+    async def _set_voice_bonus_state(self, account: MinecraftAccount, *, active: bool) -> None:
+        user_id = account.discord_user_id
+        if user_id is None:
+            return
+        should_notify = False
+        async with self._voice_bonus_lock:
+            if not active:
+                self._voice_bonus_active_users.discard(user_id)
+                return
+            if user_id in self._voice_bonus_active_users:
+                return
+            self._voice_bonus_active_users.add(user_id)
+            now = time.monotonic()
+            last_notified = self._voice_bonus_last_notified.get(user_id)
+            if (
+                last_notified is None
+                or now - last_notified >= _VOICE_BONUS_NOTIFICATION_COOLDOWN_SECONDS
+            ):
+                self._voice_bonus_last_notified[user_id] = now
+                should_notify = True
+        if should_notify:
+            await self._announce_voice_bonus_started(account)
+
+    async def _announce_voice_bonus_started(self, account: MinecraftAccount) -> None:
+        guild_id = self._settings.guild_id
+        user_id = account.discord_user_id
+        if guild_id is None or user_id is None:
+            return
+        guild = self.get_guild(guild_id)
+        server_name = guild.name if guild is not None else "サーバー"
+        try:
+            command = voice_bonus_started_tellraw_command(server_name, account.server_player_name)
+            await asyncio.to_thread(self._require_rcon().execute, command)
+        except (OSError, RconError, RuntimeError) as error:
+            LOGGER.warning("Could not announce voice bonus in Minecraft: %s", error)
+        try:
+            await self._send(
+                format_voice_bonus_started(
+                    server_name=server_name,
+                    player_name=account.server_player_name,
+                    discord_user_id=user_id,
+                )
+            )
+        except (RuntimeError, discord.DiscordException) as error:
+            LOGGER.warning("Could not announce voice bonus in Discord: %s", error)
 
     async def _query_player_experience(self, player_name: str) -> int:
         rcon = self._require_rcon()

@@ -41,6 +41,11 @@ level-bot XPを100付与します。Minecraft内では標準の進捗通知の�
 の報酬通知を流し、Discordでは進捗Embedの次に報酬Embedを別投稿します。
 同じアカウントの同じ進捗に報酬を重複付与しません。
 
+Discord連携済みのプレイヤーがMinecraftとDiscord VCに同時接続している間は、
+level-botのVC XPが2倍になります。同時接続が始まった時だけ、Minecraft内の
+`tellraw` とDiscordの通知チャンネルへ開始通知を送ります。短時間の再接続は60秒の
+クールダウンで連投を防ぎ、終了通知は送りません。
+
 ```text
 client.jar: 4e618f09a0c649dde3fdf829df443ce0b8831e65
 ja_jp.json: 82ae51a68e114943fd95cc870643317dc02fe5e4

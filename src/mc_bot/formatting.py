@@ -82,6 +82,25 @@ def format_advancement_reward(
     )
 
 
+def format_voice_bonus_started(
+    *,
+    server_name: str,
+    player_name: str,
+    discord_user_id: int,
+) -> discord.Embed:
+    """MinecraftとVCの同時接続ボーナス開始ログ。"""
+    server_name = _escape_markdown(server_name)
+    player_name = _escape_markdown(player_name)
+    return discord.Embed(
+        description=(
+            f"🎮🔊 **[{server_name}] {player_name} (<@{discord_user_id}>) さん** が"
+            "MinecraftとVCに同時接続しました\n"
+            "同時接続中は、サーバーでのVC XPが **2倍** になります!"
+        ),
+        color=discord.Color.green(),
+    )
+
+
 def _escape_markdown(value: str) -> str:
     escaped = value.replace("\\", "\\\\")
     for character in "*_~`|":

@@ -4,6 +4,7 @@ from mc_bot.formatting import (
     format_advancement_reward,
     format_event,
     format_level_up_event,
+    format_voice_bonus_started,
 )
 from mc_bot.translations import AdvancementTranslator
 
@@ -28,6 +29,21 @@ def test_formats_advancement_reward_as_a_separate_embed() -> None:
     assert embed.description == (
         "✨ **[うさぽサーバー] Steve (<@123>) さん** が進捗「石器時代」を"
         "達成したので、サーバーでの **100 XP**を獲得しました!"
+    )
+    assert embed.color.value == 0x2ECC71
+
+
+def test_formats_voice_bonus_started_without_ping() -> None:
+    embed = format_voice_bonus_started(
+        server_name="うさぽサーバー",
+        player_name="Steve",
+        discord_user_id=123,
+    )
+
+    assert embed.description == (
+        "🎮🔊 **[うさぽサーバー] Steve (<@123>) さん** が"
+        "MinecraftとVCに同時接続しました\n"
+        "同時接続中は、サーバーでのVC XPが **2倍** になります!"
     )
     assert embed.color.value == 0x2ECC71
 
