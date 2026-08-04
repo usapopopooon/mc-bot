@@ -275,3 +275,37 @@ def test_persists_minecraft_xp_observation_and_outbox(tmp_path) -> None:
     store.mark_minecraft_xp_delivered(gained.event_id)
 
     assert store.list_minecraft_xp_outbox() == []
+
+
+def test_claims_each_advancement_reward_once_and_replays_same_log(tmp_path) -> None:
+    store = AccountStore(tmp_path / "accounts.db")
+    store.initialize()
+    account = store.create_registration(
+        edition="java",
+        minecraft_name="Steve",
+        server_player_name="Steve",
+        discord_user_id=123,
+        discord_username="hoge",
+        source="self",
+        status="active",
+        created_by=123,
+    )
+    arguments = {
+        "event_id": "advancement-event-1",
+        "account_id": account.id,
+        "advancement": "Stone Age",
+        "discord_user_id": 123,
+        "guild_id": 456,
+        "minecraft_xp": 10_000,
+        "observed_at": "2026-08-04T00:00:00+00:00",
+    }
+
+    claimed = store.claim_advancement_reward(**arguments)
+    replayed = store.claim_advancement_reward(**arguments)
+    duplicate = store.claim_advancement_reward(**(arguments | {"event_id": "advancement-event-2"}))
+
+    assert claimed is not None
+    assert claimed.minecraft_xp == 10_000
+    assert replayed == claimed
+    assert duplicate is None
+    assert store.list_minecraft_xp_outbox() == [claimed]

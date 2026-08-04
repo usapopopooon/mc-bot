@@ -9,6 +9,10 @@ import aiohttp
 
 from mc_bot.accounts import MinecraftXpOutboxEvent
 
+ADVANCEMENT_REWARD_LEVEL_BOT_XP = 100
+MINECRAFT_XP_PER_LEVEL_BOT_XP = 100
+ADVANCEMENT_REWARD_MINECRAFT_XP = ADVANCEMENT_REWARD_LEVEL_BOT_XP * MINECRAFT_XP_PER_LEVEL_BOT_XP
+
 LOGGER = logging.getLogger(__name__)
 _QUERY_RESULT = re.compile(r"\bhas\s+(\d+)\s+experience\s+(levels?|points?)\b", re.I)
 _SAFE_PLAYER_NAME = re.compile(r"\.?[A-Za-z0-9_]{1,32}")
@@ -76,6 +80,27 @@ def level_up_tellraw_command(event: MinecraftLevelUpEvent) -> str:
         {"text": "さんがレベル "},
         {"text": str(event.level), "color": "green", "bold": True},
         {"text": " になりました!"},
+    ]
+    return f"tellraw @a {json.dumps(components, ensure_ascii=False, separators=(',', ':'))}"
+
+
+def advancement_reward_tellraw_command(
+    server_name: str,
+    player_name: str,
+    advancement: str,
+    reward_xp: int = ADVANCEMENT_REWARD_LEVEL_BOT_XP,
+) -> str:
+    """進捗達成報酬をMinecraft内へ別メッセージとして流す。"""
+    components = [
+        {"text": "["},
+        {"text": server_name, "color": "aqua"},
+        {"text": "] "},
+        {"text": player_name, "color": "yellow"},
+        {"text": "さんが進捗「"},
+        {"text": advancement, "color": "gold"},
+        {"text": "」を達成したので、サーバーでの "},
+        {"text": f"{reward_xp} XP", "color": "green", "bold": True},
+        {"text": "を獲得しました!"},
     ]
     return f"tellraw @a {json.dumps(components, ensure_ascii=False, separators=(',', ':'))}"
 

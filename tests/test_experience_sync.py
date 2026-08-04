@@ -1,10 +1,11 @@
 import asyncio
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 from mc_bot.bot import MinecraftDiscordBot
 from mc_bot.config import Config
 from mc_bot.experience import MinecraftLevelUpEvent
 from mc_bot.settings import RuntimeSettings
+from mc_bot.tailer import Cursor, PendingLine
 
 
 class ExperienceRcon:
@@ -24,6 +25,18 @@ class ExperienceRcon:
         if command == "experience query Steve points":
             return f"Steve has {self.points} experience points"
         raise AssertionError(f"unexpected RCON command: {command}")
+
+
+class OneLineTailer:
+    def __init__(self, line: PendingLine) -> None:
+        self._line = line
+        self.acknowledged: list[PendingLine] = []
+
+    async def lines(self):  # type: ignore[no-untyped-def]
+        yield self._line
+
+    def acknowledge(self, line: PendingLine) -> None:
+        self.acknowledged.append(line)
 
 
 def test_sync_baselines_then_delivers_positive_xp_delta(tmp_path) -> None:
@@ -66,6 +79,65 @@ def test_sync_baselines_then_delivers_positive_xp_delta(tmp_path) -> None:
     assert event.minecraft_xp == 5
     assert event.discord_user_id == 123
     assert event.guild_id == 456
+    assert bot._accounts.list_minecraft_xp_outbox() == []
+
+
+def test_advancement_keeps_original_log_then_sends_reward_everywhere(tmp_path) -> None:
+    config = Config(
+        discord_token="test",
+        accounts_path=tmp_path / "accounts.db",
+        rcon_password="test",
+        level_bot_api_url="https://levels.example.test",
+        level_bot_api_token="xp-secret",
+    )
+    bot = MinecraftDiscordBot(config)
+    bot._accounts.initialize()
+    bot._accounts.create_registration(
+        edition="java",
+        minecraft_name="Steve",
+        server_player_name="Steve",
+        discord_user_id=123,
+        discord_username="hoge",
+        source="self",
+        status="active",
+        created_by=123,
+    )
+    bot._settings = RuntimeSettings(guild_id=456)
+    rcon = ExperienceRcon()
+    bot._rcon = rcon  # type: ignore[assignment]
+    line = PendingLine(
+        "[12:34:56] [Server thread/INFO]: Steve has made the advancement [Stone Age]",
+        Cursor("device:inode", 100),
+    )
+    tailer = OneLineTailer(line)
+    bot._tailer = tailer  # type: ignore[assignment]
+    send_xp = AsyncMock(return_value=True)
+    bot._level_bot_xp.send = send_xp  # type: ignore[method-assign]
+    send_log = AsyncMock()
+    bot._send = send_log  # type: ignore[method-assign]
+    bot.wait_until_ready = AsyncMock()  # type: ignore[method-assign]
+    guild = MagicMock()
+    guild.name = "うさぽサーバー"
+    guild.get_member.return_value = None
+    bot.get_guild = MagicMock(return_value=guild)  # type: ignore[method-assign]
+
+    asyncio.run(bot._forward_logs())
+
+    sent_event = send_xp.await_args.args[0]
+    assert sent_event.minecraft_xp == 10_000
+    assert sent_event.discord_user_id == 123
+    assert len(send_log.await_args_list) == 2
+    original = send_log.await_args_list[0].args[0]
+    reward = send_log.await_args_list[1].args[0]
+    assert original.description == ("🏆 **Steve (<@123>) さん** が進捗「石器時代」を達成しました")
+    assert reward.description == (
+        "✨ **[うさぽサーバー] Steve (<@123>) さん** が進捗「石器時代」を"
+        "達成したので、サーバーでの **100 XP**を獲得しました!"
+    )
+    assert rcon.commands[0].startswith("tellraw @a ")
+    assert "うさぽサーバー" in rcon.commands[0]
+    assert "100 XP" in rcon.commands[0]
+    assert tailer.acknowledged == [line]
     assert bot._accounts.list_minecraft_xp_outbox() == []
 
 

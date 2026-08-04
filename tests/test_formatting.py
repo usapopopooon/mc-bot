@@ -1,6 +1,10 @@
 from mc_bot.events import EventType, LogEvent
 from mc_bot.experience import MinecraftLevelUpEvent
-from mc_bot.formatting import format_event, format_level_up_event
+from mc_bot.formatting import (
+    format_advancement_reward,
+    format_event,
+    format_level_up_event,
+)
 from mc_bot.translations import AdvancementTranslator
 
 
@@ -11,6 +15,21 @@ def test_formats_japanese_advancement() -> None:
     )
     assert embed.description == "🏆 **Steveさん** が進捗「石器時代」を達成しました"
     assert embed.color.value == 0xF1C40F
+
+
+def test_formats_advancement_reward_as_a_separate_embed() -> None:
+    embed = format_advancement_reward(
+        LogEvent(EventType.ADVANCEMENT, "Steve", "Stone Age"),
+        "石器時代",
+        "うさぽサーバー",
+        123,
+    )
+
+    assert embed.description == (
+        "✨ **[うさぽサーバー] Steve (<@123>) さん** が進捗「石器時代」を"
+        "達成したので、サーバーでの **100 XP**を獲得しました!"
+    )
+    assert embed.color.value == 0x2ECC71
 
 
 def test_formats_level_bot_level_up_as_linked_log_without_title() -> None:

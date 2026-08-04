@@ -4,6 +4,7 @@ import pytest
 
 from mc_bot.experience import (
     MinecraftLevelUpEvent,
+    advancement_reward_tellraw_command,
     experience_query_command,
     experience_to_next_level,
     level_up_tellraw_command,
@@ -69,3 +70,13 @@ def test_builds_level_up_tellraw_with_discord_guild_name() -> None:
     assert components[1] == {"text": 'うさぽ"サーバー', "color": "aqua"}
     assert components[3] == {"text": "うさぽ", "color": "yellow"}
     assert components[5] == {"text": "10", "color": "green", "bold": True}
+
+
+def test_builds_separate_advancement_reward_tellraw() -> None:
+    command = advancement_reward_tellraw_command('うさぽ"サーバー', 'Steve"', "Stone Age", 100)
+    components = json.loads(command.removeprefix("tellraw @a "))
+
+    assert components[1] == {"text": 'うさぽ"サーバー', "color": "aqua"}
+    assert components[3] == {"text": 'Steve"', "color": "yellow"}
+    assert components[5] == {"text": "Stone Age", "color": "gold"}
+    assert components[7] == {"text": "100 XP", "color": "green", "bold": True}

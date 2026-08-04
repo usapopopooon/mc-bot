@@ -36,6 +36,11 @@ Geyser/Floodgate経由のBedrockプレイヤーを含む次のログを扱いま
 `advancements.*.title` の126項目を突き合わせて生成しています。使用した公式アセットの
 SHA-1は次のとおりです。
 
+Discord連携済みのプレイヤーが進捗を達成すると、既存の進捗ログはそのままに、
+level-bot XPを100付与します。Minecraft内では標準の進捗通知の後に `tellraw`
+の報酬通知を流し、Discordでは進捗Embedの次に報酬Embedを別投稿します。
+同じアカウントの同じ進捗に報酬を重複付与しません。
+
 ```text
 client.jar: 4e618f09a0c649dde3fdf829df443ce0b8831e65
 ja_jp.json: 82ae51a68e114943fd95cc870643317dc02fe5e4

@@ -18,13 +18,19 @@ from mc_bot.accounts import AccountStore, MinecraftAccount
 from mc_bot.config import Config
 from mc_bot.events import EventType, LogEvent, parse_log_line
 from mc_bot.experience import (
+    ADVANCEMENT_REWARD_MINECRAFT_XP,
     LevelBotXpClient,
+    advancement_reward_tellraw_command,
     experience_query_command,
     level_up_tellraw_command,
     parse_experience_query,
     total_experience_points,
 )
-from mc_bot.formatting import format_event, format_level_up_event
+from mc_bot.formatting import (
+    format_advancement_reward,
+    format_event,
+    format_level_up_event,
+)
 from mc_bot.player_count import (
     PLAYER_COUNT_CHANNEL_NAME,
     PLAYER_COUNT_DISABLED_STATUS,
@@ -1851,14 +1857,82 @@ class MinecraftDiscordBot(discord.Client):
             account = await asyncio.to_thread(self._accounts.find_by_player_name, event.player_name)
             discord_user_id, discord_username = await self._discord_identity(account)
             embed = format_event(event, self._translator, discord_user_id)
+            reward_embed: discord.Embed | None = None
+            reward_command: str | None = None
+            reward_event = None
+            guild_id = self._settings.guild_id
+            if (
+                event.type is EventType.ADVANCEMENT
+                and account is not None
+                and discord_user_id is not None
+                and guild_id is not None
+                and self._config.level_bot_api_url
+                and self._config.level_bot_api_token
+            ):
+                advancement = self._translator.translate(event.detail)
+                guild = self.get_guild(guild_id)
+                server_name = guild.name if guild is not None else "サーバー"
+                event_id = str(
+                    uuid.uuid5(
+                        uuid.NAMESPACE_URL,
+                        "mc-bot:advancement:"
+                        f"{pending_line.cursor.file_identity}:"
+                        f"{pending_line.cursor.offset}:{account.id}:{event.detail}",
+                    )
+                )
+                reward_event = await asyncio.to_thread(
+                    self._accounts.claim_advancement_reward,
+                    event_id=event_id,
+                    account_id=account.id,
+                    advancement=event.detail,
+                    discord_user_id=discord_user_id,
+                    guild_id=guild_id,
+                    minecraft_xp=ADVANCEMENT_REWARD_MINECRAFT_XP,
+                    observed_at=datetime.now(UTC).isoformat(),
+                )
+                if reward_event is not None:
+                    reward_embed = format_advancement_reward(
+                        event, advancement, server_name, discord_user_id
+                    )
+                    if self._rcon is not None:
+                        reward_command = advancement_reward_tellraw_command(
+                            server_name, event.player_name, advancement
+                        )
             if event.type in {EventType.JOIN, EventType.LEAVE}:
                 self._schedule_player_count_refresh()
                 self._schedule_status_panel_refresh()
             retry_delay = 1
+            minecraft_reward_sent = False
+            event_log_sent = False
+            reward_log_sent = False
             while not self.is_closed():
                 await self.wait_until_ready()
+                if reward_event is not None and not await self._deliver_minecraft_xp_outbox():
+                    self._delivery_healthy = False
+                    await asyncio.sleep(retry_delay)
+                    retry_delay = min(retry_delay * 2, 30)
+                    continue
+                if reward_command is not None and not minecraft_reward_sent:
+                    try:
+                        await asyncio.to_thread(self._require_rcon().execute, reward_command)
+                    except (OSError, RconError, RuntimeError) as error:
+                        self._delivery_healthy = False
+                        LOGGER.warning(
+                            "Minecraft advancement reward send failed; retrying in %ds: %s",
+                            retry_delay,
+                            error,
+                        )
+                        await asyncio.sleep(retry_delay)
+                        retry_delay = min(retry_delay * 2, 30)
+                        continue
+                    minecraft_reward_sent = True
                 try:
-                    await self._send(embed)
+                    if not event_log_sent:
+                        await self._send(embed)
+                        event_log_sent = True
+                    if reward_embed is not None and not reward_log_sent:
+                        await self._send(reward_embed)
+                        reward_log_sent = True
                 except (RuntimeError, discord.DiscordException) as error:
                     self._delivery_healthy = False
                     LOGGER.warning(

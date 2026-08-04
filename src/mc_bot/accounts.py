@@ -85,6 +85,17 @@ class AccountStore:
                 );
                 CREATE INDEX IF NOT EXISTS minecraft_xp_outbox_created
                     ON minecraft_xp_outbox(created_at);
+                CREATE TABLE IF NOT EXISTS minecraft_advancement_rewards (
+                    account_id INTEGER NOT NULL
+                        REFERENCES minecraft_accounts(id) ON DELETE CASCADE,
+                    advancement TEXT NOT NULL,
+                    event_id TEXT NOT NULL UNIQUE,
+                    discord_user_id INTEGER NOT NULL,
+                    guild_id INTEGER NOT NULL,
+                    minecraft_xp INTEGER NOT NULL CHECK (minecraft_xp > 0),
+                    observed_at TEXT NOT NULL,
+                    PRIMARY KEY (account_id, advancement)
+                );
                 """
             )
 
@@ -387,6 +398,79 @@ class AccountStore:
                     event_id, account_id, discord_user_id, guild_id,
                     minecraft_xp, observed_at, created_at
                 ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    event.event_id,
+                    event.account_id,
+                    event.discord_user_id,
+                    event.guild_id,
+                    event.minecraft_xp,
+                    event.observed_at,
+                    _now(),
+                ),
+            )
+        return event
+
+    def claim_advancement_reward(
+        self,
+        *,
+        event_id: str,
+        account_id: int,
+        advancement: str,
+        discord_user_id: int,
+        guild_id: int,
+        minecraft_xp: int,
+        observed_at: str,
+    ) -> MinecraftXpOutboxEvent | None:
+        """進捗報酬を一度だけ記録し、level-bot向けoutboxへ追加する。"""
+        if not advancement:
+            raise ValueError("advancement must not be empty")
+        if minecraft_xp <= 0:
+            raise ValueError("minecraft_xp must be positive")
+        event = MinecraftXpOutboxEvent(
+            event_id=event_id,
+            account_id=account_id,
+            discord_user_id=discord_user_id,
+            guild_id=guild_id,
+            minecraft_xp=minecraft_xp,
+            observed_at=observed_at,
+        )
+        with self._connect() as connection:
+            existing = connection.execute(
+                """
+                SELECT event_id FROM minecraft_advancement_rewards
+                WHERE account_id = ? AND advancement = ?
+                """,
+                (account_id, advancement),
+            ).fetchone()
+            if existing is not None:
+                # 同じログ行の再処理なら通知まで再試行する。revoke後などの
+                # 新しい達成イベントには報酬を重複付与しない。
+                return event if existing["event_id"] == event_id else None
+            connection.execute(
+                """
+                INSERT INTO minecraft_advancement_rewards (
+                    account_id, advancement, event_id, discord_user_id,
+                    guild_id, minecraft_xp, observed_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    account_id,
+                    advancement,
+                    event_id,
+                    discord_user_id,
+                    guild_id,
+                    minecraft_xp,
+                    observed_at,
+                ),
+            )
+            connection.execute(
+                """
+                INSERT INTO minecraft_xp_outbox (
+                    event_id, account_id, discord_user_id, guild_id,
+                    minecraft_xp, observed_at, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(event_id) DO NOTHING
                 """,
                 (
                     event.event_id,
