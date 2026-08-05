@@ -35,6 +35,9 @@ def test_minecraft_xp_shop_panel_lists_api_packs() -> None:
         "`サーバーXP 50` → `Minecraft 250 XP`\n"
         "`サーバーXP 100` → `Minecraft 500 XP`"
     )
+    assert embed.fields[1].name == "⚠️ 交換前にご確認ください"
+    assert "参加していない状態ではMinecraft XPは加算されません" in str(embed.fields[1].value)
+    assert "サーバーXPも消費されません" in str(embed.fields[1].value)
 
 
 def test_minecraft_xp_shop_panel_has_persistent_buttons() -> None:

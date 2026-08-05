@@ -28,6 +28,16 @@ def minecraft_xp_shop_embed(packs: tuple[MinecraftXpPack, ...]) -> discord.Embed
         ),
         inline=False,
     )
+    embed.add_field(
+        name="⚠️ 交換前にご確認ください",
+        value=(
+            "交換するときは、連携したアカウントでMinecraftサーバーに"
+            "参加している必要があります。\n"
+            "**参加していない状態ではMinecraft XPは加算されません。**"
+            "その場合、サーバーXPも消費されません。"
+        ),
+        inline=False,
+    )
     embed.set_footer(text="交換操作と残高は本人にだけ表示されます")
     return embed
 
