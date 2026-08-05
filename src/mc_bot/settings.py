@@ -17,6 +17,8 @@ class RuntimeSettings:
     admin_panel_message_id: int | None = None
     status_panel_channel_id: int | None = None
     status_panel_message_id: int | None = None
+    xp_shop_panel_channel_id: int | None = None
+    xp_shop_panel_message_id: int | None = None
     approval_mode: str = "automatic"
     approval_channel_id: int | None = None
     player_count_channel_id: int | None = None
@@ -51,6 +53,8 @@ class SettingsStore:
             "admin_panel_message_id",
             "status_panel_channel_id",
             "status_panel_message_id",
+            "xp_shop_panel_channel_id",
+            "xp_shop_panel_message_id",
             "approval_channel_id",
             "player_count_channel_id",
             "voice_channel_id",

@@ -1,4 +1,6 @@
+import asyncio
 import json
+from typing import Any
 
 import pytest
 
@@ -16,6 +18,44 @@ from mc_bot.experience import (
     voice_bonus_started_tellraw_command,
     xp_exchange_tellraw_command,
 )
+
+
+class _FakeResponse:
+    status = 200
+
+    async def __aenter__(self) -> _FakeResponse:
+        return self
+
+    async def __aexit__(self, *_args: object) -> None:
+        return None
+
+    async def json(self) -> dict[str, object]:
+        return {
+            "status": "reserved",
+            "message": "交換を受け付けました。",
+            "wallet_before": {
+                "total_xp": 100,
+                "spent_xp": 0,
+                "available_xp": 100,
+            },
+            "wallet_after": {
+                "total_xp": 100,
+                "spent_xp": 10,
+                "available_xp": 90,
+            },
+            "pack": {"cost_xp": 10, "reward_xp": 50},
+        }
+
+
+class _FakeSession:
+    closed = False
+
+    def __init__(self) -> None:
+        self.post_kwargs: dict[str, Any] | None = None
+
+    def post(self, url: str, **kwargs: Any) -> _FakeResponse:
+        self.post_kwargs = {"url": url, **kwargs}
+        return _FakeResponse()
 
 
 def test_parses_level_up_and_xp_exchange_api_events() -> None:
@@ -47,6 +87,77 @@ def test_parses_level_up_and_xp_exchange_api_events() -> None:
     assert level_up.level == 2
     assert exchange.event_id == "exchange-uuid"
     assert exchange.reward_xp == 50
+
+
+def test_parses_minecraft_xp_shop_and_exchange_request() -> None:
+    shop = LevelBotXpClient._parse_xp_shop(
+        {
+            "wallet": {"total_xp": 100, "spent_xp": 10, "available_xp": 90},
+            "packs": [
+                {"cost_xp": 10, "reward_xp": 50},
+                {"cost_xp": 50, "reward_xp": 250},
+            ],
+        }
+    )
+    result = LevelBotXpClient._parse_xp_exchange_request(
+        {
+            "status": "reserved",
+            "message": "交換を受け付けました。",
+            "wallet_before": {
+                "total_xp": 100,
+                "spent_xp": 10,
+                "available_xp": 90,
+            },
+            "wallet_after": {
+                "total_xp": 100,
+                "spent_xp": 20,
+                "available_xp": 80,
+            },
+            "pack": {"cost_xp": 10, "reward_xp": 50},
+        }
+    )
+
+    assert shop.wallet.available_xp == 90
+    assert shop.packs[1].reward_xp == 250
+    assert result.status == "reserved"
+    assert result.wallet_after.available_xp == 80
+
+
+def test_exchange_request_sends_idempotency_id_and_expected_rate() -> None:
+    async def exercise() -> None:
+        client = LevelBotXpClient("https://levels.example.test", "secret")
+        session = _FakeSession()
+        client._session = session  # type: ignore[assignment]
+
+        result = await client.request_xp_exchange(
+            1001,
+            2001,
+            "00000000-0000-4000-8000-000000000001",
+            10,
+            50,
+        )
+
+        assert result is not None
+        assert session.post_kwargs is not None
+        assert session.post_kwargs["json"] == {
+            "request_id": "00000000-0000-4000-8000-000000000001",
+            "guild_id": "1001",
+            "user_id": "2001",
+            "cost_xp": 10,
+            "expected_reward_xp": 50,
+        }
+
+    asyncio.run(exercise())
+
+
+def test_rejects_inconsistent_minecraft_xp_shop_wallet() -> None:
+    with pytest.raises(ValueError):
+        LevelBotXpClient._parse_xp_shop(
+            {
+                "wallet": {"total_xp": 100, "spent_xp": 10, "available_xp": 100},
+                "packs": [{"cost_xp": 10, "reward_xp": 50}],
+            }
+        )
 
 
 def test_parses_experience_query_responses() -> None:

@@ -21,6 +21,7 @@ from mc_bot.experience import (
     ADVANCEMENT_REWARD_IN_GAME_XP,
     ADVANCEMENT_REWARD_LEVEL_BOT_SOURCE_XP,
     LevelBotXpClient,
+    MinecraftXpExchangeRequest,
     advancement_reward_tellraw_command,
     experience_add_points_command,
     experience_query_command,
@@ -81,6 +82,12 @@ from mc_bot.ui import (
     admin_panel_embed,
 )
 from mc_bot.voice import MinecraftVoicePlayer, announcement_speech_text, event_speech_text
+from mc_bot.xp_shop import (
+    MinecraftXpPackSelectView,
+    MinecraftXpShopPanelView,
+    minecraft_xp_shop_embed,
+    wallet_text,
+)
 
 LOGGER = logging.getLogger(__name__)
 _JAVA_NAME = re.compile(r"[A-Za-z0-9_]{3,16}")
@@ -191,6 +198,10 @@ class MinecraftDiscordBot(discord.Client):
             description="公開Minecraftステータスパネルを設置します",
         )(self._configure_status_panel)
         group.command(
+            name="xp-panel",
+            description="Minecraft XP交換所パネルを設置します",
+        )(self._configure_xp_shop_panel)
+        group.command(
             name="show",
             description="現在のBot設定と稼働状態を表示します",
         )(self._show_configuration)
@@ -205,6 +216,7 @@ class MinecraftDiscordBot(discord.Client):
         self._voice_player.start()
         self.add_view(AccessPanelView(self))
         self.add_view(AdminPanelView(self))
+        self.add_view(MinecraftXpShopPanelView(self))
         for account in await asyncio.to_thread(self._accounts.list_pending_approvals):
             if account.approval_message_id is not None:
                 self.add_view(
@@ -221,6 +233,7 @@ class MinecraftDiscordBot(discord.Client):
 
         await self._refresh_access_panel()
         await self._refresh_admin_panel()
+        await self._refresh_xp_shop_panel()
         channel_id = self._settings.channel_id
         if channel_id is None:
             self._channel = None
@@ -466,6 +479,64 @@ class MinecraftDiscordBot(discord.Client):
             allowed_mentions=discord.AllowedMentions.none(),
         )
 
+    @app_commands.describe(channel="XP交換所パネルの投稿先。省略時は現在のチャンネル")
+    async def _configure_xp_shop_panel(
+        self,
+        interaction: discord.Interaction,
+        channel: discord.TextChannel | None = None,
+    ) -> None:
+        if not await self._require_server_manager(interaction):
+            return
+        target = channel or interaction.channel
+        if not isinstance(target, discord.TextChannel):
+            await interaction.response.send_message(
+                "パネルの投稿先にはテキストチャンネルを指定してください。",
+                ephemeral=True,
+            )
+            return
+        await interaction.response.defer(ephemeral=True)
+        try:
+            self._ensure_same_guild(target.guild.id)
+            await self._resolve_and_validate_channel(target.id, require_embeds=True)
+            shop = await self._level_bot_xp.fetch_xp_shop(target.guild.id, interaction.user.id)
+            if shop is None:
+                raise RuntimeError("level-botのXP交換APIへ接続できません")
+            old_channel_id = self._settings.xp_shop_panel_channel_id
+            old_message_id = self._settings.xp_shop_panel_message_id
+            message: discord.Message | None = None
+            if old_channel_id == target.id and old_message_id is not None:
+                try:
+                    message = await target.fetch_message(old_message_id)
+                    await message.edit(
+                        embed=minecraft_xp_shop_embed(shop.packs),
+                        view=MinecraftXpShopPanelView(self),
+                    )
+                except discord.NotFound:
+                    message = None
+            if message is None:
+                message = await target.send(
+                    embed=minecraft_xp_shop_embed(shop.packs),
+                    view=MinecraftXpShopPanelView(self),
+                )
+                await self._disable_old_panel(old_channel_id, old_message_id)
+            await self._save_settings(
+                replace(
+                    self._settings,
+                    guild_id=target.guild.id,
+                    xp_shop_panel_channel_id=target.id,
+                    xp_shop_panel_message_id=message.id,
+                )
+            )
+        except (RuntimeError, discord.DiscordException) as error:
+            LOGGER.warning("Could not configure Minecraft XP shop panel: %s", error)
+            await interaction.followup.send(f"設置できませんでした: {error}", ephemeral=True)
+            return
+        await interaction.followup.send(
+            f"Minecraft XP交換所パネルを {target.mention} に設置しました。",
+            ephemeral=True,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
     @app_commands.describe(
         mode="自動承認または管理者承認",
         channel="管理者承認時に申請を投稿するチャンネル",
@@ -603,6 +674,8 @@ class MinecraftDiscordBot(discord.Client):
                     f"管理パネル: {self._channel_text(self._settings.admin_panel_channel_id)}",
                     "ステータスパネル: "
                     f"{self._channel_text(self._settings.status_panel_channel_id)}",
+                    "XP交換所パネル: "
+                    f"{self._channel_text(self._settings.xp_shop_panel_channel_id)}",
                     f"承認方式: {mode}",
                     f"申請確認先: {self._channel_text(self._settings.approval_channel_id)}",
                     "人数表示: "
@@ -711,6 +784,86 @@ class MinecraftDiscordBot(discord.Client):
             )
             return False
         return True
+
+    async def validate_xp_shop_panel(self, interaction: discord.Interaction) -> bool:
+        if (
+            interaction.message is None
+            or interaction.message.id != self._settings.xp_shop_panel_message_id
+        ):
+            await interaction.response.send_message(
+                "このパネルは現在使用されていません。最新のパネルをご利用ください。",
+                ephemeral=True,
+            )
+            return False
+        if interaction.guild_id != self._settings.guild_id:
+            await interaction.response.send_message(
+                "このDiscordサーバーでは利用できません。", ephemeral=True
+            )
+            return False
+        if not isinstance(interaction.user, discord.Member) or interaction.user.bot:
+            await interaction.response.send_message(
+                "Discordサーバーのメンバーだけが利用できます。", ephemeral=True
+            )
+            return False
+        return True
+
+    async def show_minecraft_xp_shop(self, interaction: discord.Interaction) -> None:
+        if interaction.guild_id is None:
+            await interaction.response.send_message(
+                "Discordサーバー内で利用してください。", ephemeral=True
+            )
+            return
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        shop = await self._level_bot_xp.fetch_xp_shop(interaction.guild_id, interaction.user.id)
+        if shop is None:
+            await interaction.followup.send(
+                "XP交換所を取得できませんでした。少し待ってから再度お試しください。",
+                ephemeral=True,
+            )
+            return
+        await interaction.followup.send(
+            (
+                f"交換可能XP: **{shop.wallet.available_xp:,} XP**\n"
+                "交換内容を選んでください。"
+                "Minecraftサーバーへの参加中のみ交換できます。"
+            ),
+            view=MinecraftXpPackSelectView(self, owner_id=interaction.user.id, shop=shop),
+            ephemeral=True,
+        )
+
+    async def show_minecraft_xp_balance(self, interaction: discord.Interaction) -> None:
+        if interaction.guild_id is None:
+            await interaction.response.send_message(
+                "Discordサーバー内で利用してください。", ephemeral=True
+            )
+            return
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        shop = await self._level_bot_xp.fetch_xp_shop(interaction.guild_id, interaction.user.id)
+        if shop is None:
+            await interaction.followup.send(
+                "XP残高を取得できませんでした。少し待ってから再度お試しください。",
+                ephemeral=True,
+            )
+            return
+        await interaction.followup.send(wallet_text(shop.wallet), ephemeral=True)
+
+    async def confirm_minecraft_xp_exchange(
+        self,
+        interaction: discord.Interaction,
+        *,
+        request_id: str,
+        cost_xp: int,
+        expected_reward_xp: int,
+    ) -> MinecraftXpExchangeRequest | None:
+        if interaction.guild_id is None:
+            return None
+        return await self._level_bot_xp.request_xp_exchange(
+            interaction.guild_id,
+            interaction.user.id,
+            request_id,
+            cost_xp,
+            expected_reward_xp,
+        )
 
     async def confirm_registration(
         self,
@@ -1834,6 +1987,24 @@ class MinecraftDiscordBot(discord.Client):
             await message.edit(embed=admin_panel_embed(), view=AdminPanelView(self))
         except (RuntimeError, discord.DiscordException) as error:
             LOGGER.warning("Could not refresh admin panel: %s", error)
+
+    async def _refresh_xp_shop_panel(self) -> None:
+        channel_id = self._settings.xp_shop_panel_channel_id
+        message_id = self._settings.xp_shop_panel_message_id
+        if channel_id is None or message_id is None or self.user is None:
+            return
+        try:
+            channel = await self._resolve_and_validate_channel(channel_id, require_embeds=True)
+            shop = await self._level_bot_xp.fetch_xp_shop(channel.guild.id, self.user.id)
+            if shop is None:
+                raise RuntimeError("level-botのXP交換APIへ接続できません")
+            message = await channel.fetch_message(message_id)
+            await message.edit(
+                embed=minecraft_xp_shop_embed(shop.packs),
+                view=MinecraftXpShopPanelView(self),
+            )
+        except (RuntimeError, discord.DiscordException) as error:
+            LOGGER.warning("Could not refresh Minecraft XP shop panel: %s", error)
 
     async def _disable_old_panel(self, channel_id: int | None, message_id: int | None) -> None:
         if channel_id is None or message_id is None:

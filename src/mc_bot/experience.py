@@ -51,6 +51,34 @@ class MinecraftXpExchangeEvent:
     status: str
 
 
+@dataclass(frozen=True, slots=True)
+class MinecraftXpWallet:
+    total_xp: int
+    spent_xp: int
+    available_xp: int
+
+
+@dataclass(frozen=True, slots=True)
+class MinecraftXpPack:
+    cost_xp: int
+    reward_xp: int
+
+
+@dataclass(frozen=True, slots=True)
+class MinecraftXpShop:
+    wallet: MinecraftXpWallet
+    packs: tuple[MinecraftXpPack, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class MinecraftXpExchangeRequest:
+    status: str
+    message: str
+    wallet_before: MinecraftXpWallet
+    wallet_after: MinecraftXpWallet
+    pack: MinecraftXpPack | None
+
+
 def parse_experience_query(response: str, unit: str) -> int:
     """``experience query`` の英語RCON応答から値を取り出す。"""
     match = _QUERY_RESULT.search(response)
@@ -366,6 +394,79 @@ class LevelBotXpClient:
             LOGGER.warning("Could not fetch XP exchanges from level-bot: %s", error)
             return None
 
+    async def fetch_xp_shop(self, guild_id: int, user_id: int) -> MinecraftXpShop | None:
+        """交換レートとユーザーの共有XP残高をlevel-botから取得する。"""
+        if not self._token:
+            return None
+        session = self._require_session()
+        try:
+            async with session.get(
+                f"{self._base_url}/api/v1/integrations/minecraft/xp-shop",
+                headers={"Authorization": f"Bearer {self._token}"},
+                params={"guild_id": str(guild_id), "user_id": str(user_id)},
+            ) as response:
+                if response.status != 200:
+                    body = await response.text()
+                    LOGGER.warning(
+                        "level-bot XP shop fetch rejected status=%d body=%s",
+                        response.status,
+                        body[:300],
+                    )
+                    return None
+                return self._parse_xp_shop(await response.json())
+        except (
+            aiohttp.ClientError,
+            TimeoutError,
+            KeyError,
+            TypeError,
+            ValueError,
+        ) as error:
+            LOGGER.warning("Could not fetch XP shop from level-bot: %s", error)
+            return None
+
+    async def request_xp_exchange(
+        self,
+        guild_id: int,
+        user_id: int,
+        request_id: str,
+        cost_xp: int,
+        expected_reward_xp: int,
+    ) -> MinecraftXpExchangeRequest | None:
+        """ユーザー操作による交換をlevel-botへ予約する。"""
+        if not self._token:
+            return None
+        session = self._require_session()
+        try:
+            async with session.post(
+                f"{self._base_url}/api/v1/integrations/minecraft/xp-shop/exchanges",
+                headers={"Authorization": f"Bearer {self._token}"},
+                json={
+                    "request_id": request_id,
+                    "guild_id": str(guild_id),
+                    "user_id": str(user_id),
+                    "cost_xp": cost_xp,
+                    "expected_reward_xp": expected_reward_xp,
+                },
+            ) as response:
+                if response.status != 200:
+                    body = await response.text()
+                    LOGGER.warning(
+                        "level-bot XP shop exchange rejected status=%d body=%s",
+                        response.status,
+                        body[:300],
+                    )
+                    return None
+                return self._parse_xp_exchange_request(await response.json())
+        except (
+            aiohttp.ClientError,
+            TimeoutError,
+            KeyError,
+            TypeError,
+            ValueError,
+        ) as error:
+            LOGGER.warning("Could not request XP exchange from level-bot: %s", error)
+            return None
+
     async def update_xp_exchange(
         self,
         event_id: int,
@@ -454,3 +555,58 @@ class LevelBotXpClient:
         ):
             raise ValueError("XP exchange event contains invalid values")
         return event
+
+    @staticmethod
+    def _parse_wallet(item: object) -> MinecraftXpWallet:
+        if not isinstance(item, dict):
+            raise ValueError("XP wallet must be an object")
+        wallet = MinecraftXpWallet(
+            total_xp=int(item["total_xp"]),
+            spent_xp=int(item["spent_xp"]),
+            available_xp=int(item["available_xp"]),
+        )
+        if (
+            wallet.total_xp < 0
+            or wallet.spent_xp < 0
+            or wallet.available_xp < 0
+            or wallet.available_xp != max(0, wallet.total_xp - wallet.spent_xp)
+        ):
+            raise ValueError("XP wallet contains invalid values")
+        return wallet
+
+    @staticmethod
+    def _parse_pack(item: object) -> MinecraftXpPack:
+        if not isinstance(item, dict):
+            raise ValueError("XP pack must be an object")
+        pack = MinecraftXpPack(
+            cost_xp=int(item["cost_xp"]),
+            reward_xp=int(item["reward_xp"]),
+        )
+        if pack.cost_xp <= 0 or pack.reward_xp <= 0:
+            raise ValueError("XP pack contains invalid values")
+        return pack
+
+    @classmethod
+    def _parse_xp_shop(cls, item: object) -> MinecraftXpShop:
+        if not isinstance(item, dict) or not isinstance(item.get("packs"), list):
+            raise ValueError("XP shop must be an object")
+        packs = tuple(cls._parse_pack(pack) for pack in item["packs"])
+        if not packs or len(packs) > 25 or len({pack.cost_xp for pack in packs}) != len(packs):
+            raise ValueError("XP shop packs contain invalid values")
+        return MinecraftXpShop(wallet=cls._parse_wallet(item["wallet"]), packs=packs)
+
+    @classmethod
+    def _parse_xp_exchange_request(cls, item: object) -> MinecraftXpExchangeRequest:
+        if not isinstance(item, dict):
+            raise ValueError("XP exchange request must be an object")
+        status = str(item["status"])
+        if status not in {"reserved", "offline", "insufficient_xp", "unavailable"}:
+            raise ValueError("XP exchange request has invalid status")
+        pack_item = item.get("pack")
+        return MinecraftXpExchangeRequest(
+            status=status,
+            message=str(item["message"]),
+            wallet_before=cls._parse_wallet(item["wallet_before"]),
+            wallet_after=cls._parse_wallet(item["wallet_after"]),
+            pack=cls._parse_pack(pack_item) if pack_item is not None else None,
+        )
