@@ -38,7 +38,15 @@ def minecraft_xp_shop_embed(packs: tuple[MinecraftXpPack, ...]) -> discord.Embed
         ),
         inline=False,
     )
-    embed.set_footer(text="交換操作と残高は本人にだけ表示されます")
+    embed.add_field(
+        name="📢 交換完了時の通知",
+        value=(
+            "交換が完了すると、交換したことが**Discordのログチャンネル**と"
+            "**Minecraft内チャット**に通知されます。"
+        ),
+        inline=False,
+    )
+    embed.set_footer(text="残高・選択・確認画面は本人にのみ表示されます")
     return embed
 
 
