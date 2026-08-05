@@ -29,6 +29,7 @@ from mc_bot.experience import (
     server_xp_started_tellraw_command,
     total_experience_points,
     voice_bonus_started_tellraw_command,
+    xp_exchange_tellraw_command,
 )
 from mc_bot.formatting import (
     format_advancement_reward,
@@ -37,6 +38,7 @@ from mc_bot.formatting import (
     format_server_announcement,
     format_server_xp_started,
     format_voice_bonus_started,
+    format_xp_exchange,
 )
 from mc_bot.player_count import (
     PLAYER_COUNT_CHANNEL_NAME,
@@ -2202,6 +2204,11 @@ class MinecraftDiscordBot(discord.Client):
             account.server_player_name.casefold(): account
             for account in await asyncio.to_thread(self._accounts.list_linked_active)
         }
+        await self._sync_minecraft_xp_exchanges(
+            guild_id=guild_id,
+            online_names=self._online_player_names,
+            linked_accounts=tuple(linked.values()),
+        )
         observed_at = datetime.now(UTC).replace(microsecond=0).isoformat()
         previously_active_users = set(self._voice_bonus_active_users)
         active_bonus_users = await self._sync_voice_bonus_heartbeats(
@@ -2224,6 +2231,205 @@ class MinecraftDiscordBot(discord.Client):
                 ),
             )
         await self._deliver_minecraft_xp_outbox()
+
+    async def _sync_minecraft_xp_exchanges(
+        self,
+        *,
+        guild_id: int,
+        online_names: set[str],
+        linked_accounts: tuple[MinecraftAccount, ...],
+    ) -> None:
+        await self._flush_minecraft_xp_exchange_deliveries(guild_id)
+        events = await self._level_bot_xp.fetch_xp_exchanges(guild_id)
+        if events is None:
+            return
+        accounts_by_external_id = {f"mc-bot:{account.id}": account for account in linked_accounts}
+        for event in events:
+            if event.guild_id != guild_id:
+                continue
+            claim_token = await asyncio.to_thread(
+                self._accounts.get_minecraft_xp_exchange_claim_token,
+                event.event_id,
+            )
+            if event.status == "delivering" and (
+                claim_token is None
+                or not await self._level_bot_xp.update_xp_exchange(
+                    event.id,
+                    guild_id,
+                    "claim",
+                    claim_token=claim_token,
+                )
+            ):
+                continue
+
+            existing_delivery = await asyncio.to_thread(
+                self._accounts.get_minecraft_xp_exchange_delivery,
+                event.event_id,
+            )
+            if existing_delivery is not None:
+                if not existing_delivery.reward_applied:
+                    LOGGER.error(
+                        "XP exchange requires manual delivery audit event=%d",
+                        event.id,
+                    )
+                continue
+
+            account = accounts_by_external_id.get(event.minecraft_account_id)
+            if (
+                account is None
+                or account.discord_user_id != event.user_id
+                or account.server_player_name.casefold() not in online_names
+            ):
+                await self._level_bot_xp.update_xp_exchange(
+                    event.id,
+                    guild_id,
+                    "cancel",
+                    claim_token=claim_token,
+                )
+                continue
+            if event.status == "pending":
+                claim_token = await asyncio.to_thread(
+                    self._accounts.get_or_create_minecraft_xp_exchange_claim_token,
+                    event.event_id,
+                )
+                if not await self._level_bot_xp.update_xp_exchange(
+                    event.id,
+                    guild_id,
+                    "claim",
+                    claim_token=claim_token,
+                ):
+                    continue
+            if claim_token is None:
+                continue
+
+            observed_at = datetime.now(UTC).replace(microsecond=0).isoformat()
+            async with self._minecraft_xp_observation_lock:
+                try:
+                    current_xp = await self._query_player_experience(account.server_player_name)
+                except OSError, RconError, ValueError:
+                    await self._level_bot_xp.update_xp_exchange(
+                        event.id,
+                        guild_id,
+                        "cancel",
+                        claim_token=claim_token,
+                    )
+                    continue
+                reserved = await asyncio.to_thread(
+                    self._accounts.reserve_minecraft_xp_exchange_delivery,
+                    exchange_id=event.event_id,
+                    level_exchange_id=event.id,
+                    account_id=account.id,
+                    discord_user_id=event.user_id,
+                    guild_id=guild_id,
+                    player_name=account.server_player_name,
+                    cost_xp=event.cost_xp,
+                    reward_xp=event.reward_xp,
+                    claim_token=claim_token,
+                    current_xp=current_xp,
+                    observed_at=observed_at,
+                )
+                if not reserved:
+                    continue
+                try:
+                    await self._execute_checked_rcon(
+                        experience_add_points_command(account.server_player_name, event.reward_xp)
+                    )
+                except ValueError:
+                    await asyncio.to_thread(
+                        self._accounts.release_minecraft_xp_exchange_delivery,
+                        exchange_id=event.event_id,
+                        account_id=account.id,
+                        current_xp=current_xp,
+                        observed_at=observed_at,
+                    )
+                    await self._level_bot_xp.update_xp_exchange(
+                        event.id,
+                        guild_id,
+                        "cancel",
+                        claim_token=claim_token,
+                    )
+                    continue
+                except (OSError, RconError, RuntimeError) as error:
+                    # 実行有無を断定できないため、消費確定も再付与もせず監査待ちにする。
+                    LOGGER.warning(
+                        "Minecraft XP exchange delivery became ambiguous event=%d: %s",
+                        event.id,
+                        error,
+                    )
+                    continue
+                await asyncio.to_thread(
+                    self._accounts.mark_minecraft_xp_exchange_reward_applied,
+                    event.event_id,
+                )
+
+        await self._flush_minecraft_xp_exchange_deliveries(guild_id)
+
+    async def _flush_minecraft_xp_exchange_deliveries(self, guild_id: int) -> None:
+        deliveries = await asyncio.to_thread(
+            self._accounts.list_pending_minecraft_xp_exchange_deliveries
+        )
+        guild = self.get_guild(guild_id)
+        server_name = guild.name if guild is not None else "サーバー"
+        for delivery in deliveries:
+            if delivery.guild_id != guild_id:
+                continue
+            if not delivery.level_completed:
+                completed = await self._level_bot_xp.update_xp_exchange(
+                    delivery.level_exchange_id,
+                    guild_id,
+                    "complete",
+                    claim_token=delivery.claim_token,
+                )
+                if not completed:
+                    continue
+                await asyncio.to_thread(
+                    self._accounts.mark_minecraft_xp_exchange_level_completed,
+                    delivery.exchange_id,
+                )
+                delivery = await asyncio.to_thread(
+                    self._accounts.get_minecraft_xp_exchange_delivery,
+                    delivery.exchange_id,
+                )
+                if delivery is None:
+                    continue
+            if not delivery.minecraft_notified:
+                try:
+                    await asyncio.to_thread(
+                        self._require_rcon().execute,
+                        xp_exchange_tellraw_command(
+                            server_name,
+                            delivery.player_name,
+                            delivery.cost_xp,
+                            delivery.reward_xp,
+                        ),
+                    )
+                except (OSError, RconError, RuntimeError) as error:
+                    LOGGER.warning("Could not announce XP exchange in Minecraft: %s", error)
+                else:
+                    await asyncio.to_thread(
+                        self._accounts.mark_minecraft_xp_exchange_notified,
+                        delivery.exchange_id,
+                        "minecraft",
+                    )
+            if not delivery.discord_notified:
+                try:
+                    await self._send(
+                        format_xp_exchange(
+                            server_name=server_name,
+                            player_name=delivery.player_name,
+                            discord_user_id=delivery.discord_user_id,
+                            cost_xp=delivery.cost_xp,
+                            reward_xp=delivery.reward_xp,
+                        )
+                    )
+                except (RuntimeError, discord.DiscordException) as error:
+                    LOGGER.warning("Could not announce XP exchange in Discord: %s", error)
+                else:
+                    await asyncio.to_thread(
+                        self._accounts.mark_minecraft_xp_exchange_notified,
+                        delivery.exchange_id,
+                        "discord",
+                    )
 
     async def _sync_voice_bonus_heartbeats(
         self,

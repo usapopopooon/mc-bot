@@ -128,6 +128,27 @@ def format_server_xp_started(
     )
 
 
+def format_xp_exchange(
+    *,
+    server_name: str,
+    player_name: str,
+    discord_user_id: int,
+    cost_xp: int,
+    reward_xp: int,
+) -> discord.Embed:
+    """サーバーXPからMinecraft内XPへの交換成功ログ。"""
+    server_name = _escape_markdown(server_name)
+    player_name = _escape_markdown(player_name)
+    return discord.Embed(
+        description=(
+            f"⛏️ **[{server_name}] {player_name} (<@{discord_user_id}>) さん** が"
+            f"サーバーXP **{cost_xp:,}**を交換し、Minecraft内の "
+            f"**{reward_xp:,} XP**を獲得しました!"
+        ),
+        color=discord.Color.green(),
+    )
+
+
 def format_server_announcement(message: str) -> discord.Embed:
     """管理者がMinecraft内へ送った告知をDiscordログ用Embedにする。"""
     normalized = " ".join(message.split()).strip()

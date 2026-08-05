@@ -3,6 +3,7 @@ import json
 import pytest
 
 from mc_bot.experience import (
+    LevelBotXpClient,
     MinecraftLevelUpEvent,
     advancement_reward_tellraw_command,
     experience_add_points_command,
@@ -13,7 +14,39 @@ from mc_bot.experience import (
     server_xp_started_tellraw_command,
     total_experience_points,
     voice_bonus_started_tellraw_command,
+    xp_exchange_tellraw_command,
 )
+
+
+def test_parses_level_up_and_xp_exchange_api_events() -> None:
+    level_up = LevelBotXpClient._parse_level_up_event(
+        {
+            "id": 1,
+            "guild_id": "1001",
+            "guild_name": "うさぽサーバー",
+            "user_id": "2001",
+            "display_name": "Steve",
+            "level": 2,
+            "minecraft_delivered": False,
+            "discord_delivered": False,
+        }
+    )
+    exchange = LevelBotXpClient._parse_xp_exchange(
+        {
+            "id": 2,
+            "event_id": "exchange-uuid",
+            "guild_id": "1001",
+            "user_id": "2001",
+            "minecraft_account_id": "mc-bot:1",
+            "cost_xp": 10,
+            "reward_xp": 50,
+            "status": "pending",
+        }
+    )
+
+    assert level_up.level == 2
+    assert exchange.event_id == "exchange-uuid"
+    assert exchange.reward_xp == 50
 
 
 def test_parses_experience_query_responses() -> None:
@@ -130,3 +163,13 @@ def test_builds_server_xp_started_tellraw() -> None:
         "bold": True,
     }
     assert components[6] == {"text": "を獲得します!"}
+
+
+def test_builds_minecraft_xp_exchange_tellraw() -> None:
+    command = xp_exchange_tellraw_command("うさぽサーバー", "Steve", 10, 100)
+    components = json.loads(command.removeprefix("tellraw @a "))
+
+    assert components[1] == {"text": "うさぽサーバー", "color": "aqua"}
+    assert components[3] == {"text": "Steve", "color": "yellow"}
+    assert components[5] == {"text": "10", "color": "green", "bold": True}
+    assert components[7] == {"text": "100 XP", "color": "green", "bold": True}

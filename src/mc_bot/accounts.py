@@ -34,6 +34,23 @@ class MinecraftXpOutboxEvent:
     observed_at: str
 
 
+@dataclass(frozen=True, slots=True)
+class MinecraftXpExchangeDelivery:
+    exchange_id: str
+    level_exchange_id: int
+    account_id: int
+    discord_user_id: int
+    guild_id: int
+    player_name: str
+    cost_xp: int
+    reward_xp: int
+    claim_token: str
+    reward_applied: bool
+    level_completed: bool
+    minecraft_notified: bool
+    discord_notified: bool
+
+
 class AccountStore:
     def __init__(self, path: Path) -> None:
         self._path = path
@@ -97,6 +114,33 @@ class AccountStore:
                     minecraft_reward_delivered INTEGER NOT NULL DEFAULT 0
                         CHECK (minecraft_reward_delivered IN (0, 1)),
                     PRIMARY KEY (account_id, advancement)
+                );
+                CREATE TABLE IF NOT EXISTS minecraft_xp_exchange_claims (
+                    exchange_id TEXT PRIMARY KEY,
+                    claim_token TEXT NOT NULL UNIQUE,
+                    created_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS minecraft_xp_exchange_deliveries (
+                    exchange_id TEXT PRIMARY KEY
+                        REFERENCES minecraft_xp_exchange_claims(exchange_id),
+                    level_exchange_id INTEGER NOT NULL,
+                    account_id INTEGER NOT NULL
+                        REFERENCES minecraft_accounts(id) ON DELETE CASCADE,
+                    discord_user_id INTEGER NOT NULL,
+                    guild_id INTEGER NOT NULL,
+                    player_name TEXT NOT NULL,
+                    cost_xp INTEGER NOT NULL CHECK (cost_xp > 0),
+                    reward_xp INTEGER NOT NULL CHECK (reward_xp > 0),
+                    claim_token TEXT NOT NULL,
+                    reward_applied INTEGER NOT NULL DEFAULT 0
+                        CHECK (reward_applied IN (0, 1)),
+                    level_completed INTEGER NOT NULL DEFAULT 0
+                        CHECK (level_completed IN (0, 1)),
+                    minecraft_notified INTEGER NOT NULL DEFAULT 0
+                        CHECK (minecraft_notified IN (0, 1)),
+                    discord_notified INTEGER NOT NULL DEFAULT 0
+                        CHECK (discord_notified IN (0, 1)),
+                    created_at TEXT NOT NULL
                 );
                 """
             )
@@ -455,6 +499,203 @@ class AccountStore:
                 (account_id, current_xp, observed_at),
             )
 
+    def reserve_minecraft_xp_exchange_delivery(
+        self,
+        *,
+        exchange_id: str,
+        level_exchange_id: int,
+        account_id: int,
+        discord_user_id: int,
+        guild_id: int,
+        player_name: str,
+        cost_xp: int,
+        reward_xp: int,
+        claim_token: str,
+        current_xp: int,
+        observed_at: str,
+    ) -> bool:
+        """交換付与を一度だけ予約し、付与後のXPを観測基準へ先に反映する。"""
+        if (
+            not exchange_id
+            or level_exchange_id <= 0
+            or account_id <= 0
+            or discord_user_id <= 0
+            or guild_id <= 0
+            or not player_name
+            or cost_xp <= 0
+            or reward_xp <= 0
+            or not claim_token
+            or current_xp < 0
+        ):
+            raise ValueError("invalid Minecraft XP exchange delivery")
+        with self._connect() as connection:
+            existing = connection.execute(
+                "SELECT 1 FROM minecraft_xp_exchange_deliveries WHERE exchange_id = ?",
+                (exchange_id,),
+            ).fetchone()
+            if existing is not None:
+                return False
+            connection.execute(
+                """
+                INSERT INTO minecraft_xp_exchange_deliveries (
+                    exchange_id, level_exchange_id, account_id, discord_user_id,
+                    guild_id, player_name, cost_xp, reward_xp, claim_token, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    exchange_id,
+                    level_exchange_id,
+                    account_id,
+                    discord_user_id,
+                    guild_id,
+                    player_name,
+                    cost_xp,
+                    reward_xp,
+                    claim_token,
+                    _now(),
+                ),
+            )
+            connection.execute(
+                """
+                INSERT INTO minecraft_xp_observations (account_id, current_xp, observed_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(account_id) DO UPDATE SET
+                    current_xp = excluded.current_xp,
+                    observed_at = excluded.observed_at
+                """,
+                (account_id, current_xp + reward_xp, observed_at),
+            )
+        return True
+
+    def get_or_create_minecraft_xp_exchange_claim_token(self, exchange_id: str) -> str:
+        if not exchange_id:
+            raise ValueError("exchange_id must not be empty")
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT claim_token FROM minecraft_xp_exchange_claims WHERE exchange_id = ?",
+                (exchange_id,),
+            ).fetchone()
+            if row is not None:
+                return str(row["claim_token"])
+            claim_token = str(uuid.uuid4())
+            connection.execute(
+                """
+                INSERT INTO minecraft_xp_exchange_claims (
+                    exchange_id, claim_token, created_at
+                ) VALUES (?, ?, ?)
+                """,
+                (exchange_id, claim_token, _now()),
+            )
+            return claim_token
+
+    def get_minecraft_xp_exchange_claim_token(self, exchange_id: str) -> str | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT claim_token FROM minecraft_xp_exchange_claims WHERE exchange_id = ?",
+                (exchange_id,),
+            ).fetchone()
+        return str(row["claim_token"]) if row is not None else None
+
+    def has_minecraft_xp_exchange_delivery(self, exchange_id: str) -> bool:
+        with self._connect() as connection:
+            return (
+                connection.execute(
+                    "SELECT 1 FROM minecraft_xp_exchange_deliveries WHERE exchange_id = ?",
+                    (exchange_id,),
+                ).fetchone()
+                is not None
+            )
+
+    def mark_minecraft_xp_exchange_reward_applied(self, exchange_id: str) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE minecraft_xp_exchange_deliveries
+                SET reward_applied = 1
+                WHERE exchange_id = ?
+                """,
+                (exchange_id,),
+            )
+
+    def mark_minecraft_xp_exchange_level_completed(self, exchange_id: str) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE minecraft_xp_exchange_deliveries
+                SET level_completed = 1
+                WHERE exchange_id = ? AND reward_applied = 1
+                """,
+                (exchange_id,),
+            )
+
+    def mark_minecraft_xp_exchange_notified(self, exchange_id: str, destination: str) -> None:
+        columns = {
+            "minecraft": "minecraft_notified",
+            "discord": "discord_notified",
+        }
+        column = columns.get(destination)
+        if column is None:
+            raise ValueError("unknown exchange notification destination")
+        with self._connect() as connection:
+            connection.execute(
+                f"UPDATE minecraft_xp_exchange_deliveries SET {column} = 1 "
+                "WHERE exchange_id = ? AND level_completed = 1",
+                (exchange_id,),
+            )
+
+    def get_minecraft_xp_exchange_delivery(
+        self, exchange_id: str
+    ) -> MinecraftXpExchangeDelivery | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM minecraft_xp_exchange_deliveries WHERE exchange_id = ?",
+                (exchange_id,),
+            ).fetchone()
+        return _minecraft_xp_exchange_delivery(row) if row is not None else None
+
+    def list_pending_minecraft_xp_exchange_deliveries(
+        self,
+    ) -> list[MinecraftXpExchangeDelivery]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM minecraft_xp_exchange_deliveries
+                WHERE reward_applied = 1
+                  AND (
+                    level_completed = 0
+                    OR minecraft_notified = 0
+                    OR discord_notified = 0
+                  )
+                ORDER BY created_at, exchange_id
+                """
+            ).fetchall()
+        return [_minecraft_xp_exchange_delivery(row) for row in rows]
+
+    def release_minecraft_xp_exchange_delivery(
+        self,
+        *,
+        exchange_id: str,
+        account_id: int,
+        current_xp: int,
+        observed_at: str,
+    ) -> None:
+        """明示的なRCON失敗時だけ予約と先行観測値を戻す。"""
+        with self._connect() as connection:
+            connection.execute(
+                "DELETE FROM minecraft_xp_exchange_deliveries WHERE exchange_id = ?",
+                (exchange_id,),
+            )
+            connection.execute(
+                """
+                INSERT INTO minecraft_xp_observations (account_id, current_xp, observed_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(account_id) DO UPDATE SET
+                    current_xp = excluded.current_xp,
+                    observed_at = excluded.observed_at
+                """,
+                (account_id, current_xp, observed_at),
+            )
+
     def claim_advancement_reward(
         self,
         *,
@@ -782,6 +1023,24 @@ def _account(row: sqlite3.Row) -> MinecraftAccount:
         status=row["status"],
         created_by=row["created_by"],
         approval_message_id=row["approval_message_id"],
+    )
+
+
+def _minecraft_xp_exchange_delivery(row: sqlite3.Row) -> MinecraftXpExchangeDelivery:
+    return MinecraftXpExchangeDelivery(
+        exchange_id=str(row["exchange_id"]),
+        level_exchange_id=int(row["level_exchange_id"]),
+        account_id=int(row["account_id"]),
+        discord_user_id=int(row["discord_user_id"]),
+        guild_id=int(row["guild_id"]),
+        player_name=str(row["player_name"]),
+        cost_xp=int(row["cost_xp"]),
+        reward_xp=int(row["reward_xp"]),
+        claim_token=str(row["claim_token"]),
+        reward_applied=bool(row["reward_applied"]),
+        level_completed=bool(row["level_completed"]),
+        minecraft_notified=bool(row["minecraft_notified"]),
+        discord_notified=bool(row["discord_notified"]),
     )
 
 

@@ -7,6 +7,7 @@ from mc_bot.formatting import (
     format_server_announcement,
     format_server_xp_started,
     format_voice_bonus_started,
+    format_xp_exchange,
 )
 from mc_bot.translations import AdvancementTranslator
 
@@ -76,6 +77,22 @@ def test_formats_server_xp_started() -> None:
     assert embed.description == (
         "🎮 **[うさぽサーバー] Steve (<@123>) さん** は"
         "マイクラで遊んでいる間、**サーバーXP**を獲得します!"
+    )
+    assert embed.color.value == 0x2ECC71
+
+
+def test_formats_minecraft_xp_exchange() -> None:
+    embed = format_xp_exchange(
+        server_name="うさぽサーバー",
+        player_name="Steve",
+        discord_user_id=123,
+        cost_xp=10,
+        reward_xp=100,
+    )
+
+    assert embed.description == (
+        "⛏️ **[うさぽサーバー] Steve (<@123>) さん** が"
+        "サーバーXP **10**を交換し、Minecraft内の **100 XP**を獲得しました!"
     )
     assert embed.color.value == 0x2ECC71
 

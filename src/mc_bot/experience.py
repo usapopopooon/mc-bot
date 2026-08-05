@@ -39,6 +39,18 @@ class MinecraftVoiceHeartbeatResult:
     bonus_active: bool
 
 
+@dataclass(frozen=True, slots=True)
+class MinecraftXpExchangeEvent:
+    id: int
+    event_id: str
+    guild_id: int
+    user_id: int
+    minecraft_account_id: str
+    cost_xp: int
+    reward_xp: int
+    status: str
+
+
 def parse_experience_query(response: str, unit: str) -> int:
     """``experience query`` の英語RCON応答から値を取り出す。"""
     match = _QUERY_RESULT.search(response)
@@ -153,6 +165,24 @@ def server_xp_started_tellraw_command(server_name: str, player_name: str) -> str
         {"text": "さんはマイクラで遊んでいる間、"},
         {"text": "サーバーXP", "color": "green", "bold": True},
         {"text": "を獲得します!"},
+    ]
+    return f"tellraw @a {json.dumps(components, ensure_ascii=False, separators=(',', ':'))}"
+
+
+def xp_exchange_tellraw_command(
+    server_name: str, player_name: str, cost_xp: int, reward_xp: int
+) -> str:
+    """サーバーXPからMinecraft内XPへの交換成功をゲーム内へ流す。"""
+    components = [
+        {"text": "["},
+        {"text": server_name, "color": "aqua"},
+        {"text": "] "},
+        {"text": player_name, "color": "yellow"},
+        {"text": "さんがサーバーXP "},
+        {"text": str(cost_xp), "color": "green", "bold": True},
+        {"text": "を交換し、Minecraft内の "},
+        {"text": f"{reward_xp} XP", "color": "green", "bold": True},
+        {"text": "を獲得しました!"},
     ]
     return f"tellraw @a {json.dumps(components, ensure_ascii=False, separators=(',', ':'))}"
 
@@ -304,6 +334,68 @@ class LevelBotXpClient:
             LOGGER.warning("Could not acknowledge level-up to level-bot: %s", error)
         return False
 
+    async def fetch_xp_exchanges(self, guild_id: int) -> list[MinecraftXpExchangeEvent] | None:
+        if not self._token:
+            return None
+        session = self._require_session()
+        try:
+            async with session.get(
+                f"{self._base_url}/api/v1/integrations/minecraft/xp-exchanges",
+                headers={"Authorization": f"Bearer {self._token}"},
+                params={"guild_id": str(guild_id), "limit": "20"},
+            ) as response:
+                if response.status != 200:
+                    body = await response.text()
+                    LOGGER.warning(
+                        "level-bot XP exchange fetch rejected status=%d body=%s",
+                        response.status,
+                        body[:300],
+                    )
+                    return None
+                payload = await response.json()
+            if not isinstance(payload, list):
+                raise ValueError("XP exchange response must be a list")
+            return [self._parse_xp_exchange(item) for item in payload]
+        except (
+            aiohttp.ClientError,
+            TimeoutError,
+            KeyError,
+            TypeError,
+            ValueError,
+        ) as error:
+            LOGGER.warning("Could not fetch XP exchanges from level-bot: %s", error)
+            return None
+
+    async def update_xp_exchange(
+        self,
+        event_id: int,
+        guild_id: int,
+        action: str,
+        *,
+        claim_token: str | None = None,
+    ) -> bool:
+        if action not in {"claim", "complete", "cancel"} or not self._token:
+            return False
+        session = self._require_session()
+        try:
+            async with session.post(
+                f"{self._base_url}/api/v1/integrations/minecraft/xp-exchanges/{event_id}/{action}",
+                headers={"Authorization": f"Bearer {self._token}"},
+                json={"guild_id": str(guild_id), "claim_token": claim_token},
+            ) as response:
+                if response.status == 204:
+                    return True
+                body = await response.text()
+                LOGGER.warning(
+                    "level-bot XP exchange %s rejected status=%d body=%s",
+                    action,
+                    response.status,
+                    body[:300],
+                )
+        except (aiohttp.ClientError, TimeoutError) as error:
+            LOGGER.warning("Could not %s XP exchange: %s", action, error)
+        return False
+
     def _require_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
             timeout = aiohttp.ClientTimeout(total=10)
@@ -335,4 +427,30 @@ class LevelBotXpClient:
             or not isinstance(event.discord_delivered, bool)
         ):
             raise ValueError("level-up event contains invalid values")
+        return event
+
+    @staticmethod
+    def _parse_xp_exchange(item: object) -> MinecraftXpExchangeEvent:
+        if not isinstance(item, dict):
+            raise ValueError("XP exchange event must be an object")
+        event = MinecraftXpExchangeEvent(
+            id=int(item["id"]),
+            event_id=str(item["event_id"]),
+            guild_id=int(item["guild_id"]),
+            user_id=int(item["user_id"]),
+            minecraft_account_id=str(item["minecraft_account_id"]),
+            cost_xp=int(item["cost_xp"]),
+            reward_xp=int(item["reward_xp"]),
+            status=str(item["status"]),
+        )
+        if (
+            event.id <= 0
+            or not event.event_id
+            or event.guild_id <= 0
+            or event.user_id <= 0
+            or event.cost_xp <= 0
+            or event.reward_xp <= 0
+            or event.status not in {"pending", "delivering"}
+        ):
+            raise ValueError("XP exchange event contains invalid values")
         return event

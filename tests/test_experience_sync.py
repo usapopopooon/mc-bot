@@ -5,7 +5,11 @@ import pytest
 
 from mc_bot.bot import MinecraftDiscordBot
 from mc_bot.config import Config
-from mc_bot.experience import MinecraftLevelUpEvent, MinecraftVoiceHeartbeatResult
+from mc_bot.experience import (
+    MinecraftLevelUpEvent,
+    MinecraftVoiceHeartbeatResult,
+    MinecraftXpExchangeEvent,
+)
 from mc_bot.settings import RuntimeSettings
 from mc_bot.tailer import Cursor, PendingLine
 
@@ -15,13 +19,20 @@ class ExperienceRcon:
         self.level = 1
         self.points = 0
         self.add_error_response: str | None = None
+        self.add_exception: Exception | None = None
+        self.tellraw_failures = 0
         self.commands: list[str] = []
 
     def execute(self, command: str) -> str:
         self.commands.append(command)
         if command.startswith("tellraw @a "):
+            if self.tellraw_failures > 0:
+                self.tellraw_failures -= 1
+                raise OSError("tellraw connection lost")
             return ""
         if command.startswith("experience add Steve ") and command.endswith(" points"):
+            if self.add_exception is not None:
+                raise self.add_exception
             if self.add_error_response is not None:
                 return self.add_error_response
             added = int(command.split()[3])
@@ -46,6 +57,320 @@ class OneLineTailer:
 
     def acknowledge(self, line: PendingLine) -> None:
         self.acknowledged.append(line)
+
+
+def test_sync_delivers_online_minecraft_xp_exchange_once(tmp_path) -> None:
+    config = Config(
+        discord_token="test",
+        accounts_path=tmp_path / "accounts.db",
+        rcon_password="test",
+        level_bot_api_url="https://levels.example.test",
+        level_bot_api_token="xp-secret",
+    )
+    bot = MinecraftDiscordBot(config)
+    bot._accounts.initialize()
+    account = bot._accounts.create_registration(
+        edition="java",
+        minecraft_name="Steve",
+        server_player_name="Steve",
+        discord_user_id=123,
+        discord_username="hoge",
+        source="self",
+        status="active",
+        created_by=123,
+    )
+    bot._settings = RuntimeSettings(guild_id=456)
+    rcon = ExperienceRcon()
+    bot._rcon = rcon  # type: ignore[assignment]
+    event = MinecraftXpExchangeEvent(
+        id=7,
+        event_id="exchange-7",
+        guild_id=456,
+        user_id=123,
+        minecraft_account_id=f"mc-bot:{account.id}",
+        cost_xp=10,
+        reward_xp=100,
+        status="pending",
+    )
+    bot._level_bot_xp.fetch_xp_exchanges = AsyncMock(  # type: ignore[method-assign]
+        return_value=[event]
+    )
+    update = AsyncMock(return_value=True)
+    bot._level_bot_xp.update_xp_exchange = update  # type: ignore[method-assign]
+    send_log = AsyncMock()
+    bot._send = send_log  # type: ignore[method-assign]
+
+    asyncio.run(
+        bot._sync_minecraft_xp_exchanges(
+            guild_id=456,
+            online_names={"steve"},
+            linked_accounts=(account,),
+        )
+    )
+
+    assert update.await_args_list[0].args == (7, 456, "claim")
+    claim_token = update.await_args_list[0].kwargs["claim_token"]
+    assert update.await_args_list[1].args == (7, 456, "complete")
+    assert update.await_args_list[1].kwargs["claim_token"] == claim_token
+    assert "experience add Steve 100 points" in rcon.commands
+    assert sum(command.startswith("experience add Steve ") for command in rcon.commands) == 1
+    assert bot._accounts.has_minecraft_xp_exchange_delivery("exchange-7")
+    delivery = bot._accounts.get_minecraft_xp_exchange_delivery("exchange-7")
+    assert delivery is not None
+    assert delivery.reward_applied
+    assert delivery.level_completed
+    assert delivery.minecraft_notified
+    assert delivery.discord_notified
+    send_log.assert_awaited_once()
+
+
+def test_sync_cancels_exchange_when_player_is_offline(tmp_path) -> None:
+    config = Config(
+        discord_token="test",
+        accounts_path=tmp_path / "accounts.db",
+        rcon_password="test",
+        level_bot_api_url="https://levels.example.test",
+        level_bot_api_token="xp-secret",
+    )
+    bot = MinecraftDiscordBot(config)
+    bot._accounts.initialize()
+    account = bot._accounts.create_registration(
+        edition="java",
+        minecraft_name="Steve",
+        server_player_name="Steve",
+        discord_user_id=123,
+        discord_username="hoge",
+        source="self",
+        status="active",
+        created_by=123,
+    )
+    bot._rcon = ExperienceRcon()  # type: ignore[assignment]
+    bot._level_bot_xp.fetch_xp_exchanges = AsyncMock(  # type: ignore[method-assign]
+        return_value=[
+            MinecraftXpExchangeEvent(
+                id=8,
+                event_id="exchange-8",
+                guild_id=456,
+                user_id=123,
+                minecraft_account_id=f"mc-bot:{account.id}",
+                cost_xp=10,
+                reward_xp=100,
+                status="pending",
+            )
+        ]
+    )
+    update = AsyncMock(return_value=True)
+    bot._level_bot_xp.update_xp_exchange = update  # type: ignore[method-assign]
+
+    asyncio.run(
+        bot._sync_minecraft_xp_exchanges(
+            guild_id=456,
+            online_names=set(),
+            linked_accounts=(account,),
+        )
+    )
+
+    update.assert_awaited_once_with(8, 456, "cancel", claim_token=None)
+
+
+def test_sync_retries_lost_claim_response_with_same_owner_token(tmp_path) -> None:
+    config = Config(
+        discord_token="test",
+        accounts_path=tmp_path / "accounts.db",
+        rcon_password="test",
+        level_bot_api_url="https://levels.example.test",
+        level_bot_api_token="xp-secret",
+    )
+    bot = MinecraftDiscordBot(config)
+    bot._accounts.initialize()
+    account = bot._accounts.create_registration(
+        edition="java",
+        minecraft_name="Steve",
+        server_player_name="Steve",
+        discord_user_id=123,
+        discord_username="hoge",
+        source="self",
+        status="active",
+        created_by=123,
+    )
+    bot._rcon = ExperienceRcon()  # type: ignore[assignment]
+    pending = MinecraftXpExchangeEvent(
+        id=9,
+        event_id="exchange-9",
+        guild_id=456,
+        user_id=123,
+        minecraft_account_id=f"mc-bot:{account.id}",
+        cost_xp=10,
+        reward_xp=50,
+        status="pending",
+    )
+    delivering = MinecraftXpExchangeEvent(
+        id=9,
+        event_id="exchange-9",
+        guild_id=456,
+        user_id=123,
+        minecraft_account_id=f"mc-bot:{account.id}",
+        cost_xp=10,
+        reward_xp=50,
+        status="delivering",
+    )
+    bot._level_bot_xp.fetch_xp_exchanges = AsyncMock(  # type: ignore[method-assign]
+        side_effect=[[pending], [delivering]]
+    )
+    update = AsyncMock(side_effect=[False, True, True])
+    bot._level_bot_xp.update_xp_exchange = update  # type: ignore[method-assign]
+    bot._send = AsyncMock()  # type: ignore[method-assign]
+
+    async def exercise() -> None:
+        await bot._sync_minecraft_xp_exchanges(
+            guild_id=456, online_names={"steve"}, linked_accounts=(account,)
+        )
+        await bot._sync_minecraft_xp_exchanges(
+            guild_id=456, online_names={"steve"}, linked_accounts=(account,)
+        )
+
+    asyncio.run(exercise())
+
+    first_token = update.await_args_list[0].kwargs["claim_token"]
+    assert update.await_args_list[1].kwargs["claim_token"] == first_token
+    assert (
+        sum(
+            command.startswith("experience add Steve ")
+            for command in bot._rcon.commands  # type: ignore[union-attr]
+        )
+        == 1
+    )
+
+
+def test_sync_retries_completion_and_each_notification(tmp_path) -> None:
+    config = Config(
+        discord_token="test",
+        accounts_path=tmp_path / "accounts.db",
+        rcon_password="test",
+        level_bot_api_url="https://levels.example.test",
+        level_bot_api_token="xp-secret",
+    )
+    bot = MinecraftDiscordBot(config)
+    bot._accounts.initialize()
+    account = bot._accounts.create_registration(
+        edition="java",
+        minecraft_name="Steve",
+        server_player_name="Steve",
+        discord_user_id=123,
+        discord_username="hoge",
+        source="self",
+        status="active",
+        created_by=123,
+    )
+    rcon = ExperienceRcon()
+    rcon.tellraw_failures = 1
+    bot._rcon = rcon  # type: ignore[assignment]
+    event = MinecraftXpExchangeEvent(
+        id=10,
+        event_id="exchange-10",
+        guild_id=456,
+        user_id=123,
+        minecraft_account_id=f"mc-bot:{account.id}",
+        cost_xp=10,
+        reward_xp=50,
+        status="pending",
+    )
+    bot._level_bot_xp.fetch_xp_exchanges = AsyncMock(  # type: ignore[method-assign]
+        side_effect=[[event], []]
+    )
+    bot._level_bot_xp.update_xp_exchange = AsyncMock(  # type: ignore[method-assign]
+        side_effect=[True, False, True]
+    )
+    send_log = AsyncMock(side_effect=[RuntimeError("Discord unavailable"), None])
+    bot._send = send_log  # type: ignore[method-assign]
+
+    async def exercise() -> None:
+        await bot._sync_minecraft_xp_exchanges(
+            guild_id=456, online_names={"steve"}, linked_accounts=(account,)
+        )
+        await bot._sync_minecraft_xp_exchanges(
+            guild_id=456, online_names={"steve"}, linked_accounts=(account,)
+        )
+
+    asyncio.run(exercise())
+
+    assert sum(command.startswith("experience add Steve ") for command in rcon.commands) == 1
+    assert sum(command.startswith("tellraw @a ") for command in rcon.commands) == 2
+    assert send_log.await_count == 2
+    delivery = bot._accounts.get_minecraft_xp_exchange_delivery("exchange-10")
+    assert delivery is not None
+    assert delivery.level_completed
+    assert delivery.minecraft_notified
+    assert delivery.discord_notified
+
+
+def test_sync_does_not_charge_ambiguous_rcon_delivery(tmp_path) -> None:
+    config = Config(
+        discord_token="test",
+        accounts_path=tmp_path / "accounts.db",
+        rcon_password="test",
+        level_bot_api_url="https://levels.example.test",
+        level_bot_api_token="xp-secret",
+    )
+    bot = MinecraftDiscordBot(config)
+    bot._accounts.initialize()
+    account = bot._accounts.create_registration(
+        edition="java",
+        minecraft_name="Steve",
+        server_player_name="Steve",
+        discord_user_id=123,
+        discord_username="hoge",
+        source="self",
+        status="active",
+        created_by=123,
+    )
+    rcon = ExperienceRcon()
+    rcon.add_exception = OSError("RCON response lost")
+    bot._rcon = rcon  # type: ignore[assignment]
+    event = MinecraftXpExchangeEvent(
+        id=11,
+        event_id="exchange-11",
+        guild_id=456,
+        user_id=123,
+        minecraft_account_id=f"mc-bot:{account.id}",
+        cost_xp=10,
+        reward_xp=50,
+        status="pending",
+    )
+    delivering = MinecraftXpExchangeEvent(
+        id=11,
+        event_id="exchange-11",
+        guild_id=456,
+        user_id=123,
+        minecraft_account_id=f"mc-bot:{account.id}",
+        cost_xp=10,
+        reward_xp=50,
+        status="delivering",
+    )
+    bot._level_bot_xp.fetch_xp_exchanges = AsyncMock(  # type: ignore[method-assign]
+        side_effect=[[event], [delivering]]
+    )
+    update = AsyncMock(return_value=True)
+    bot._level_bot_xp.update_xp_exchange = update  # type: ignore[method-assign]
+    bot._send = AsyncMock()  # type: ignore[method-assign]
+
+    async def exercise() -> None:
+        await bot._sync_minecraft_xp_exchanges(
+            guild_id=456, online_names={"steve"}, linked_accounts=(account,)
+        )
+        await bot._sync_minecraft_xp_exchanges(
+            guild_id=456, online_names=set(), linked_accounts=(account,)
+        )
+
+    asyncio.run(exercise())
+
+    assert update.await_count == 2
+    assert all(call.args == (11, 456, "claim") for call in update.await_args_list)
+    delivery = bot._accounts.get_minecraft_xp_exchange_delivery("exchange-11")
+    assert delivery is not None
+    assert not delivery.reward_applied
+    assert not delivery.level_completed
+    bot._send.assert_not_awaited()  # type: ignore[attr-defined]
 
 
 def test_sync_baselines_then_delivers_positive_xp_delta(tmp_path) -> None:

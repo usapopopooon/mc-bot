@@ -366,6 +366,107 @@ def test_doubled_minecraft_xp_is_not_observed_again(tmp_path) -> None:
     assert gained_again.minecraft_xp == 5
 
 
+def test_minecraft_xp_exchange_reward_is_not_observed_as_new_gain(tmp_path) -> None:
+    store = AccountStore(tmp_path / "accounts.db")
+    store.initialize()
+    account = store.create_registration(
+        edition="java",
+        minecraft_name="Steve",
+        server_player_name="Steve",
+        discord_user_id=123,
+        discord_username="hoge",
+        source="self",
+        status="active",
+        created_by=123,
+    )
+    store.set_minecraft_xp_observation(
+        account_id=account.id,
+        current_xp=50,
+        observed_at="2026-08-05T00:00:00+00:00",
+    )
+    claim_token = store.get_or_create_minecraft_xp_exchange_claim_token("exchange-7")
+    delivery_args = {
+        "exchange_id": "exchange-7",
+        "level_exchange_id": 7,
+        "account_id": account.id,
+        "discord_user_id": 123,
+        "guild_id": 456,
+        "player_name": "Steve",
+        "cost_xp": 10,
+        "reward_xp": 100,
+        "claim_token": claim_token,
+        "current_xp": 50,
+    }
+
+    assert store.reserve_minecraft_xp_exchange_delivery(
+        **delivery_args,
+        observed_at="2026-08-05T00:00:01+00:00",
+    )
+    assert not store.reserve_minecraft_xp_exchange_delivery(
+        **delivery_args,
+        observed_at="2026-08-05T00:00:02+00:00",
+    )
+    assert store.has_minecraft_xp_exchange_delivery("exchange-7")
+    assert (
+        store.observe_minecraft_xp(
+            account_id=account.id,
+            discord_user_id=123,
+            guild_id=456,
+            current_xp=150,
+            observed_at="2026-08-05T00:00:30+00:00",
+        )
+        is None
+    )
+
+
+def test_explicit_exchange_failure_releases_reservation_and_baseline(tmp_path) -> None:
+    store = AccountStore(tmp_path / "accounts.db")
+    store.initialize()
+    account = store.create_registration(
+        edition="java",
+        minecraft_name="Steve",
+        server_player_name="Steve",
+        discord_user_id=123,
+        discord_username="hoge",
+        source="self",
+        status="active",
+        created_by=123,
+    )
+    claim_token = store.get_or_create_minecraft_xp_exchange_claim_token("exchange-8")
+    assert store.reserve_minecraft_xp_exchange_delivery(
+        exchange_id="exchange-8",
+        level_exchange_id=8,
+        account_id=account.id,
+        discord_user_id=123,
+        guild_id=456,
+        player_name="Steve",
+        cost_xp=10,
+        reward_xp=100,
+        claim_token=claim_token,
+        current_xp=50,
+        observed_at="2026-08-05T00:00:01+00:00",
+    )
+
+    store.release_minecraft_xp_exchange_delivery(
+        exchange_id="exchange-8",
+        account_id=account.id,
+        current_xp=50,
+        observed_at="2026-08-05T00:00:02+00:00",
+    )
+
+    assert not store.has_minecraft_xp_exchange_delivery("exchange-8")
+    assert (
+        store.observe_minecraft_xp(
+            account_id=account.id,
+            discord_user_id=123,
+            guild_id=456,
+            current_xp=50,
+            observed_at="2026-08-05T00:00:30+00:00",
+        )
+        is None
+    )
+
+
 def test_claims_each_advancement_reward_once_and_replays_same_log(tmp_path) -> None:
     store = AccountStore(tmp_path / "accounts.db")
     store.initialize()
