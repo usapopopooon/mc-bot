@@ -78,7 +78,7 @@ from mc_bot.ui import (
     access_panel_embed,
     admin_panel_embed,
 )
-from mc_bot.voice import MinecraftVoicePlayer, event_speech_text
+from mc_bot.voice import MinecraftVoicePlayer, announcement_speech_text, event_speech_text
 
 LOGGER = logging.getLogger(__name__)
 _JAVA_NAME = re.compile(r"[A-Za-z0-9_]{3,16}")
@@ -1322,6 +1322,9 @@ class MinecraftDiscordBot(discord.Client):
             await interaction.followup.send(f"告知できませんでした: {error}", ephemeral=True)
             return
         self._audit_server_action(interaction, "announcement")
+        guild_id = interaction.guild_id
+        if guild_id is not None:
+            self._voice_player.enqueue(guild_id, announcement_speech_text(message))
         try:
             await self._send(format_server_announcement(message))
         except (RuntimeError, discord.DiscordException) as error:

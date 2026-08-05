@@ -291,6 +291,7 @@ def test_server_announcement_is_also_sent_to_discord_log() -> None:
         bot.validate_runtime_admin = AsyncMock(return_value=True)  # type: ignore[method-assign]
         bot._execute_checked_rcon = AsyncMock(return_value="")  # type: ignore[method-assign]
         bot._send = AsyncMock()  # type: ignore[method-assign]
+        bot._voice_player.enqueue = Mock(return_value=True)  # type: ignore[method-assign]
         interaction = Mock(spec=discord.Interaction)
         interaction.user.id = 123
         interaction.guild_id = 456
@@ -300,6 +301,9 @@ def test_server_announcement_is_also_sent_to_discord_log() -> None:
         await bot.announce_server(interaction, "メンテナンスを開始します")
 
         bot._execute_checked_rcon.assert_awaited_once()
+        bot._voice_player.enqueue.assert_called_once_with(  # type: ignore[attr-defined]
+            456, "サーバー告知、メンテナンスを開始します"
+        )
         bot._send.assert_awaited_once()  # type: ignore[attr-defined]
         embed = bot._send.await_args.args[0]  # type: ignore[attr-defined]
         assert embed.description == "📢 **[サーバー告知]** メンテナンスを開始します"
@@ -317,6 +321,7 @@ def test_server_announcement_reports_discord_log_failure() -> None:
         bot.validate_runtime_admin = AsyncMock(return_value=True)  # type: ignore[method-assign]
         bot._execute_checked_rcon = AsyncMock(return_value="")  # type: ignore[method-assign]
         bot._send = AsyncMock(side_effect=RuntimeError("channel unavailable"))  # type: ignore[method-assign]
+        bot._voice_player.enqueue = Mock(return_value=True)  # type: ignore[method-assign]
         interaction = Mock(spec=discord.Interaction)
         interaction.user.id = 123
         interaction.guild_id = 456
@@ -326,6 +331,9 @@ def test_server_announcement_reports_discord_log_failure() -> None:
         await bot.announce_server(interaction, "メンテナンスを開始します")
 
         bot._execute_checked_rcon.assert_awaited_once()
+        bot._voice_player.enqueue.assert_called_once_with(  # type: ignore[attr-defined]
+            456, "サーバー告知、メンテナンスを開始します"
+        )
         interaction.followup.send.assert_awaited_once_with(
             "⚠️ サーバー内へ告知しましたが、チャンネルログへ投稿できませんでした。",
             ephemeral=True,
@@ -342,13 +350,16 @@ def test_failed_minecraft_announcement_is_not_logged_as_success() -> None:
             side_effect=ValueError("Minecraftコマンドが失敗しました")
         )
         bot._send = AsyncMock()  # type: ignore[method-assign]
+        bot._voice_player.enqueue = Mock(return_value=True)  # type: ignore[method-assign]
         interaction = Mock(spec=discord.Interaction)
+        interaction.guild_id = 456
         interaction.response.defer = AsyncMock()
         interaction.followup.send = AsyncMock()
 
         await bot.announce_server(interaction, "メンテナンスを開始します")
 
         bot._send.assert_not_awaited()  # type: ignore[attr-defined]
+        bot._voice_player.enqueue.assert_not_called()  # type: ignore[attr-defined]
         interaction.followup.send.assert_awaited_once_with(
             "告知できませんでした: Minecraftコマンドが失敗しました",
             ephemeral=True,

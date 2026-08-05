@@ -5,12 +5,29 @@ import pytest
 import mc_bot.voice as voice_module
 from mc_bot.events import EventType, LogEvent
 from mc_bot.translations import AdvancementTranslator
-from mc_bot.voice import MinecraftVoicePlayer, TtsApiError, VoiceRequest, event_speech_text
+from mc_bot.voice import (
+    MinecraftVoicePlayer,
+    TtsApiError,
+    VoiceRequest,
+    announcement_speech_text,
+    event_speech_text,
+)
 
 
 class FakeClient:
     def __init__(self, voice_clients=None) -> None:
         self.voice_clients = voice_clients or []
+
+
+def test_formats_and_limits_server_announcement_speech() -> None:
+    assert announcement_speech_text("  メンテナンスを   開始します  ") == (
+        "サーバー告知、メンテナンスを 開始します"
+    )
+
+    long_speech = announcement_speech_text("あ" * 200)
+    assert len(long_speech) == 120
+    assert long_speech.startswith("サーバー告知、")
+    assert long_speech.endswith("…")
 
 
 class FakeContent:

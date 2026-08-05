@@ -51,6 +51,16 @@ def event_speech_text(
             text = f"{honored_name}がゲームから退出しました"
         case EventType.DEATH:
             text = f"{honored_name}は{translate_death(event.detail)}"
+    return _truncate_speech(text)
+
+
+def announcement_speech_text(message: str) -> str:
+    """管理者のサーバー告知をVOICEVOX向けに整形する。"""
+    normalized = " ".join(message.split()).strip()
+    return _truncate_speech(f"サーバー告知、{normalized}")
+
+
+def _truncate_speech(text: str) -> str:
     if len(text) <= _MAX_SPEECH_LENGTH:
         return text
     return text[: _MAX_SPEECH_LENGTH - 1] + "…"
