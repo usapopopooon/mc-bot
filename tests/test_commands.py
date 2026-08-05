@@ -284,6 +284,78 @@ def test_admin_panel_exposes_server_controls() -> None:
     }
 
 
+def test_server_announcement_is_also_sent_to_discord_log() -> None:
+    async def exercise() -> None:
+        bot = MinecraftDiscordBot(Config(discord_token="secret", rcon_password="secret"))
+        bot.validate_runtime_admin = AsyncMock(return_value=True)  # type: ignore[method-assign]
+        bot._execute_checked_rcon = AsyncMock(return_value="")  # type: ignore[method-assign]
+        bot._send = AsyncMock()  # type: ignore[method-assign]
+        interaction = Mock(spec=discord.Interaction)
+        interaction.user.id = 123
+        interaction.guild_id = 456
+        interaction.response.defer = AsyncMock()
+        interaction.followup.send = AsyncMock()
+
+        await bot.announce_server(interaction, "メンテナンスを開始します")
+
+        bot._execute_checked_rcon.assert_awaited_once()
+        bot._send.assert_awaited_once()  # type: ignore[attr-defined]
+        embed = bot._send.await_args.args[0]  # type: ignore[attr-defined]
+        assert embed.description == "📢 **[サーバー告知]** メンテナンスを開始します"
+        interaction.followup.send.assert_awaited_once_with(
+            "✅ サーバー内へ告知し、チャンネルログにも投稿しました。",
+            ephemeral=True,
+        )
+
+    asyncio.run(exercise())
+
+
+def test_server_announcement_reports_discord_log_failure() -> None:
+    async def exercise() -> None:
+        bot = MinecraftDiscordBot(Config(discord_token="secret", rcon_password="secret"))
+        bot.validate_runtime_admin = AsyncMock(return_value=True)  # type: ignore[method-assign]
+        bot._execute_checked_rcon = AsyncMock(return_value="")  # type: ignore[method-assign]
+        bot._send = AsyncMock(side_effect=RuntimeError("channel unavailable"))  # type: ignore[method-assign]
+        interaction = Mock(spec=discord.Interaction)
+        interaction.user.id = 123
+        interaction.guild_id = 456
+        interaction.response.defer = AsyncMock()
+        interaction.followup.send = AsyncMock()
+
+        await bot.announce_server(interaction, "メンテナンスを開始します")
+
+        bot._execute_checked_rcon.assert_awaited_once()
+        interaction.followup.send.assert_awaited_once_with(
+            "⚠️ サーバー内へ告知しましたが、チャンネルログへ投稿できませんでした。",
+            ephemeral=True,
+        )
+
+    asyncio.run(exercise())
+
+
+def test_failed_minecraft_announcement_is_not_logged_as_success() -> None:
+    async def exercise() -> None:
+        bot = MinecraftDiscordBot(Config(discord_token="secret", rcon_password="secret"))
+        bot.validate_runtime_admin = AsyncMock(return_value=True)  # type: ignore[method-assign]
+        bot._execute_checked_rcon = AsyncMock(  # type: ignore[method-assign]
+            side_effect=ValueError("Minecraftコマンドが失敗しました")
+        )
+        bot._send = AsyncMock()  # type: ignore[method-assign]
+        interaction = Mock(spec=discord.Interaction)
+        interaction.response.defer = AsyncMock()
+        interaction.followup.send = AsyncMock()
+
+        await bot.announce_server(interaction, "メンテナンスを開始します")
+
+        bot._send.assert_not_awaited()  # type: ignore[attr-defined]
+        interaction.followup.send.assert_awaited_once_with(
+            "告知できませんでした: Minecraftコマンドが失敗しました",
+            ephemeral=True,
+        )
+
+    asyncio.run(exercise())
+
+
 def test_voice_check_uses_operational_status_message() -> None:
     async def exercise() -> None:
         bot = MinecraftDiscordBot(Config(discord_token="secret"))

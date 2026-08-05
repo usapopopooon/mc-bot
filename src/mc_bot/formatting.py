@@ -128,6 +128,15 @@ def format_server_xp_started(
     )
 
 
+def format_server_announcement(message: str) -> discord.Embed:
+    """管理者がMinecraft内へ送った告知をDiscordログ用Embedにする。"""
+    normalized = " ".join(message.split()).strip()
+    return discord.Embed(
+        description=f"📢 **[サーバー告知]** {_escape_markdown(normalized)}",
+        color=discord.Color.gold(),
+    )
+
+
 def _escape_markdown(value: str) -> str:
     escaped = value.replace("\\", "\\\\")
     for character in "*_~`|":

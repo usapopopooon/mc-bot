@@ -34,6 +34,7 @@ from mc_bot.formatting import (
     format_advancement_reward,
     format_event,
     format_level_up_event,
+    format_server_announcement,
     format_server_xp_started,
     format_voice_bonus_started,
 )
@@ -1321,7 +1322,19 @@ class MinecraftDiscordBot(discord.Client):
             await interaction.followup.send(f"告知できませんでした: {error}", ephemeral=True)
             return
         self._audit_server_action(interaction, "announcement")
-        await interaction.followup.send("✅ サーバー内へ告知しました。", ephemeral=True)
+        try:
+            await self._send(format_server_announcement(message))
+        except (RuntimeError, discord.DiscordException) as error:
+            LOGGER.warning("Could not log Minecraft server announcement in Discord: %s", error)
+            await interaction.followup.send(
+                "⚠️ サーバー内へ告知しましたが、チャンネルログへ投稿できませんでした。",
+                ephemeral=True,
+            )
+            return
+        await interaction.followup.send(
+            "✅ サーバー内へ告知し、チャンネルログにも投稿しました。",
+            ephemeral=True,
+        )
 
     async def show_whitelist_controls(self, interaction: discord.Interaction) -> None:
         try:

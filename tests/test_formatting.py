@@ -4,6 +4,7 @@ from mc_bot.formatting import (
     format_advancement_reward,
     format_event,
     format_level_up_event,
+    format_server_announcement,
     format_server_xp_started,
     format_voice_bonus_started,
 )
@@ -77,6 +78,13 @@ def test_formats_server_xp_started() -> None:
         "マイクラで遊んでいる間、**サーバーXP**を獲得します!"
     )
     assert embed.color.value == 0x2ECC71
+
+
+def test_formats_server_announcement_like_minecraft_message() -> None:
+    embed = format_server_announcement("  メンテナンスを **開始** します  ")
+
+    assert embed.description == "📢 **[サーバー告知]** メンテナンスを \\*\\*開始\\*\\* します"
+    assert embed.color.value == 0xF1C40F
 
 
 def test_formats_level_bot_level_up_as_linked_log_without_title() -> None:
