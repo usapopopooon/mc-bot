@@ -213,6 +213,7 @@ def test_voice_connection_posts_public_explanation_embed() -> None:
         assert followup["embed"].title == "🔊 Minecraft読み上げを開始しました"
         assert "チャット・参加・退出・進捗・死亡" in followup["embed"].description
         assert "小夜/SAYO" in followup["embed"].description
+        bot._voice_player.enqueue.assert_called_once_with(123, "せつぞくしました")
 
     asyncio.run(exercise())
 
@@ -378,7 +379,7 @@ def test_voice_check_uses_operational_status_message() -> None:
     asyncio.run(exercise())
 
 
-def test_restored_voice_connection_announces_once() -> None:
+def test_restored_voice_connection_does_not_announce() -> None:
     async def exercise() -> None:
         bot = MinecraftDiscordBot(
             Config(
@@ -391,15 +392,13 @@ def test_restored_voice_connection_announces_once() -> None:
         channel = Mock(spec=discord.VoiceChannel)
         channel.guild.id = 123
         bot.get_channel = Mock(return_value=channel)  # type: ignore[method-assign]
-        bot._connect_voice_channel = AsyncMock(  # type: ignore[method-assign]
-            side_effect=[True, False]
-        )
+        bot._connect_voice_channel = AsyncMock(return_value=True)  # type: ignore[method-assign]
         bot._voice_player.enqueue = Mock(return_value=True)  # type: ignore[method-assign]
 
         await bot._restore_voice_connection()
         await bot._restore_voice_connection()
 
         assert bot._connect_voice_channel.await_count == 2
-        bot._voice_player.enqueue.assert_called_once_with(123, "せつぞくしました")
+        bot._voice_player.enqueue.assert_not_called()
 
     asyncio.run(exercise())

@@ -2095,9 +2095,7 @@ class MinecraftDiscordBot(discord.Client):
             channel = self.get_channel(channel_id) or await self.fetch_channel(channel_id)
             if not isinstance(channel, discord.VoiceChannel):
                 raise RuntimeError("設定済みの読み上げ先がVCではありません")
-            connected = await self._connect_voice_channel(channel)
-            if connected:
-                self._voice_player.enqueue(channel.guild.id, _VOICE_CONNECTED_SPEECH)
+            await self._connect_voice_channel(channel)
         except (OSError, RuntimeError, discord.DiscordException) as error:
             LOGGER.warning("Could not restore Minecraft voice connection: %s", error)
 
