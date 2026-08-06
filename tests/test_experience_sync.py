@@ -21,6 +21,7 @@ class ExperienceRcon:
         self.add_error_response: str | None = None
         self.add_exception: Exception | None = None
         self.tellraw_failures = 0
+        self.fishing_catches = 0
         self.commands: list[str] = []
 
     def execute(self, command: str) -> str:
@@ -40,11 +41,75 @@ class ExperienceRcon:
             return f"Added {added} experience points to Steve"
         if command == "list":
             return "There are 1 of a max of 20 players online: Steve"
+        if command.startswith("scoreboard objectives add mc_fish_caught "):
+            return "Created new objective [mc_fish_caught]"
+        if command == "scoreboard players get Steve mc_fish_caught":
+            return f"Steve has {self.fishing_catches} [mc_fish_caught]"
+        if command.startswith("title Steve actionbar "):
+            return ""
         if command == "experience query Steve levels":
             return f"Steve has {self.level} experience levels"
         if command == "experience query Steve points":
             return f"Steve has {self.points} experience points"
         raise AssertionError(f"unexpected RCON command: {command}")
+
+
+def test_fishing_combo_rewards_minecraft_xp_with_private_actionbar_only(
+    tmp_path,
+) -> None:
+    config = Config(
+        discord_token="test",
+        accounts_path=tmp_path / "accounts.db",
+        rcon_password="test",
+        level_bot_api_url="https://levels.example.test",
+        level_bot_api_token="xp-secret",
+    )
+    bot = MinecraftDiscordBot(config)
+    bot._accounts.initialize()
+    account = bot._accounts.create_registration(
+        edition="java",
+        minecraft_name="Steve",
+        server_player_name="Steve",
+        discord_user_id=123,
+        discord_username="hoge",
+        source="self",
+        status="active",
+        created_by=123,
+    )
+    bot._settings = RuntimeSettings(guild_id=456)
+    rcon = ExperienceRcon()
+    bot._rcon = rcon  # type: ignore[assignment]
+    bot._accounts.set_minecraft_xp_observation(
+        account_id=account.id,
+        current_xp=7,
+        observed_at="2026-08-09T00:00:00+00:00",
+    )
+    send_audit = AsyncMock(return_value=True)
+    bot._level_bot_xp.send_fishing_combo = send_audit  # type: ignore[method-assign]
+
+    async def exercise() -> None:
+        await bot._sync_fishing_combos()  # baseline
+        rcon.fishing_catches = 1
+        await bot._sync_fishing_combos()
+        rcon.fishing_catches = 2
+        await bot._sync_fishing_combos()
+
+    asyncio.run(exercise())
+
+    assert rcon.points == 7
+    assert sum(command == "experience add Steve 2 points" for command in rcon.commands) == 1
+    assert sum(command == "experience add Steve 5 points" for command in rcon.commands) == 1
+    private_messages = [
+        command for command in rcon.commands if command.startswith("title Steve actionbar ")
+    ]
+    assert len(private_messages) == 2
+    assert "釣りボーナス! +2 XP" in private_messages[0]
+    assert "連続釣り2回! +5 XP" in private_messages[1]
+    assert not any(command.startswith("tellraw ") for command in rcon.commands)
+    assert not any(command.startswith("playsound ") for command in rcon.commands)
+    assert send_audit.await_count == 2
+    assert bot._accounts.list_pending_fishing_audits() == []
+    assert bot._accounts.list_pending_fishing_reward_deliveries() == []
 
 
 class OneLineTailer:

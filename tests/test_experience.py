@@ -4,6 +4,7 @@ from typing import Any
 
 import pytest
 
+from mc_bot.accounts import FishingComboRewardEvent
 from mc_bot.experience import (
     LevelBotXpClient,
     MinecraftLevelUpEvent,
@@ -145,6 +146,41 @@ def test_exchange_request_sends_idempotency_id_and_expected_rate() -> None:
             "user_id": "2001",
             "cost_xp": 10,
             "expected_reward_xp": 50,
+        }
+
+    asyncio.run(exercise())
+
+
+def test_fishing_combo_sends_audit_payload_without_server_xp_fields() -> None:
+    async def exercise() -> None:
+        client = LevelBotXpClient("https://levels.example.test", "secret")
+        session = _FakeSession()
+        client._session = session  # type: ignore[assignment]
+        event = FishingComboRewardEvent(
+            event_id="fish-2",
+            account_id=7,
+            discord_user_id=2001,
+            guild_id=1001,
+            catch_count=2,
+            combo_count=2,
+            reward_xp=5,
+            observed_at="2026-08-09T00:00:00+00:00",
+            reward_delivered=True,
+            audit_delivered=False,
+        )
+
+        assert await client.send_fishing_combo(event)
+        assert session.post_kwargs is not None
+        assert session.post_kwargs["url"].endswith("/fishing-combo-events")
+        assert session.post_kwargs["json"] == {
+            "event_id": "fish-2",
+            "guild_id": "1001",
+            "user_id": "2001",
+            "minecraft_account_id": "mc-bot:7",
+            "catch_count": 2,
+            "combo_count": 2,
+            "reward_xp": 5,
+            "observed_at": "2026-08-09T00:00:00+00:00",
         }
 
     asyncio.run(exercise())

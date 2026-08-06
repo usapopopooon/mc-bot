@@ -14,7 +14,7 @@ import aiohttp
 import discord
 from discord import app_commands
 
-from mc_bot.accounts import AccountStore, MinecraftAccount
+from mc_bot.accounts import AccountStore, FishingComboRewardEvent, MinecraftAccount
 from mc_bot.config import Config
 from mc_bot.events import EventType, LogEvent, parse_log_line
 from mc_bot.experience import (
@@ -31,6 +31,13 @@ from mc_bot.experience import (
     total_experience_points,
     voice_bonus_started_tellraw_command,
     xp_exchange_tellraw_command,
+)
+from mc_bot.fishing import (
+    FISHING_COMBO_WINDOW_SECONDS,
+    fishing_combo_actionbar_command,
+    fishing_objective_command,
+    fishing_score_query_command,
+    parse_fishing_score,
 )
 from mc_bot.formatting import (
     format_advancement_reward,
@@ -148,6 +155,7 @@ class MinecraftDiscordBot(discord.Client):
         self._player_count_name_task: asyncio.Task[None] | None = None
         self._status_panel_task: asyncio.Task[None] | None = None
         self._minecraft_xp_task: asyncio.Task[None] | None = None
+        self._fishing_combo_task: asyncio.Task[None] | None = None
         self._player_count_update_lock = asyncio.Lock()
         self._status_panel_update_lock = asyncio.Lock()
         self._whitelist_operation_lock = asyncio.Lock()
@@ -164,6 +172,7 @@ class MinecraftDiscordBot(discord.Client):
         self._closing = False
         self._health_path = Path("/tmp/mc-bot-healthy")
         self._sync_ticks = 0
+        self._fishing_objective_ready = False
         self._next_status_panel_refresh_at = time.monotonic() + _STATUS_PANEL_REFRESH_SECONDS
 
     def _register_commands(self) -> None:
@@ -260,6 +269,7 @@ class MinecraftDiscordBot(discord.Client):
         if self._settings.voice_enabled:
             await self._restore_voice_connection()
         self._ensure_minecraft_xp_started()
+        self._ensure_fishing_combo_started()
 
         LOGGER.info(
             "Discord connected as %s; loaded %d advancement translations",
@@ -347,6 +357,10 @@ class MinecraftDiscordBot(discord.Client):
             self._minecraft_xp_task.cancel()
             await asyncio.gather(self._minecraft_xp_task, return_exceptions=True)
             self._minecraft_xp_task = None
+        if self._fishing_combo_task is not None:
+            self._fishing_combo_task.cancel()
+            await asyncio.gather(self._fishing_combo_task, return_exceptions=True)
+            self._fishing_combo_task = None
         if self._tailer_task is not None:
             self._tailer_task.cancel()
             await asyncio.gather(self._tailer_task, return_exceptions=True)
@@ -2294,6 +2308,7 @@ class MinecraftDiscordBot(discord.Client):
             self._schedule_player_count_refresh(delay=0)
             self._schedule_periodic_status_panel_refresh()
             self._ensure_minecraft_xp_started()
+            self._ensure_fishing_combo_started()
             await asyncio.sleep(10)
 
     def _ensure_minecraft_xp_started(self) -> None:
@@ -2308,6 +2323,127 @@ class MinecraftDiscordBot(discord.Client):
         self._minecraft_xp_task = asyncio.create_task(
             self._minecraft_xp_loop(), name="minecraft-xp-sync"
         )
+
+    def _ensure_fishing_combo_started(self) -> None:
+        if (
+            not self._config.level_bot_api_url
+            or not self._config.level_bot_api_token
+            or self._rcon is None
+        ):
+            return
+        if self._fishing_combo_task is not None and not self._fishing_combo_task.done():
+            return
+        self._fishing_combo_task = asyncio.create_task(
+            self._fishing_combo_loop(), name="minecraft-fishing-combo"
+        )
+
+    async def _fishing_combo_loop(self) -> None:
+        while not self.is_closed():
+            try:
+                await self._sync_fishing_combos()
+            except (OSError, RconError, RuntimeError, ValueError) as error:
+                LOGGER.warning("Minecraft fishing combo synchronization failed: %s", error)
+            await asyncio.sleep(self._config.fishing_combo_poll_seconds)
+
+    async def _sync_fishing_combos(self) -> None:
+        guild_id = self._settings.guild_id
+        if guild_id is None:
+            return
+        if not self._fishing_objective_ready:
+            # 既存objectiveの場合もMinecraftは文字列応答するだけなので、未知コマンド等の
+            # 共通エラーだけを弾いて準備済みとする。
+            await self._execute_checked_rcon(fishing_objective_command())
+            self._fishing_objective_ready = True
+
+        online = parse_online_players(await self._execute_checked_rcon("list"))
+        linked = {
+            account.server_player_name.casefold(): account
+            for account in await asyncio.to_thread(self._accounts.list_linked_active)
+        }
+        observed_at = datetime.now(UTC).replace(microsecond=0).isoformat()
+        for player_name in online:
+            account = linked.get(player_name.casefold())
+            if account is None or account.discord_user_id is None:
+                continue
+            response = await self._execute_rcon(
+                fishing_score_query_command(account.server_player_name)
+            )
+            catch_count = parse_fishing_score(response)
+            await asyncio.to_thread(
+                self._accounts.observe_fishing_catches,
+                account_id=account.id,
+                discord_user_id=account.discord_user_id,
+                guild_id=guild_id,
+                catch_count=catch_count,
+                observed_at=observed_at,
+                combo_window_seconds=FISHING_COMBO_WINDOW_SECONDS,
+            )
+            pending = await asyncio.to_thread(
+                self._accounts.list_pending_fishing_reward_deliveries,
+                account.id,
+            )
+            for reward in pending:
+                await self._grant_fishing_combo_reward(account, reward)
+        await self._deliver_fishing_combo_audits()
+
+    async def _grant_fishing_combo_reward(
+        self,
+        account: MinecraftAccount,
+        reward: FishingComboRewardEvent,
+    ) -> None:
+        """Minecraft内だけにコンボXPを付与し、通常XP同期から除外する。"""
+        async with self._minecraft_xp_observation_lock:
+            reserved = await asyncio.to_thread(
+                self._accounts.reserve_fishing_reward_delivery,
+                event_id=reward.event_id,
+                account_id=account.id,
+                reward_xp=reward.reward_xp,
+                observed_at=reward.observed_at,
+            )
+            if not reserved:
+                return
+            try:
+                await self._execute_checked_rcon(
+                    experience_add_points_command(
+                        account.server_player_name,
+                        reward.reward_xp,
+                    )
+                )
+            except ValueError:
+                await asyncio.to_thread(
+                    self._accounts.release_fishing_reward_delivery,
+                    event_id=reward.event_id,
+                    account_id=account.id,
+                    reward_xp=reward.reward_xp,
+                )
+                raise
+
+        try:
+            await self._execute_checked_rcon(
+                fishing_combo_actionbar_command(
+                    account.server_player_name,
+                    reward.combo_count,
+                    reward.reward_xp,
+                )
+            )
+        except (OSError, RconError, RuntimeError, ValueError) as error:
+            LOGGER.warning(
+                "Could not notify fishing combo player=%s event=%s: %s",
+                account.server_player_name,
+                reward.event_id,
+                error,
+            )
+
+    async def _deliver_fishing_combo_audits(self) -> bool:
+        events = await asyncio.to_thread(self._accounts.list_pending_fishing_audits)
+        for event in events:
+            if not await self._level_bot_xp.send_fishing_combo(event):
+                return False
+            await asyncio.to_thread(
+                self._accounts.mark_fishing_audit_delivered,
+                event.event_id,
+            )
+        return True
 
     async def _minecraft_xp_loop(self) -> None:
         while not self.is_closed():

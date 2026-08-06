@@ -366,6 +366,156 @@ def test_doubled_minecraft_xp_is_not_observed_again(tmp_path) -> None:
     assert gained_again.minecraft_xp == 5
 
 
+def test_fishing_bonus_starts_at_one_and_resets_after_window(tmp_path) -> None:
+    store = AccountStore(tmp_path / "accounts.db")
+    store.initialize()
+    account = store.create_registration(
+        edition="java",
+        minecraft_name="Steve",
+        server_player_name="Steve",
+        discord_user_id=123,
+        discord_username="hoge",
+        source="self",
+        status="active",
+        created_by=123,
+    )
+    common = {
+        "account_id": account.id,
+        "discord_user_id": 123,
+        "guild_id": 456,
+        "combo_window_seconds": 90,
+    }
+
+    assert (
+        store.observe_fishing_catches(
+            **common, catch_count=0, observed_at="2026-08-09T00:00:00+00:00"
+        )
+        == []
+    )
+    first = store.observe_fishing_catches(
+        **common, catch_count=1, observed_at="2026-08-09T00:00:10+00:00"
+    )
+    assert [(event.combo_count, event.reward_xp) for event in first] == [(1, 2)]
+    second = store.observe_fishing_catches(
+        **common, catch_count=2, observed_at="2026-08-09T00:01:40+00:00"
+    )
+    assert [(event.combo_count, event.reward_xp) for event in second] == [(2, 5)]
+    assert (
+        store.observe_fishing_catches(
+            **common, catch_count=2, observed_at="2026-08-09T00:03:11+00:00"
+        )
+        == []
+    )
+    restarted_first = store.observe_fishing_catches(
+        **common, catch_count=3, observed_at="2026-08-09T00:03:20+00:00"
+    )
+    assert [(event.combo_count, event.reward_xp) for event in restarted_first] == [(1, 2)]
+    restarted_second = store.observe_fishing_catches(
+        **common, catch_count=4, observed_at="2026-08-09T00:03:30+00:00"
+    )
+    assert [(event.combo_count, event.reward_xp) for event in restarted_second] == [(2, 5)]
+
+
+def test_fishing_combo_creates_each_missed_catch_reward_once(tmp_path) -> None:
+    store = AccountStore(tmp_path / "accounts.db")
+    store.initialize()
+    account = store.create_registration(
+        edition="java",
+        minecraft_name="Steve",
+        server_player_name="Steve",
+        discord_user_id=123,
+        discord_username="hoge",
+        source="self",
+        status="active",
+        created_by=123,
+    )
+    common = {
+        "account_id": account.id,
+        "discord_user_id": 123,
+        "guild_id": 456,
+        "combo_window_seconds": 90,
+    }
+    store.observe_fishing_catches(**common, catch_count=0, observed_at="2026-08-09T00:00:00+00:00")
+
+    rewards = store.observe_fishing_catches(
+        **common, catch_count=5, observed_at="2026-08-09T00:00:10+00:00"
+    )
+    replay = store.observe_fishing_catches(
+        **common, catch_count=5, observed_at="2026-08-09T00:00:20+00:00"
+    )
+
+    assert [(event.combo_count, event.reward_xp) for event in rewards] == [
+        (1, 2),
+        (2, 5),
+        (3, 7),
+        (4, 7),
+        (5, 10),
+    ]
+    assert replay == []
+    assert store.list_pending_fishing_reward_deliveries() == rewards
+
+
+def test_fishing_reward_is_excluded_from_regular_xp_observation(tmp_path) -> None:
+    store = AccountStore(tmp_path / "accounts.db")
+    store.initialize()
+    account = store.create_registration(
+        edition="java",
+        minecraft_name="Steve",
+        server_player_name="Steve",
+        discord_user_id=123,
+        discord_username="hoge",
+        source="self",
+        status="active",
+        created_by=123,
+    )
+    store.set_minecraft_xp_observation(
+        account_id=account.id,
+        current_xp=100,
+        observed_at="2026-08-09T00:00:00+00:00",
+    )
+    store.observe_fishing_catches(
+        account_id=account.id,
+        discord_user_id=123,
+        guild_id=456,
+        catch_count=0,
+        observed_at="2026-08-09T00:00:00+00:00",
+        combo_window_seconds=90,
+    )
+    store.observe_fishing_catches(
+        account_id=account.id,
+        discord_user_id=123,
+        guild_id=456,
+        catch_count=2,
+        observed_at="2026-08-09T00:00:10+00:00",
+        combo_window_seconds=90,
+    )
+    reward = store.list_pending_fishing_reward_deliveries()[0]
+
+    assert store.reserve_fishing_reward_delivery(
+        event_id=reward.event_id,
+        account_id=account.id,
+        reward_xp=reward.reward_xp,
+        observed_at=reward.observed_at,
+    )
+    assert (
+        store.observe_minecraft_xp(
+            account_id=account.id,
+            discord_user_id=123,
+            guild_id=456,
+            current_xp=102,
+            observed_at="2026-08-09T00:00:20+00:00",
+        )
+        is None
+    )
+    pending_audits = store.list_pending_fishing_audits()
+    assert len(pending_audits) == 1
+    assert pending_audits[0].event_id == reward.event_id
+    assert pending_audits[0].reward_delivered is True
+    assert pending_audits[0].audit_delivered is False
+    store.mark_fishing_audit_delivered(reward.event_id)
+    assert store.list_pending_fishing_audits() == []
+
+
 def test_minecraft_xp_exchange_reward_is_not_observed_as_new_gain(tmp_path) -> None:
     store = AccountStore(tmp_path / "accounts.db")
     store.initialize()

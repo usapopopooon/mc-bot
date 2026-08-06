@@ -25,6 +25,7 @@ def test_loads_required_and_default_configuration() -> None:
     assert config.level_bot_api_url == ""
     assert config.level_bot_api_token == ""
     assert config.minecraft_xp_poll_seconds == 30
+    assert config.fishing_combo_poll_seconds == 5
 
 
 def test_rejects_missing_token() -> None:
@@ -78,12 +79,14 @@ def test_loads_level_bot_xp_configuration() -> None:
             "LEVEL_BOT_API_URL": "https://levels.example.test/",
             "LEVEL_BOT_API_TOKEN": "xp-secret",
             "MINECRAFT_XP_POLL_SECONDS": "60",
+            "FISHING_COMBO_POLL_SECONDS": "3",
         }
     )
 
     assert config.level_bot_api_url == "https://levels.example.test"
     assert config.level_bot_api_token == "xp-secret"
     assert config.minecraft_xp_poll_seconds == 60
+    assert config.fishing_combo_poll_seconds == 3
 
 
 @pytest.mark.parametrize(
@@ -98,6 +101,9 @@ def test_loads_level_bot_xp_configuration() -> None:
         {"MINECRAFT_XP_POLL_SECONDS": "9"},
         {"MINECRAFT_XP_POLL_SECONDS": "61"},
         {"MINECRAFT_XP_POLL_SECONDS": "invalid"},
+        {"FISHING_COMBO_POLL_SECONDS": "0"},
+        {"FISHING_COMBO_POLL_SECONDS": "31"},
+        {"FISHING_COMBO_POLL_SECONDS": "invalid"},
     ],
 )
 def test_rejects_invalid_level_bot_xp_configuration(

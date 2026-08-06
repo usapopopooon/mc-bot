@@ -35,6 +35,20 @@ class MinecraftXpOutboxEvent:
 
 
 @dataclass(frozen=True, slots=True)
+class FishingComboRewardEvent:
+    event_id: str
+    account_id: int
+    discord_user_id: int
+    guild_id: int
+    catch_count: int
+    combo_count: int
+    reward_xp: int
+    observed_at: str
+    reward_delivered: bool
+    audit_delivered: bool
+
+
+@dataclass(frozen=True, slots=True)
 class MinecraftXpExchangeDelivery:
     exchange_id: str
     level_exchange_id: int
@@ -142,6 +156,35 @@ class AccountStore:
                         CHECK (discord_notified IN (0, 1)),
                     created_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS minecraft_fishing_combo_states (
+                    account_id INTEGER PRIMARY KEY
+                        REFERENCES minecraft_accounts(id) ON DELETE CASCADE,
+                    catch_count INTEGER NOT NULL CHECK (catch_count >= 0),
+                    combo_count INTEGER NOT NULL CHECK (combo_count >= 0),
+                    last_catch_at TEXT,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS minecraft_fishing_combo_rewards (
+                    event_id TEXT PRIMARY KEY,
+                    account_id INTEGER NOT NULL
+                        REFERENCES minecraft_accounts(id) ON DELETE CASCADE,
+                    discord_user_id INTEGER NOT NULL,
+                    guild_id INTEGER NOT NULL,
+                    catch_count INTEGER NOT NULL CHECK (catch_count > 0),
+                    combo_count INTEGER NOT NULL CHECK (combo_count >= 1),
+                    reward_xp INTEGER NOT NULL CHECK (reward_xp > 0),
+                    observed_at TEXT NOT NULL,
+                    reward_delivered INTEGER NOT NULL DEFAULT 0
+                        CHECK (reward_delivered IN (0, 1)),
+                    audit_delivered INTEGER NOT NULL DEFAULT 0
+                        CHECK (audit_delivered IN (0, 1)),
+                    created_at TEXT NOT NULL,
+                    UNIQUE(account_id, catch_count)
+                );
+                CREATE INDEX IF NOT EXISTS fishing_combo_rewards_delivery
+                    ON minecraft_fishing_combo_rewards(reward_delivered, created_at);
+                CREATE INDEX IF NOT EXISTS fishing_combo_rewards_audit
+                    ON minecraft_fishing_combo_rewards(audit_delivered, created_at);
                 """
             )
             advancement_columns = {
@@ -888,6 +931,239 @@ class AccountStore:
                 (reward_xp, account_id),
             )
 
+    def observe_fishing_catches(
+        self,
+        *,
+        account_id: int,
+        discord_user_id: int,
+        guild_id: int,
+        catch_count: int,
+        observed_at: str,
+        combo_window_seconds: int,
+    ) -> list[FishingComboRewardEvent]:
+        """釣果差分をコンボへ変換し、報酬イベントを同一transactionで作る。"""
+        from mc_bot.fishing import fishing_reward_xp
+
+        if (
+            account_id <= 0
+            or discord_user_id <= 0
+            or guild_id <= 0
+            or catch_count < 0
+            or combo_window_seconds <= 0
+        ):
+            raise ValueError("invalid fishing combo observation")
+        observed = datetime.fromisoformat(observed_at)
+        if observed.tzinfo is None or observed.utcoffset() is None:
+            raise ValueError("observed_at must include a timezone")
+
+        rewards: list[FishingComboRewardEvent] = []
+        with self._connect() as connection:
+            state = connection.execute(
+                """
+                SELECT catch_count, combo_count, last_catch_at
+                FROM minecraft_fishing_combo_states
+                WHERE account_id = ?
+                """,
+                (account_id,),
+            ).fetchone()
+            if state is None or catch_count < int(state["catch_count"]):
+                connection.execute(
+                    """
+                    INSERT INTO minecraft_fishing_combo_states (
+                        account_id, catch_count, combo_count, last_catch_at, updated_at
+                    ) VALUES (?, ?, 0, NULL, ?)
+                    ON CONFLICT(account_id) DO UPDATE SET
+                        catch_count = excluded.catch_count,
+                        combo_count = 0,
+                        last_catch_at = NULL,
+                        updated_at = excluded.updated_at
+                    """,
+                    (account_id, catch_count, observed_at),
+                )
+                return []
+
+            previous_count = int(state["catch_count"])
+            last_catch_text = state["last_catch_at"]
+            combo_count = int(state["combo_count"])
+            combo_active = False
+            if last_catch_text is not None:
+                last_catch = datetime.fromisoformat(str(last_catch_text))
+                elapsed = (observed - last_catch).total_seconds()
+                combo_active = 0 <= elapsed <= combo_window_seconds
+
+            if catch_count == previous_count:
+                if last_catch_text is not None and not combo_active:
+                    connection.execute(
+                        """
+                        UPDATE minecraft_fishing_combo_states
+                        SET combo_count = 0, last_catch_at = NULL, updated_at = ?
+                        WHERE account_id = ?
+                        """,
+                        (observed_at, account_id),
+                    )
+                return []
+
+            if not combo_active:
+                combo_count = 0
+            for absolute_catch in range(previous_count + 1, catch_count + 1):
+                combo_count += 1
+                reward_xp = fishing_reward_xp(combo_count)
+                if reward_xp <= 0:
+                    continue
+                event = FishingComboRewardEvent(
+                    event_id=str(
+                        uuid.uuid5(
+                            uuid.NAMESPACE_URL,
+                            f"mc-bot:fishing:{account_id}:{absolute_catch}",
+                        )
+                    ),
+                    account_id=account_id,
+                    discord_user_id=discord_user_id,
+                    guild_id=guild_id,
+                    catch_count=absolute_catch,
+                    combo_count=combo_count,
+                    reward_xp=reward_xp,
+                    observed_at=observed_at,
+                    reward_delivered=False,
+                    audit_delivered=False,
+                )
+                cursor = connection.execute(
+                    """
+                    INSERT INTO minecraft_fishing_combo_rewards (
+                        event_id, account_id, discord_user_id, guild_id,
+                        catch_count, combo_count, reward_xp, observed_at, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(event_id) DO NOTHING
+                    """,
+                    (
+                        event.event_id,
+                        event.account_id,
+                        event.discord_user_id,
+                        event.guild_id,
+                        event.catch_count,
+                        event.combo_count,
+                        event.reward_xp,
+                        event.observed_at,
+                        _now(),
+                    ),
+                )
+                if cursor.rowcount == 1:
+                    rewards.append(event)
+
+            connection.execute(
+                """
+                UPDATE minecraft_fishing_combo_states
+                SET catch_count = ?, combo_count = ?, last_catch_at = ?, updated_at = ?
+                WHERE account_id = ?
+                """,
+                (catch_count, combo_count, observed_at, observed_at, account_id),
+            )
+        return rewards
+
+    def list_pending_fishing_reward_deliveries(
+        self, account_id: int | None = None
+    ) -> list[FishingComboRewardEvent]:
+        query = """
+            SELECT * FROM minecraft_fishing_combo_rewards
+            WHERE reward_delivered = 0
+        """
+        parameters: tuple[int, ...] = ()
+        if account_id is not None:
+            query += " AND account_id = ?"
+            parameters = (account_id,)
+        query += " ORDER BY created_at, event_id"
+        with self._connect() as connection:
+            rows = connection.execute(query, parameters).fetchall()
+        return [_fishing_combo_reward(row) for row in rows]
+
+    def list_pending_fishing_audits(self) -> list[FishingComboRewardEvent]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM minecraft_fishing_combo_rewards
+                WHERE reward_delivered = 1 AND audit_delivered = 0
+                ORDER BY created_at, event_id
+                """
+            ).fetchall()
+        return [_fishing_combo_reward(row) for row in rows]
+
+    def reserve_fishing_reward_delivery(
+        self,
+        *,
+        event_id: str,
+        account_id: int,
+        reward_xp: int,
+        observed_at: str,
+    ) -> bool:
+        """釣り報酬を予約し、自己付与分を通常XP観測の基準へ先行反映する。"""
+        if reward_xp <= 0:
+            raise ValueError("reward_xp must be positive")
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE minecraft_fishing_combo_rewards
+                SET reward_delivered = 1
+                WHERE event_id = ? AND account_id = ? AND reward_xp = ?
+                  AND reward_delivered = 0
+                """,
+                (event_id, account_id, reward_xp),
+            )
+            if cursor.rowcount != 1:
+                row = connection.execute(
+                    """
+                    SELECT reward_delivered FROM minecraft_fishing_combo_rewards
+                    WHERE event_id = ? AND account_id = ?
+                    """,
+                    (event_id, account_id),
+                ).fetchone()
+                if row is not None and row["reward_delivered"]:
+                    return False
+                raise ValueError("釣りコンボ報酬イベントが見つかりません。")
+            connection.execute(
+                """
+                UPDATE minecraft_xp_observations
+                SET current_xp = current_xp + ?, observed_at = ?
+                WHERE account_id = ?
+                """,
+                (reward_xp, observed_at, account_id),
+            )
+        return True
+
+    def release_fishing_reward_delivery(
+        self, *, event_id: str, account_id: int, reward_xp: int
+    ) -> None:
+        """RCONが明示的に失敗した場合だけ報酬予約とXP観測基準を戻す。"""
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE minecraft_fishing_combo_rewards
+                SET reward_delivered = 0
+                WHERE event_id = ? AND account_id = ? AND reward_delivered = 1
+                """,
+                (event_id, account_id),
+            )
+            if cursor.rowcount != 1:
+                return
+            connection.execute(
+                """
+                UPDATE minecraft_xp_observations
+                SET current_xp = MAX(current_xp - ?, 0)
+                WHERE account_id = ?
+                """,
+                (reward_xp, account_id),
+            )
+
+    def mark_fishing_audit_delivered(self, event_id: str) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE minecraft_fishing_combo_rewards
+                SET audit_delivered = 1
+                WHERE event_id = ? AND reward_delivered = 1
+                """,
+                (event_id,),
+            )
+
     def link_existing(
         self,
         account_id: int,
@@ -1041,6 +1317,21 @@ def _minecraft_xp_exchange_delivery(row: sqlite3.Row) -> MinecraftXpExchangeDeli
         level_completed=bool(row["level_completed"]),
         minecraft_notified=bool(row["minecraft_notified"]),
         discord_notified=bool(row["discord_notified"]),
+    )
+
+
+def _fishing_combo_reward(row: sqlite3.Row) -> FishingComboRewardEvent:
+    return FishingComboRewardEvent(
+        event_id=str(row["event_id"]),
+        account_id=int(row["account_id"]),
+        discord_user_id=int(row["discord_user_id"]),
+        guild_id=int(row["guild_id"]),
+        catch_count=int(row["catch_count"]),
+        combo_count=int(row["combo_count"]),
+        reward_xp=int(row["reward_xp"]),
+        observed_at=str(row["observed_at"]),
+        reward_delivered=bool(row["reward_delivered"]),
+        audit_delivered=bool(row["audit_delivered"]),
     )
 
 
