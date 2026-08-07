@@ -131,6 +131,12 @@ def experience_add_points_command(player_name: str, points: int) -> str:
     return f"experience add {player_name} {points} points"
 
 
+def actionbar_clear_command(player_name: str) -> str:
+    if _SAFE_PLAYER_NAME.fullmatch(player_name) is None:
+        raise ValueError("player_name contains unsafe RCON characters")
+    return f'title {player_name} actionbar {{"text":""}}'
+
+
 def level_up_tellraw_command(event: MinecraftLevelUpEvent) -> str:
     """Discordサーバー名と表示名を使った安全な色付きtellrawを作る。"""
     components = [

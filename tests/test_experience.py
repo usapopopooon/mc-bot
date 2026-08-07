@@ -8,6 +8,7 @@ from mc_bot.accounts import FishingComboRewardEvent, WoodcuttingComboRewardEvent
 from mc_bot.experience import (
     LevelBotXpClient,
     MinecraftLevelUpEvent,
+    actionbar_clear_command,
     advancement_reward_tellraw_command,
     experience_add_points_command,
     experience_query_command,
@@ -88,6 +89,12 @@ def test_parses_level_up_and_xp_exchange_api_events() -> None:
     assert level_up.level == 2
     assert exchange.event_id == "exchange-uuid"
     assert exchange.reward_xp == 50
+
+
+def test_builds_private_actionbar_clear_command() -> None:
+    assert actionbar_clear_command("Steve") == 'title Steve actionbar {"text":""}'
+    with pytest.raises(ValueError):
+        actionbar_clear_command("@a")
 
 
 def test_parses_minecraft_xp_shop_and_exchange_request() -> None:

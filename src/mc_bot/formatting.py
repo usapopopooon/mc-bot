@@ -149,6 +149,32 @@ def format_xp_exchange(
     )
 
 
+def format_fishing_combo_milestone(
+    *, player_name: str, discord_user_id: int, combo_count: int, reward_xp: int
+) -> discord.Embed:
+    player_name = _escape_markdown(player_name)
+    return discord.Embed(
+        description=(
+            f"🎣 **{player_name} (<@{discord_user_id}>) さん** が釣り"
+            f"**{combo_count}コンボ**を達成! **+{reward_xp} XP**"
+        ),
+        color=discord.Color.blue(),
+    )
+
+
+def format_woodcutting_combo_milestone(
+    *, player_name: str, discord_user_id: int, combo_count: int, reward_xp: int
+) -> discord.Embed:
+    player_name = _escape_markdown(player_name)
+    return discord.Embed(
+        description=(
+            f"🪓 **{player_name} (<@{discord_user_id}>) さん** が連続伐採"
+            f"**{combo_count}本**を達成! **+{reward_xp} XP**"
+        ),
+        color=discord.Color.green(),
+    )
+
+
 def format_server_announcement(message: str) -> discord.Embed:
     """管理者がMinecraft内へ送った告知をDiscordログ用Embedにする。"""
     normalized = " ".join(message.split()).strip()

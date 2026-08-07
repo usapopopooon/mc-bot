@@ -35,6 +35,38 @@ def test_initialize_adds_minecraft_reward_delivery_column_to_existing_database(
     assert "minecraft_reward_delivered" in columns
 
 
+def test_public_delivery_migration_does_not_replay_existing_combo_events(tmp_path) -> None:
+    database = tmp_path / "accounts.db"
+    with sqlite3.connect(database) as connection:
+        connection.row_factory = sqlite3.Row
+        connection.execute(
+            """
+            CREATE TABLE minecraft_fishing_combo_rewards (
+                event_id TEXT PRIMARY KEY,
+                reward_delivered INTEGER NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO minecraft_fishing_combo_rewards (event_id, reward_delivered)
+            VALUES ('old-event', 1)
+            """
+        )
+        AccountStore._add_public_delivery_columns(
+            connection,
+            "minecraft_fishing_combo_rewards",
+        )
+        row = connection.execute(
+            """
+            SELECT minecraft_public_delivered, discord_public_delivered
+            FROM minecraft_fishing_combo_rewards WHERE event_id = 'old-event'
+            """
+        ).fetchone()
+    assert row is not None
+    assert tuple(row) == (1, 1)
+
+
 def test_imports_existing_whitelist_as_protected_and_unlinked(tmp_path) -> None:
     whitelist = tmp_path / "whitelist.json"
     whitelist.write_text(
@@ -818,7 +850,7 @@ def test_tracks_woodcutting_milestones_resets_and_excludes_reward_from_sync(tmp_
         guild_id=456,
         log_count=100,
         observed_at="2026-08-04T00:00:00+00:00",
-        combo_window_seconds=10,
+        combo_window_seconds=30,
     )
     rewards = store.observe_woodcutting_logs(
         account_id=account.id,
@@ -826,7 +858,7 @@ def test_tracks_woodcutting_milestones_resets_and_excludes_reward_from_sync(tmp_
         guild_id=456,
         log_count=110,
         observed_at="2026-08-04T00:00:02+00:00",
-        combo_window_seconds=10,
+        combo_window_seconds=30,
     )
     assert [(event.combo_count, event.reward_xp) for event in rewards] == [(5, 2), (10, 5)]
     first = rewards[0]
@@ -859,15 +891,68 @@ def test_tracks_woodcutting_milestones_resets_and_excludes_reward_from_sync(tmp_
         discord_user_id=123,
         guild_id=456,
         log_count=111,
-        observed_at="2026-08-04T00:00:20+00:00",
-        combo_window_seconds=10,
+        observed_at="2026-08-04T00:00:33+00:00",
+        combo_window_seconds=30,
     )
     reset_reward = store.observe_woodcutting_logs(
         account_id=account.id,
         discord_user_id=123,
         guild_id=456,
         log_count=115,
-        observed_at="2026-08-04T00:00:22+00:00",
-        combo_window_seconds=10,
+        observed_at="2026-08-04T00:00:35+00:00",
+        combo_window_seconds=30,
     )
     assert [(event.combo_count, event.reward_xp) for event in reset_reward] == [(5, 2)]
+
+    assert not store.observe_woodcutting_logs(
+        account_id=account.id,
+        discord_user_id=123,
+        guild_id=456,
+        log_count=116,
+        observed_at="2026-08-04T00:01:05+00:00",
+        combo_window_seconds=30,
+    )
+    extended_rewards = store.observe_woodcutting_logs(
+        account_id=account.id,
+        discord_user_id=123,
+        guild_id=456,
+        log_count=130,
+        observed_at="2026-08-04T00:01:07+00:00",
+        combo_window_seconds=30,
+    )
+    assert [(event.combo_count, event.reward_xp) for event in extended_rewards] == [
+        (10, 5),
+        (20, 10),
+    ]
+    public_reward = extended_rewards[-1]
+    assert store.reserve_woodcutting_reward_delivery(
+        event_id=public_reward.event_id,
+        account_id=account.id,
+        reward_xp=public_reward.reward_xp,
+        observed_at=public_reward.observed_at,
+    )
+    pending_public = store.list_pending_woodcutting_public_deliveries()
+    assert [event.event_id for event in pending_public] == [public_reward.event_id]
+    store.mark_woodcutting_public_delivered(public_reward.event_id, "minecraft")
+    partially_delivered = store.list_pending_woodcutting_public_deliveries()
+    assert partially_delivered[0].minecraft_public_delivered
+    assert not partially_delivered[0].discord_public_delivered
+    store.mark_woodcutting_public_delivered(public_reward.event_id, "discord")
+    assert store.list_pending_woodcutting_public_deliveries() == []
+    assert not store.observe_woodcutting_logs(
+        account_id=account.id,
+        discord_user_id=123,
+        guild_id=456,
+        log_count=131,
+        observed_at="2026-08-04T00:01:37+00:00",
+        combo_window_seconds=30,
+    )
+    long_combo_reward = store.observe_woodcutting_logs(
+        account_id=account.id,
+        discord_user_id=123,
+        guild_id=456,
+        log_count=140,
+        observed_at="2026-08-04T00:01:39+00:00",
+        combo_window_seconds=30,
+    )
+    assert [(event.combo_count, event.reward_xp) for event in long_combo_reward] == [(30, 10)]

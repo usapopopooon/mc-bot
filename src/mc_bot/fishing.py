@@ -29,6 +29,10 @@ def fishing_reward_xp(combo_count: int) -> int:
     return 20
 
 
+def is_public_fishing_milestone(combo_count: int) -> bool:
+    return combo_count >= 10 and combo_count % 10 == 0
+
+
 def fishing_objective_command() -> str:
     return f"scoreboard objectives add {FISHING_OBJECTIVE} minecraft.custom:minecraft.fish_caught"
 
@@ -69,6 +73,25 @@ def fishing_combo_actionbar_command(
         f"title {player_name} actionbar "
         f"{json.dumps(component, ensure_ascii=False, separators=(',', ':'))}"
     )
+
+
+def fishing_combo_tellraw_command(
+    player_name: str,
+    combo_count: int,
+    reward_xp: int,
+) -> str:
+    _validate_player_name(player_name)
+    if not is_public_fishing_milestone(combo_count) or reward_xp <= 0:
+        raise ValueError("public fishing milestone is invalid")
+    components = [
+        {"text": "🎣 "},
+        {"text": player_name, "color": "yellow"},
+        {"text": "さんが釣り"},
+        {"text": f"{combo_count}コンボ", "color": "aqua", "bold": True},
+        {"text": "を達成! "},
+        {"text": f"+{reward_xp} XP", "color": "green", "bold": True},
+    ]
+    return f"tellraw @a {json.dumps(components, ensure_ascii=False, separators=(',', ':'))}"
 
 
 def _validate_player_name(player_name: str) -> None:

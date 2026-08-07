@@ -119,6 +119,67 @@ def test_fishing_combo_rewards_minecraft_xp_with_private_actionbar_only(
     assert bot._accounts.list_pending_fishing_reward_deliveries() == []
 
 
+def test_public_fishing_milestone_replaces_private_actionbar_and_stays_silent(
+    tmp_path,
+) -> None:
+    config = Config(
+        discord_token="test",
+        accounts_path=tmp_path / "accounts.db",
+        rcon_password="test",
+        level_bot_api_url="https://levels.example.test",
+        level_bot_api_token="xp-secret",
+    )
+    bot = MinecraftDiscordBot(config)
+    bot._accounts.initialize()
+    account = bot._accounts.create_registration(
+        edition="java",
+        minecraft_name="Steve",
+        server_player_name="Steve",
+        discord_user_id=123,
+        discord_username="hoge",
+        source="self",
+        status="active",
+        created_by=123,
+    )
+    bot._settings = RuntimeSettings(guild_id=456)
+    rcon = ExperienceRcon()
+    bot._rcon = rcon  # type: ignore[assignment]
+    bot._accounts.set_minecraft_xp_observation(
+        account_id=account.id,
+        current_xp=0,
+        observed_at="2026-08-09T00:00:00+00:00",
+    )
+    bot._level_bot_xp.send_fishing_combo = AsyncMock(  # type: ignore[method-assign]
+        return_value=True
+    )
+    send_log = AsyncMock()
+    bot._send = send_log  # type: ignore[method-assign]
+
+    async def exercise() -> None:
+        await bot._sync_fishing_combos()
+        rcon.fishing_catches = 10
+        await bot._sync_fishing_combos()
+
+    asyncio.run(exercise())
+
+    actionbar_commands = [
+        command for command in rcon.commands if command.startswith("title Steve actionbar ")
+    ]
+    private_messages = [command for command in actionbar_commands if '"text":""' not in command]
+    clears = [command for command in actionbar_commands if '"text":""' in command]
+    public_messages = [command for command in rcon.commands if command.startswith("tellraw @a ")]
+    assert len(private_messages) == 9
+    assert len(clears) == 1
+    assert not any("10コンボ" in command for command in private_messages)
+    assert len(public_messages) == 1
+    assert "10コンボ" in public_messages[0]
+    assert "+15 XP" in public_messages[0]
+    assert not any(command.startswith("playsound ") for command in rcon.commands)
+    send_log.assert_awaited_once()
+    assert "10コンボ" in send_log.await_args.args[0].description
+    assert bot._accounts.list_pending_fishing_public_deliveries() == []
+
+
 def test_woodcutting_combo_rewards_with_private_actionbar_and_xp_sound(tmp_path) -> None:
     config = Config(
         discord_token="test",
@@ -175,6 +236,85 @@ def test_woodcutting_combo_rewards_with_private_actionbar_and_xp_sound(tmp_path)
     send_audit.assert_awaited_once()
     assert bot._accounts.list_pending_woodcutting_audits() == []
     assert bot._accounts.list_pending_woodcutting_reward_deliveries() == []
+
+
+def test_public_woodcutting_milestone_replaces_actionbar_but_keeps_private_sound(
+    tmp_path,
+) -> None:
+    config = Config(
+        discord_token="test",
+        accounts_path=tmp_path / "accounts.db",
+        rcon_password="test",
+        level_bot_api_url="https://levels.example.test",
+        level_bot_api_token="xp-secret",
+    )
+    bot = MinecraftDiscordBot(config)
+    bot._accounts.initialize()
+    account = bot._accounts.create_registration(
+        edition="java",
+        minecraft_name="Steve",
+        server_player_name="Steve",
+        discord_user_id=123,
+        discord_username="hoge",
+        source="self",
+        status="active",
+        created_by=123,
+    )
+    bot._settings = RuntimeSettings(guild_id=456)
+    rcon = ExperienceRcon()
+    rcon.woodcutting_logs = 100
+    bot._rcon = rcon  # type: ignore[assignment]
+    bot._accounts.set_minecraft_xp_observation(
+        account_id=account.id,
+        current_xp=0,
+        observed_at="2026-08-11T00:00:00+00:00",
+    )
+    bot._level_bot_xp.send_woodcutting_combo = AsyncMock(  # type: ignore[method-assign]
+        return_value=True
+    )
+    send_log = AsyncMock()
+    rcon.tellraw_failures = 1
+    send_log.side_effect = [RuntimeError("Discord unavailable"), None]
+    bot._send = send_log  # type: ignore[method-assign]
+    pending_after_failure = []
+
+    async def exercise() -> None:
+        await bot._sync_woodcutting_combos()
+        rcon.woodcutting_logs = 120
+        await bot._sync_woodcutting_combos()
+        pending_after_failure.extend(bot._accounts.list_pending_woodcutting_public_deliveries())
+        await bot._deliver_woodcutting_public_announcements()
+
+    asyncio.run(exercise())
+
+    actionbar_commands = [
+        command for command in rcon.commands if command.startswith("title Steve actionbar ")
+    ]
+    private_messages = [command for command in actionbar_commands if '"text":""' not in command]
+    clears = [command for command in actionbar_commands if '"text":""' in command]
+    public_messages = [command for command in rcon.commands if command.startswith("tellraw @a ")]
+    sounds = [command for command in rcon.commands if command.startswith("playsound ")]
+    assert len(private_messages) == 2
+    assert len(clears) == 1
+    assert not any("20本" in command for command in private_messages)
+    assert len(public_messages) == 2
+    assert all("連続伐採" in command for command in public_messages)
+    assert all("20本" in command for command in public_messages)
+    assert len(sounds) == 3
+    assert all(" player Steve " in command for command in sounds)
+    sound_indices = [
+        index for index, command in enumerate(rcon.commands) if command.startswith("playsound ")
+    ]
+    public_indices = [
+        index for index, command in enumerate(rcon.commands) if command.startswith("tellraw @a ")
+    ]
+    assert max(sound_indices) < min(public_indices)
+    assert len(pending_after_failure) == 1
+    assert not pending_after_failure[0].minecraft_public_delivered
+    assert not pending_after_failure[0].discord_public_delivered
+    assert send_log.await_count == 2
+    assert "20本" in send_log.await_args.args[0].description
+    assert bot._accounts.list_pending_woodcutting_public_deliveries() == []
 
 
 class OneLineTailer:

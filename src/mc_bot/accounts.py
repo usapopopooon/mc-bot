@@ -46,6 +46,8 @@ class FishingComboRewardEvent:
     observed_at: str
     reward_delivered: bool
     audit_delivered: bool
+    minecraft_public_delivered: bool = False
+    discord_public_delivered: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,6 +62,8 @@ class WoodcuttingComboRewardEvent:
     observed_at: str
     reward_delivered: bool
     audit_delivered: bool
+    minecraft_public_delivered: bool = False
+    discord_public_delivered: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -192,6 +196,10 @@ class AccountStore:
                         CHECK (reward_delivered IN (0, 1)),
                     audit_delivered INTEGER NOT NULL DEFAULT 0
                         CHECK (audit_delivered IN (0, 1)),
+                    minecraft_public_delivered INTEGER NOT NULL DEFAULT 0
+                        CHECK (minecraft_public_delivered IN (0, 1)),
+                    discord_public_delivered INTEGER NOT NULL DEFAULT 0
+                        CHECK (discord_public_delivered IN (0, 1)),
                     created_at TEXT NOT NULL,
                     UNIQUE(account_id, catch_count)
                 );
@@ -221,6 +229,10 @@ class AccountStore:
                         CHECK (reward_delivered IN (0, 1)),
                     audit_delivered INTEGER NOT NULL DEFAULT 0
                         CHECK (audit_delivered IN (0, 1)),
+                    minecraft_public_delivered INTEGER NOT NULL DEFAULT 0
+                        CHECK (minecraft_public_delivered IN (0, 1)),
+                    discord_public_delivered INTEGER NOT NULL DEFAULT 0
+                        CHECK (discord_public_delivered IN (0, 1)),
                     created_at TEXT NOT NULL,
                     UNIQUE(account_id, log_count)
                 );
@@ -242,6 +254,30 @@ class AccountStore:
                         CHECK (minecraft_reward_delivered IN (0, 1))
                     """
                 )
+            self._add_public_delivery_columns(
+                connection,
+                "minecraft_fishing_combo_rewards",
+            )
+            self._add_public_delivery_columns(
+                connection,
+                "minecraft_woodcutting_combo_rewards",
+            )
+
+    @staticmethod
+    def _add_public_delivery_columns(connection: sqlite3.Connection, table: str) -> None:
+        """Add delivery flags without replaying milestones created by older versions."""
+        columns = {row["name"] for row in connection.execute(f"PRAGMA table_info({table})")}
+        for column in ("minecraft_public_delivered", "discord_public_delivered"):
+            if column in columns:
+                continue
+            connection.execute(
+                f"""
+                ALTER TABLE {table}
+                ADD COLUMN {column} INTEGER NOT NULL DEFAULT 0
+                    CHECK ({column} IN (0, 1))
+                """
+            )
+            connection.execute(f"UPDATE {table} SET {column} = 1")
 
     def import_whitelist(self, whitelist_path: Path, bedrock_prefix: str = ".") -> int:
         if not whitelist_path.exists():
@@ -1130,6 +1166,26 @@ class AccountStore:
             ).fetchall()
         return [_fishing_combo_reward(row) for row in rows]
 
+    def list_pending_fishing_public_deliveries(self) -> list[FishingComboRewardEvent]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM minecraft_fishing_combo_rewards
+                WHERE reward_delivered = 1
+                  AND combo_count >= 10 AND combo_count % 10 = 0
+                  AND (minecraft_public_delivered = 0 OR discord_public_delivered = 0)
+                ORDER BY created_at, event_id
+                """
+            ).fetchall()
+        return [_fishing_combo_reward(row) for row in rows]
+
+    def mark_fishing_public_delivered(self, event_id: str, destination: str) -> None:
+        self._mark_combo_public_delivered(
+            table="minecraft_fishing_combo_rewards",
+            event_id=event_id,
+            destination=destination,
+        )
+
     def reserve_fishing_reward_delivery(
         self,
         *,
@@ -1350,6 +1406,52 @@ class AccountStore:
                 """
             ).fetchall()
         return [_woodcutting_combo_reward(row) for row in rows]
+
+    def list_pending_woodcutting_public_deliveries(
+        self,
+    ) -> list[WoodcuttingComboRewardEvent]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM minecraft_woodcutting_combo_rewards
+                WHERE reward_delivered = 1
+                  AND (combo_count = 20 OR (combo_count >= 50 AND combo_count % 50 = 0))
+                  AND (minecraft_public_delivered = 0 OR discord_public_delivered = 0)
+                ORDER BY created_at, event_id
+                """
+            ).fetchall()
+        return [_woodcutting_combo_reward(row) for row in rows]
+
+    def mark_woodcutting_public_delivered(self, event_id: str, destination: str) -> None:
+        self._mark_combo_public_delivered(
+            table="minecraft_woodcutting_combo_rewards",
+            event_id=event_id,
+            destination=destination,
+        )
+
+    def _mark_combo_public_delivered(
+        self,
+        *,
+        table: str,
+        event_id: str,
+        destination: str,
+    ) -> None:
+        if table not in {
+            "minecraft_fishing_combo_rewards",
+            "minecraft_woodcutting_combo_rewards",
+        }:
+            raise ValueError("invalid combo reward table")
+        if destination not in {"minecraft", "discord"}:
+            raise ValueError("destination must be minecraft or discord")
+        column = f"{destination}_public_delivered"
+        with self._connect() as connection:
+            connection.execute(
+                f"""
+                UPDATE {table} SET {column} = 1
+                WHERE event_id = ? AND reward_delivered = 1
+                """,
+                (event_id,),
+            )
 
     def reserve_woodcutting_reward_delivery(
         self, *, event_id: str, account_id: int, reward_xp: int, observed_at: str
@@ -1584,6 +1686,8 @@ def _fishing_combo_reward(row: sqlite3.Row) -> FishingComboRewardEvent:
         observed_at=str(row["observed_at"]),
         reward_delivered=bool(row["reward_delivered"]),
         audit_delivered=bool(row["audit_delivered"]),
+        minecraft_public_delivered=bool(row["minecraft_public_delivered"]),
+        discord_public_delivered=bool(row["discord_public_delivered"]),
     )
 
 
@@ -1599,6 +1703,8 @@ def _woodcutting_combo_reward(row: sqlite3.Row) -> WoodcuttingComboRewardEvent:
         observed_at=str(row["observed_at"]),
         reward_delivered=bool(row["reward_delivered"]),
         audit_delivered=bool(row["audit_delivered"]),
+        minecraft_public_delivered=bool(row["minecraft_public_delivered"]),
+        discord_public_delivered=bool(row["discord_public_delivered"]),
     )
 
 

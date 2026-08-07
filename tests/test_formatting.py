@@ -3,10 +3,12 @@ from mc_bot.experience import MinecraftLevelUpEvent
 from mc_bot.formatting import (
     format_advancement_reward,
     format_event,
+    format_fishing_combo_milestone,
     format_level_up_event,
     format_server_announcement,
     format_server_xp_started,
     format_voice_bonus_started,
+    format_woodcutting_combo_milestone,
     format_xp_exchange,
 )
 from mc_bot.translations import AdvancementTranslator
@@ -95,6 +97,21 @@ def test_formats_minecraft_xp_exchange() -> None:
         "サーバーXP **10**を交換し、Minecraft内の **100 XP**を獲得しました!"
     )
     assert embed.color.value == 0x2ECC71
+
+
+def test_formats_public_combo_milestones_for_discord_log() -> None:
+    fishing = format_fishing_combo_milestone(
+        player_name="*Steve*", discord_user_id=123, combo_count=10, reward_xp=15
+    )
+    woodcutting = format_woodcutting_combo_milestone(
+        player_name="*Steve*", discord_user_id=123, combo_count=20, reward_xp=10
+    )
+    assert fishing.description == (
+        r"🎣 **\*Steve\* (<@123>) さん** が釣り**10コンボ**を達成! **+15 XP**"
+    )
+    assert woodcutting.description == (
+        r"🪓 **\*Steve\* (<@123>) さん** が連続伐採**20本**を達成! **+10 XP**"
+    )
 
 
 def test_formats_server_announcement_like_minecraft_message() -> None:

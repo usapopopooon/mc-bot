@@ -27,6 +27,7 @@ from mc_bot.experience import (
     ADVANCEMENT_REWARD_LEVEL_BOT_SOURCE_XP,
     LevelBotXpClient,
     MinecraftXpExchangeRequest,
+    actionbar_clear_command,
     advancement_reward_tellraw_command,
     experience_add_points_command,
     experience_query_command,
@@ -40,17 +41,21 @@ from mc_bot.experience import (
 from mc_bot.fishing import (
     FISHING_COMBO_WINDOW_SECONDS,
     fishing_combo_actionbar_command,
+    fishing_combo_tellraw_command,
     fishing_objective_command,
     fishing_score_query_command,
+    is_public_fishing_milestone,
     parse_fishing_score,
 )
 from mc_bot.formatting import (
     format_advancement_reward,
     format_event,
+    format_fishing_combo_milestone,
     format_level_up_event,
     format_server_announcement,
     format_server_xp_started,
     format_voice_bonus_started,
+    format_woodcutting_combo_milestone,
     format_xp_exchange,
 )
 from mc_bot.player_count import (
@@ -96,10 +101,12 @@ from mc_bot.ui import (
 from mc_bot.voice import MinecraftVoicePlayer, announcement_speech_text, event_speech_text
 from mc_bot.woodcutting import (
     WOODCUTTING_COMBO_WINDOW_SECONDS,
+    is_public_woodcutting_milestone,
     parse_log_break_count,
     woodcutting_actionbar_command,
     woodcutting_objective_commands,
     woodcutting_scores_query_command,
+    woodcutting_tellraw_command,
     woodcutting_xp_sound_command,
 )
 from mc_bot.xp_shop import (
@@ -2418,6 +2425,7 @@ class MinecraftDiscordBot(discord.Client):
             )
             for reward in pending:
                 await self._grant_fishing_combo_reward(account, reward)
+        await self._deliver_fishing_public_announcements()
         await self._deliver_fishing_combo_audits()
 
     async def _grant_fishing_combo_reward(
@@ -2452,19 +2460,95 @@ class MinecraftDiscordBot(discord.Client):
                 )
                 raise
 
-        try:
-            await self._execute_checked_rcon(
-                fishing_combo_actionbar_command(
-                    account.server_player_name,
-                    reward.combo_count,
-                    reward.reward_xp,
+        if is_public_fishing_milestone(reward.combo_count):
+            await self._clear_combo_actionbar(account, reward.event_id, "fishing")
+        else:
+            try:
+                await self._execute_checked_rcon(
+                    fishing_combo_actionbar_command(
+                        account.server_player_name,
+                        reward.combo_count,
+                        reward.reward_xp,
+                    )
                 )
-            )
+            except (OSError, RconError, RuntimeError, ValueError) as error:
+                LOGGER.warning(
+                    "Could not notify fishing combo player=%s event=%s: %s",
+                    account.server_player_name,
+                    reward.event_id,
+                    error,
+                )
+
+    async def _deliver_fishing_public_announcements(self) -> None:
+        events = await asyncio.to_thread(self._accounts.list_pending_fishing_public_deliveries)
+        for event in events:
+            account = await asyncio.to_thread(self._accounts.get, event.account_id)
+            if account is None:
+                LOGGER.warning(
+                    "Could not deliver fishing milestone for missing account event=%s",
+                    event.event_id,
+                )
+                continue
+            if not event.minecraft_public_delivered:
+                try:
+                    await self._execute_checked_rcon(
+                        fishing_combo_tellraw_command(
+                            account.server_player_name,
+                            event.combo_count,
+                            event.reward_xp,
+                        )
+                    )
+                except (OSError, RconError, RuntimeError, ValueError) as error:
+                    LOGGER.warning(
+                        "Could not announce fishing milestone in Minecraft player=%s event=%s: %s",
+                        account.server_player_name,
+                        event.event_id,
+                        error,
+                    )
+                else:
+                    await asyncio.to_thread(
+                        self._accounts.mark_fishing_public_delivered,
+                        event.event_id,
+                        "minecraft",
+                    )
+            if not event.discord_public_delivered:
+                try:
+                    await self._send(
+                        format_fishing_combo_milestone(
+                            player_name=account.server_player_name,
+                            discord_user_id=event.discord_user_id,
+                            combo_count=event.combo_count,
+                            reward_xp=event.reward_xp,
+                        )
+                    )
+                except (RuntimeError, discord.DiscordException) as error:
+                    LOGGER.warning(
+                        "Could not announce fishing milestone in Discord player=%s event=%s: %s",
+                        account.server_player_name,
+                        event.event_id,
+                        error,
+                    )
+                else:
+                    await asyncio.to_thread(
+                        self._accounts.mark_fishing_public_delivered,
+                        event.event_id,
+                        "discord",
+                    )
+
+    async def _clear_combo_actionbar(
+        self,
+        account: MinecraftAccount,
+        event_id: str,
+        combo_kind: str,
+    ) -> None:
+        try:
+            await self._execute_checked_rcon(actionbar_clear_command(account.server_player_name))
         except (OSError, RconError, RuntimeError, ValueError) as error:
             LOGGER.warning(
-                "Could not notify fishing combo player=%s event=%s: %s",
+                "Could not clear %s combo actionbar player=%s event=%s: %s",
+                combo_kind,
                 account.server_player_name,
-                reward.event_id,
+                event_id,
                 error,
             )
 
@@ -2524,6 +2608,7 @@ class MinecraftDiscordBot(discord.Client):
             )
             for reward in pending:
                 await self._grant_woodcutting_combo_reward(account, reward)
+        await self._deliver_woodcutting_public_announcements()
         await self._deliver_woodcutting_combo_audits()
 
     async def _grant_woodcutting_combo_reward(
@@ -2555,16 +2640,17 @@ class MinecraftDiscordBot(discord.Client):
                 )
                 raise
 
-        for command in (
-            woodcutting_actionbar_command(
-                account.server_player_name,
-                reward.combo_count,
-                reward.reward_xp,
-            ),
-            woodcutting_xp_sound_command(account.server_player_name),
-        ):
+        if is_public_woodcutting_milestone(reward.combo_count):
+            await self._clear_combo_actionbar(account, reward.event_id, "woodcutting")
+        else:
             try:
-                await self._execute_checked_rcon(command)
+                await self._execute_checked_rcon(
+                    woodcutting_actionbar_command(
+                        account.server_player_name,
+                        reward.combo_count,
+                        reward.reward_xp,
+                    )
+                )
             except (OSError, RconError, RuntimeError, ValueError) as error:
                 LOGGER.warning(
                     "Could not notify woodcutting combo player=%s event=%s: %s",
@@ -2572,6 +2658,75 @@ class MinecraftDiscordBot(discord.Client):
                     reward.event_id,
                     error,
                 )
+        try:
+            await self._execute_checked_rcon(
+                woodcutting_xp_sound_command(account.server_player_name)
+            )
+        except (OSError, RconError, RuntimeError, ValueError) as error:
+            LOGGER.warning(
+                "Could not play woodcutting XP sound player=%s event=%s: %s",
+                account.server_player_name,
+                reward.event_id,
+                error,
+            )
+
+    async def _deliver_woodcutting_public_announcements(self) -> None:
+        events = await asyncio.to_thread(self._accounts.list_pending_woodcutting_public_deliveries)
+        for event in events:
+            account = await asyncio.to_thread(self._accounts.get, event.account_id)
+            if account is None:
+                LOGGER.warning(
+                    "Could not deliver woodcutting milestone for missing account event=%s",
+                    event.event_id,
+                )
+                continue
+            if not event.minecraft_public_delivered:
+                try:
+                    await self._execute_checked_rcon(
+                        woodcutting_tellraw_command(
+                            account.server_player_name,
+                            event.combo_count,
+                            event.reward_xp,
+                        )
+                    )
+                except (OSError, RconError, RuntimeError, ValueError) as error:
+                    LOGGER.warning(
+                        "Could not announce woodcutting milestone in Minecraft "
+                        "player=%s event=%s: %s",
+                        account.server_player_name,
+                        event.event_id,
+                        error,
+                    )
+                else:
+                    await asyncio.to_thread(
+                        self._accounts.mark_woodcutting_public_delivered,
+                        event.event_id,
+                        "minecraft",
+                    )
+            if not event.discord_public_delivered:
+                try:
+                    await self._send(
+                        format_woodcutting_combo_milestone(
+                            player_name=account.server_player_name,
+                            discord_user_id=event.discord_user_id,
+                            combo_count=event.combo_count,
+                            reward_xp=event.reward_xp,
+                        )
+                    )
+                except (RuntimeError, discord.DiscordException) as error:
+                    LOGGER.warning(
+                        "Could not announce woodcutting milestone in Discord "
+                        "player=%s event=%s: %s",
+                        account.server_player_name,
+                        event.event_id,
+                        error,
+                    )
+                else:
+                    await asyncio.to_thread(
+                        self._accounts.mark_woodcutting_public_delivered,
+                        event.event_id,
+                        "discord",
+                    )
 
     async def _deliver_woodcutting_combo_audits(self) -> bool:
         events = await asyncio.to_thread(self._accounts.list_pending_woodcutting_audits)
