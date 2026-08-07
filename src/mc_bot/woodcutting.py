@@ -1,0 +1,89 @@
+from __future__ import annotations
+
+import json
+import re
+
+WOODCUTTING_COMBO_WINDOW_SECONDS = 10
+
+_SAFE_PLAYER_NAME = re.compile(r"\.?[A-Za-z0-9_]{1,32}")
+_OVERWORLD_WOODS = (
+    "oak",
+    "spruce",
+    "birch",
+    "jungle",
+    "acacia",
+    "dark_oak",
+    "mangrove",
+    "cherry",
+    "pale_oak",
+)
+_LOG_OBJECTIVES = (
+    *((f"wc_{wood.replace('_', '')}", f"minecraft:{wood}_log") for wood in _OVERWORLD_WOODS),
+    *(
+        (f"wcs_{wood.replace('_', '')}", f"minecraft:stripped_{wood}_log")
+        for wood in _OVERWORLD_WOODS
+    ),
+    ("wc_crimson", "minecraft:crimson_stem"),
+    ("wc_warped", "minecraft:warped_stem"),
+    ("wcs_crimson", "minecraft:stripped_crimson_stem"),
+    ("wcs_warped", "minecraft:stripped_warped_stem"),
+)
+
+
+def woodcutting_reward_xp(combo_count: int) -> int:
+    if combo_count == 5:
+        return 2
+    if combo_count == 10:
+        return 5
+    if combo_count >= 20 and combo_count % 10 == 0:
+        return 10
+    return 0
+
+
+def woodcutting_objective_commands() -> tuple[str, ...]:
+    return tuple(
+        f"scoreboard objectives add {objective} minecraft.mined:{block}"
+        for objective, block in _LOG_OBJECTIVES
+    )
+
+
+def woodcutting_scores_query_command(player_name: str) -> str:
+    _validate_player_name(player_name)
+    return f"scoreboard players list {player_name}"
+
+
+def parse_log_break_count(response: str) -> int:
+    total = 0
+    for objective, _block in _LOG_OBJECTIVES:
+        match = re.search(
+            rf"(?:\[{re.escape(objective)}\]|\b{re.escape(objective)})\s*:\s*(\d+)",
+            response,
+        )
+        if match is not None:
+            total += int(match[1])
+    return total
+
+
+def woodcutting_actionbar_command(player_name: str, combo_count: int, reward_xp: int) -> str:
+    _validate_player_name(player_name)
+    if combo_count < 1 or reward_xp <= 0:
+        raise ValueError("rewarded woodcutting combo is invalid")
+    component = {
+        "text": f"🪓 連続伐採{combo_count}本! +{reward_xp} XP",
+        "color": "green",
+        "bold": True,
+    }
+    return (
+        f"title {player_name} actionbar "
+        f"{json.dumps(component, ensure_ascii=False, separators=(',', ':'))}"
+    )
+
+
+def woodcutting_xp_sound_command(player_name: str) -> str:
+    _validate_player_name(player_name)
+    return f"playsound minecraft:entity.experience_orb.pickup player {player_name} ~ ~ ~ 1 1"
+
+
+def _validate_player_name(player_name: str) -> None:
+    if _SAFE_PLAYER_NAME.fullmatch(player_name) is None:
+        raise ValueError("player_name contains unsafe RCON characters")

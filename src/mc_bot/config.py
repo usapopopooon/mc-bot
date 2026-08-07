@@ -28,6 +28,7 @@ class Config:
     level_bot_api_token: str = ""
     minecraft_xp_poll_seconds: int = 30
     fishing_combo_poll_seconds: int = 5
+    woodcutting_combo_poll_seconds: int = 2
 
     @classmethod
     def from_environment(cls, environment: Mapping[str, str] | None = None) -> Config:
@@ -77,6 +78,13 @@ class Config:
             raise ValueError("FISHING_COMBO_POLL_SECONDS must be an integer") from error
         if not 1 <= fishing_poll_seconds <= 30:
             raise ValueError("FISHING_COMBO_POLL_SECONDS must be between 1 and 30")
+        woodcutting_poll_text = values.get("WOODCUTTING_COMBO_POLL_SECONDS", "2").strip()
+        try:
+            woodcutting_poll_seconds = int(woodcutting_poll_text)
+        except ValueError as error:
+            raise ValueError("WOODCUTTING_COMBO_POLL_SECONDS must be an integer") from error
+        if not 1 <= woodcutting_poll_seconds <= 10:
+            raise ValueError("WOODCUTTING_COMBO_POLL_SECONDS must be between 1 and 10")
         return cls(
             discord_token=token,
             rcon_host=values.get("MINECRAFT_RCON_HOST", "minecraft").strip() or "minecraft",
@@ -91,6 +99,7 @@ class Config:
             level_bot_api_token=level_bot_token,
             minecraft_xp_poll_seconds=poll_seconds,
             fishing_combo_poll_seconds=fishing_poll_seconds,
+            woodcutting_combo_poll_seconds=woodcutting_poll_seconds,
         )
 
 

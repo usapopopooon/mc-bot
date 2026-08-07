@@ -17,6 +17,7 @@ services:
       LEVEL_BOT_API_TOKEN: "${LEVEL_BOT_API_TOKEN:-}"
       MINECRAFT_XP_POLL_SECONDS: "${MINECRAFT_XP_POLL_SECONDS:-30}"
       FISHING_COMBO_POLL_SECONDS: "${FISHING_COMBO_POLL_SECONDS:-5}"
+      WOODCUTTING_COMBO_POLL_SECONDS: "${WOODCUTTING_COMBO_POLL_SECONDS:-2}"
     volumes:
       - minecraft-data:/minecraft
       - mc-bot-data:/data

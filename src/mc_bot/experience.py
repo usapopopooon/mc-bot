@@ -7,7 +7,11 @@ from dataclasses import dataclass
 
 import aiohttp
 
-from mc_bot.accounts import FishingComboRewardEvent, MinecraftXpOutboxEvent
+from mc_bot.accounts import (
+    FishingComboRewardEvent,
+    MinecraftXpOutboxEvent,
+    WoodcuttingComboRewardEvent,
+)
 
 ADVANCEMENT_REWARD_LEVEL_BOT_XP = 100
 MINECRAFT_XP_PER_LEVEL_BOT_XP = 100
@@ -220,6 +224,9 @@ class LevelBotXpClient:
         self._base_url = base_url.rstrip("/")
         self._url = f"{self._base_url}/api/v1/integrations/minecraft/xp-events"
         self._fishing_url = f"{self._base_url}/api/v1/integrations/minecraft/fishing-combo-events"
+        self._woodcutting_url = (
+            f"{self._base_url}/api/v1/integrations/minecraft/woodcutting-combo-events"
+        )
         self._token = token
         self._session: aiohttp.ClientSession | None = None
 
@@ -289,6 +296,38 @@ class LevelBotXpClient:
                 )
         except (aiohttp.ClientError, TimeoutError) as error:
             LOGGER.warning("Could not send fishing audit to level-bot: %s", error)
+        return False
+
+    async def send_woodcutting_combo(self, event: WoodcuttingComboRewardEvent) -> bool:
+        """Send a Minecraft-only woodcutting reward for idempotent audit storage."""
+        if not self._token:
+            return False
+        payload = {
+            "event_id": event.event_id,
+            "guild_id": str(event.guild_id),
+            "user_id": str(event.discord_user_id),
+            "minecraft_account_id": f"mc-bot:{event.account_id}",
+            "log_count": event.log_count,
+            "combo_count": event.combo_count,
+            "reward_xp": event.reward_xp,
+            "observed_at": event.observed_at,
+        }
+        try:
+            async with self._require_session().post(
+                self._woodcutting_url,
+                headers={"Authorization": f"Bearer {self._token}"},
+                json=payload,
+            ) as response:
+                if response.status == 200:
+                    return True
+                body = await response.text()
+                LOGGER.warning(
+                    "level-bot woodcutting audit API rejected event status=%d body=%s",
+                    response.status,
+                    body[:300],
+                )
+        except (aiohttp.ClientError, TimeoutError) as error:
+            LOGGER.warning("Could not send woodcutting audit to level-bot: %s", error)
         return False
 
     async def send_voice_heartbeat(

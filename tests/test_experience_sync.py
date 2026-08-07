@@ -22,6 +22,7 @@ class ExperienceRcon:
         self.add_exception: Exception | None = None
         self.tellraw_failures = 0
         self.fishing_catches = 0
+        self.woodcutting_logs = 0
         self.commands: list[str] = []
 
     def execute(self, command: str) -> str:
@@ -43,10 +44,16 @@ class ExperienceRcon:
             return "There are 1 of a max of 20 players online: Steve"
         if command.startswith("scoreboard objectives add mc_fish_caught "):
             return "Created new objective [mc_fish_caught]"
+        if command.startswith("scoreboard objectives add wc"):
+            return "Created new objective"
         if command == "scoreboard players get Steve mc_fish_caught":
             return f"Steve has {self.fishing_catches} [mc_fish_caught]"
+        if command == "scoreboard players list Steve":
+            return f"Player Steve has 1 score: [wc_oak]: {self.woodcutting_logs}"
         if command.startswith("title Steve actionbar "):
             return ""
+        if command.startswith("playsound minecraft:entity.experience_orb.pickup player Steve "):
+            return "Played sound to Steve"
         if command == "experience query Steve levels":
             return f"Steve has {self.level} experience levels"
         if command == "experience query Steve points":
@@ -110,6 +117,64 @@ def test_fishing_combo_rewards_minecraft_xp_with_private_actionbar_only(
     assert send_audit.await_count == 2
     assert bot._accounts.list_pending_fishing_audits() == []
     assert bot._accounts.list_pending_fishing_reward_deliveries() == []
+
+
+def test_woodcutting_combo_rewards_with_private_actionbar_and_xp_sound(tmp_path) -> None:
+    config = Config(
+        discord_token="test",
+        accounts_path=tmp_path / "accounts.db",
+        rcon_password="test",
+        level_bot_api_url="https://levels.example.test",
+        level_bot_api_token="xp-secret",
+    )
+    bot = MinecraftDiscordBot(config)
+    bot._accounts.initialize()
+    account = bot._accounts.create_registration(
+        edition="java",
+        minecraft_name="Steve",
+        server_player_name="Steve",
+        discord_user_id=123,
+        discord_username="hoge",
+        source="self",
+        status="active",
+        created_by=123,
+    )
+    bot._settings = RuntimeSettings(guild_id=456)
+    rcon = ExperienceRcon()
+    rcon.woodcutting_logs = 100
+    bot._rcon = rcon  # type: ignore[assignment]
+    bot._accounts.set_minecraft_xp_observation(
+        account_id=account.id,
+        current_xp=7,
+        observed_at="2026-08-11T00:00:00+00:00",
+    )
+    send_audit = AsyncMock(return_value=True)
+    bot._level_bot_xp.send_woodcutting_combo = send_audit  # type: ignore[method-assign]
+
+    async def exercise() -> None:
+        await bot._sync_woodcutting_combos()  # baseline
+        rcon.woodcutting_logs = 105
+        await bot._sync_woodcutting_combos()
+
+    asyncio.run(exercise())
+
+    assert rcon.points == 2
+    assert rcon.commands.count("experience add Steve 2 points") == 1
+    private_messages = [
+        command for command in rcon.commands if command.startswith("title Steve actionbar ")
+    ]
+    assert len(private_messages) == 1
+    assert "連続伐採5本! +2 XP" in private_messages[0]
+    assert (
+        rcon.commands.count(
+            "playsound minecraft:entity.experience_orb.pickup player Steve ~ ~ ~ 1 1"
+        )
+        == 1
+    )
+    assert not any(command.startswith("tellraw ") for command in rcon.commands)
+    send_audit.assert_awaited_once()
+    assert bot._accounts.list_pending_woodcutting_audits() == []
+    assert bot._accounts.list_pending_woodcutting_reward_deliveries() == []
 
 
 class OneLineTailer:

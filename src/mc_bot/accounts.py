@@ -49,6 +49,20 @@ class FishingComboRewardEvent:
 
 
 @dataclass(frozen=True, slots=True)
+class WoodcuttingComboRewardEvent:
+    event_id: str
+    account_id: int
+    discord_user_id: int
+    guild_id: int
+    log_count: int
+    combo_count: int
+    reward_xp: int
+    observed_at: str
+    reward_delivered: bool
+    audit_delivered: bool
+
+
+@dataclass(frozen=True, slots=True)
 class MinecraftXpExchangeDelivery:
     exchange_id: str
     level_exchange_id: int
@@ -185,6 +199,35 @@ class AccountStore:
                     ON minecraft_fishing_combo_rewards(reward_delivered, created_at);
                 CREATE INDEX IF NOT EXISTS fishing_combo_rewards_audit
                     ON minecraft_fishing_combo_rewards(audit_delivered, created_at);
+                CREATE TABLE IF NOT EXISTS minecraft_woodcutting_combo_states (
+                    account_id INTEGER PRIMARY KEY
+                        REFERENCES minecraft_accounts(id) ON DELETE CASCADE,
+                    log_count INTEGER NOT NULL CHECK (log_count >= 0),
+                    combo_count INTEGER NOT NULL CHECK (combo_count >= 0),
+                    last_log_at TEXT,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS minecraft_woodcutting_combo_rewards (
+                    event_id TEXT PRIMARY KEY,
+                    account_id INTEGER NOT NULL
+                        REFERENCES minecraft_accounts(id) ON DELETE CASCADE,
+                    discord_user_id INTEGER NOT NULL,
+                    guild_id INTEGER NOT NULL,
+                    log_count INTEGER NOT NULL CHECK (log_count > 0),
+                    combo_count INTEGER NOT NULL CHECK (combo_count >= 1),
+                    reward_xp INTEGER NOT NULL CHECK (reward_xp > 0),
+                    observed_at TEXT NOT NULL,
+                    reward_delivered INTEGER NOT NULL DEFAULT 0
+                        CHECK (reward_delivered IN (0, 1)),
+                    audit_delivered INTEGER NOT NULL DEFAULT 0
+                        CHECK (audit_delivered IN (0, 1)),
+                    created_at TEXT NOT NULL,
+                    UNIQUE(account_id, log_count)
+                );
+                CREATE INDEX IF NOT EXISTS woodcutting_combo_rewards_delivery
+                    ON minecraft_woodcutting_combo_rewards(reward_delivered, created_at);
+                CREATE INDEX IF NOT EXISTS woodcutting_combo_rewards_audit
+                    ON minecraft_woodcutting_combo_rewards(audit_delivered, created_at);
                 """
             )
             advancement_columns = {
@@ -1164,6 +1207,215 @@ class AccountStore:
                 (event_id,),
             )
 
+    def observe_woodcutting_logs(
+        self,
+        *,
+        account_id: int,
+        discord_user_id: int,
+        guild_id: int,
+        log_count: int,
+        observed_at: str,
+        combo_window_seconds: int,
+    ) -> list[WoodcuttingComboRewardEvent]:
+        """原木採掘数の差分を連続伐採へ変換し、節目の報酬だけを保存する。"""
+        from mc_bot.woodcutting import woodcutting_reward_xp
+
+        if min(account_id, discord_user_id, guild_id, combo_window_seconds) <= 0 or log_count < 0:
+            raise ValueError("invalid woodcutting combo observation")
+        observed = datetime.fromisoformat(observed_at)
+        if observed.tzinfo is None or observed.utcoffset() is None:
+            raise ValueError("observed_at must include a timezone")
+
+        rewards: list[WoodcuttingComboRewardEvent] = []
+        with self._connect() as connection:
+            state = connection.execute(
+                """
+                SELECT log_count, combo_count, last_log_at
+                FROM minecraft_woodcutting_combo_states WHERE account_id = ?
+                """,
+                (account_id,),
+            ).fetchone()
+            if state is None or log_count < int(state["log_count"]):
+                connection.execute(
+                    """
+                    INSERT INTO minecraft_woodcutting_combo_states (
+                        account_id, log_count, combo_count, last_log_at, updated_at
+                    ) VALUES (?, ?, 0, NULL, ?)
+                    ON CONFLICT(account_id) DO UPDATE SET
+                        log_count = excluded.log_count, combo_count = 0,
+                        last_log_at = NULL, updated_at = excluded.updated_at
+                    """,
+                    (account_id, log_count, observed_at),
+                )
+                return []
+
+            previous_count = int(state["log_count"])
+            combo_count = int(state["combo_count"])
+            last_log_text = state["last_log_at"]
+            combo_active = False
+            if last_log_text is not None:
+                elapsed = (observed - datetime.fromisoformat(str(last_log_text))).total_seconds()
+                combo_active = 0 <= elapsed <= combo_window_seconds
+            if log_count == previous_count:
+                if last_log_text is not None and not combo_active:
+                    connection.execute(
+                        """
+                        UPDATE minecraft_woodcutting_combo_states
+                        SET combo_count = 0, last_log_at = NULL, updated_at = ?
+                        WHERE account_id = ?
+                        """,
+                        (observed_at, account_id),
+                    )
+                return []
+            if not combo_active:
+                combo_count = 0
+
+            for absolute_log in range(previous_count + 1, log_count + 1):
+                combo_count += 1
+                reward_xp = woodcutting_reward_xp(combo_count)
+                if reward_xp <= 0:
+                    continue
+                event = WoodcuttingComboRewardEvent(
+                    event_id=str(
+                        uuid.uuid5(
+                            uuid.NAMESPACE_URL,
+                            f"mc-bot:woodcutting:{account_id}:{absolute_log}",
+                        )
+                    ),
+                    account_id=account_id,
+                    discord_user_id=discord_user_id,
+                    guild_id=guild_id,
+                    log_count=absolute_log,
+                    combo_count=combo_count,
+                    reward_xp=reward_xp,
+                    observed_at=observed_at,
+                    reward_delivered=False,
+                    audit_delivered=False,
+                )
+                cursor = connection.execute(
+                    """
+                    INSERT INTO minecraft_woodcutting_combo_rewards (
+                        event_id, account_id, discord_user_id, guild_id,
+                        log_count, combo_count, reward_xp, observed_at, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(event_id) DO NOTHING
+                    """,
+                    (
+                        event.event_id,
+                        event.account_id,
+                        event.discord_user_id,
+                        event.guild_id,
+                        event.log_count,
+                        event.combo_count,
+                        event.reward_xp,
+                        event.observed_at,
+                        _now(),
+                    ),
+                )
+                if cursor.rowcount == 1:
+                    rewards.append(event)
+            connection.execute(
+                """
+                UPDATE minecraft_woodcutting_combo_states
+                SET log_count = ?, combo_count = ?, last_log_at = ?, updated_at = ?
+                WHERE account_id = ?
+                """,
+                (log_count, combo_count, observed_at, observed_at, account_id),
+            )
+        return rewards
+
+    def list_pending_woodcutting_reward_deliveries(
+        self, account_id: int | None = None
+    ) -> list[WoodcuttingComboRewardEvent]:
+        query = """
+            SELECT * FROM minecraft_woodcutting_combo_rewards
+            WHERE reward_delivered = 0
+        """
+        parameters: tuple[int, ...] = ()
+        if account_id is not None:
+            query += " AND account_id = ?"
+            parameters = (account_id,)
+        query += " ORDER BY created_at, event_id"
+        with self._connect() as connection:
+            rows = connection.execute(query, parameters).fetchall()
+        return [_woodcutting_combo_reward(row) for row in rows]
+
+    def list_pending_woodcutting_audits(self) -> list[WoodcuttingComboRewardEvent]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM minecraft_woodcutting_combo_rewards
+                WHERE reward_delivered = 1 AND audit_delivered = 0
+                ORDER BY created_at, event_id
+                """
+            ).fetchall()
+        return [_woodcutting_combo_reward(row) for row in rows]
+
+    def reserve_woodcutting_reward_delivery(
+        self, *, event_id: str, account_id: int, reward_xp: int, observed_at: str
+    ) -> bool:
+        if reward_xp <= 0:
+            raise ValueError("reward_xp must be positive")
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE minecraft_woodcutting_combo_rewards SET reward_delivered = 1
+                WHERE event_id = ? AND account_id = ? AND reward_xp = ?
+                  AND reward_delivered = 0
+                """,
+                (event_id, account_id, reward_xp),
+            )
+            if cursor.rowcount != 1:
+                row = connection.execute(
+                    """
+                    SELECT reward_delivered FROM minecraft_woodcutting_combo_rewards
+                    WHERE event_id = ? AND account_id = ?
+                    """,
+                    (event_id, account_id),
+                ).fetchone()
+                if row is not None and row["reward_delivered"]:
+                    return False
+                raise ValueError("木こりコンボ報酬イベントが見つかりません。")
+            connection.execute(
+                """
+                UPDATE minecraft_xp_observations
+                SET current_xp = current_xp + ?, observed_at = ? WHERE account_id = ?
+                """,
+                (reward_xp, observed_at, account_id),
+            )
+        return True
+
+    def release_woodcutting_reward_delivery(
+        self, *, event_id: str, account_id: int, reward_xp: int
+    ) -> None:
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE minecraft_woodcutting_combo_rewards SET reward_delivered = 0
+                WHERE event_id = ? AND account_id = ? AND reward_delivered = 1
+                """,
+                (event_id, account_id),
+            )
+            if cursor.rowcount != 1:
+                return
+            connection.execute(
+                """
+                UPDATE minecraft_xp_observations
+                SET current_xp = MAX(current_xp - ?, 0) WHERE account_id = ?
+                """,
+                (reward_xp, account_id),
+            )
+
+    def mark_woodcutting_audit_delivered(self, event_id: str) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE minecraft_woodcutting_combo_rewards SET audit_delivered = 1
+                WHERE event_id = ? AND reward_delivered = 1
+                """,
+                (event_id,),
+            )
+
     def link_existing(
         self,
         account_id: int,
@@ -1327,6 +1579,21 @@ def _fishing_combo_reward(row: sqlite3.Row) -> FishingComboRewardEvent:
         discord_user_id=int(row["discord_user_id"]),
         guild_id=int(row["guild_id"]),
         catch_count=int(row["catch_count"]),
+        combo_count=int(row["combo_count"]),
+        reward_xp=int(row["reward_xp"]),
+        observed_at=str(row["observed_at"]),
+        reward_delivered=bool(row["reward_delivered"]),
+        audit_delivered=bool(row["audit_delivered"]),
+    )
+
+
+def _woodcutting_combo_reward(row: sqlite3.Row) -> WoodcuttingComboRewardEvent:
+    return WoodcuttingComboRewardEvent(
+        event_id=str(row["event_id"]),
+        account_id=int(row["account_id"]),
+        discord_user_id=int(row["discord_user_id"]),
+        guild_id=int(row["guild_id"]),
+        log_count=int(row["log_count"]),
         combo_count=int(row["combo_count"]),
         reward_xp=int(row["reward_xp"]),
         observed_at=str(row["observed_at"]),

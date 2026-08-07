@@ -14,7 +14,12 @@ import aiohttp
 import discord
 from discord import app_commands
 
-from mc_bot.accounts import AccountStore, FishingComboRewardEvent, MinecraftAccount
+from mc_bot.accounts import (
+    AccountStore,
+    FishingComboRewardEvent,
+    MinecraftAccount,
+    WoodcuttingComboRewardEvent,
+)
 from mc_bot.config import Config
 from mc_bot.events import EventType, LogEvent, parse_log_line
 from mc_bot.experience import (
@@ -89,6 +94,14 @@ from mc_bot.ui import (
     admin_panel_embed,
 )
 from mc_bot.voice import MinecraftVoicePlayer, announcement_speech_text, event_speech_text
+from mc_bot.woodcutting import (
+    WOODCUTTING_COMBO_WINDOW_SECONDS,
+    parse_log_break_count,
+    woodcutting_actionbar_command,
+    woodcutting_objective_commands,
+    woodcutting_scores_query_command,
+    woodcutting_xp_sound_command,
+)
 from mc_bot.xp_shop import (
     MinecraftXpPackSelectView,
     MinecraftXpShopPanelView,
@@ -156,6 +169,7 @@ class MinecraftDiscordBot(discord.Client):
         self._status_panel_task: asyncio.Task[None] | None = None
         self._minecraft_xp_task: asyncio.Task[None] | None = None
         self._fishing_combo_task: asyncio.Task[None] | None = None
+        self._woodcutting_combo_task: asyncio.Task[None] | None = None
         self._player_count_update_lock = asyncio.Lock()
         self._status_panel_update_lock = asyncio.Lock()
         self._whitelist_operation_lock = asyncio.Lock()
@@ -173,6 +187,7 @@ class MinecraftDiscordBot(discord.Client):
         self._health_path = Path("/tmp/mc-bot-healthy")
         self._sync_ticks = 0
         self._fishing_objective_ready = False
+        self._woodcutting_objectives_ready = False
         self._next_status_panel_refresh_at = time.monotonic() + _STATUS_PANEL_REFRESH_SECONDS
 
     def _register_commands(self) -> None:
@@ -270,6 +285,7 @@ class MinecraftDiscordBot(discord.Client):
             await self._restore_voice_connection()
         self._ensure_minecraft_xp_started()
         self._ensure_fishing_combo_started()
+        self._ensure_woodcutting_combo_started()
 
         LOGGER.info(
             "Discord connected as %s; loaded %d advancement translations",
@@ -361,6 +377,10 @@ class MinecraftDiscordBot(discord.Client):
             self._fishing_combo_task.cancel()
             await asyncio.gather(self._fishing_combo_task, return_exceptions=True)
             self._fishing_combo_task = None
+        if self._woodcutting_combo_task is not None:
+            self._woodcutting_combo_task.cancel()
+            await asyncio.gather(self._woodcutting_combo_task, return_exceptions=True)
+            self._woodcutting_combo_task = None
         if self._tailer_task is not None:
             self._tailer_task.cancel()
             await asyncio.gather(self._tailer_task, return_exceptions=True)
@@ -2309,6 +2329,7 @@ class MinecraftDiscordBot(discord.Client):
             self._schedule_periodic_status_panel_refresh()
             self._ensure_minecraft_xp_started()
             self._ensure_fishing_combo_started()
+            self._ensure_woodcutting_combo_started()
             await asyncio.sleep(10)
 
     def _ensure_minecraft_xp_started(self) -> None:
@@ -2335,6 +2356,19 @@ class MinecraftDiscordBot(discord.Client):
             return
         self._fishing_combo_task = asyncio.create_task(
             self._fishing_combo_loop(), name="minecraft-fishing-combo"
+        )
+
+    def _ensure_woodcutting_combo_started(self) -> None:
+        if (
+            not self._config.level_bot_api_url
+            or not self._config.level_bot_api_token
+            or self._rcon is None
+        ):
+            return
+        if self._woodcutting_combo_task is not None and not self._woodcutting_combo_task.done():
+            return
+        self._woodcutting_combo_task = asyncio.create_task(
+            self._woodcutting_combo_loop(), name="minecraft-woodcutting-combo"
         )
 
     async def _fishing_combo_loop(self) -> None:
@@ -2441,6 +2475,111 @@ class MinecraftDiscordBot(discord.Client):
                 return False
             await asyncio.to_thread(
                 self._accounts.mark_fishing_audit_delivered,
+                event.event_id,
+            )
+        return True
+
+    async def _woodcutting_combo_loop(self) -> None:
+        while not self.is_closed():
+            try:
+                await self._sync_woodcutting_combos()
+            except (OSError, RconError, RuntimeError, ValueError) as error:
+                LOGGER.warning("Minecraft woodcutting combo synchronization failed: %s", error)
+            await asyncio.sleep(self._config.woodcutting_combo_poll_seconds)
+
+    async def _sync_woodcutting_combos(self) -> None:
+        guild_id = self._settings.guild_id
+        if guild_id is None:
+            return
+        if not self._woodcutting_objectives_ready:
+            for command in woodcutting_objective_commands():
+                await self._execute_checked_rcon(command)
+            self._woodcutting_objectives_ready = True
+        online = parse_online_players(await self._execute_checked_rcon("list"))
+        linked = {
+            account.server_player_name.casefold(): account
+            for account in await asyncio.to_thread(self._accounts.list_linked_active)
+        }
+        observed_at = datetime.now(UTC).replace(microsecond=0).isoformat()
+        for player_name in online:
+            account = linked.get(player_name.casefold())
+            if account is None or account.discord_user_id is None:
+                continue
+            response = await self._execute_rcon(
+                woodcutting_scores_query_command(account.server_player_name)
+            )
+            log_count = parse_log_break_count(response)
+            await asyncio.to_thread(
+                self._accounts.observe_woodcutting_logs,
+                account_id=account.id,
+                discord_user_id=account.discord_user_id,
+                guild_id=guild_id,
+                log_count=log_count,
+                observed_at=observed_at,
+                combo_window_seconds=WOODCUTTING_COMBO_WINDOW_SECONDS,
+            )
+            pending = await asyncio.to_thread(
+                self._accounts.list_pending_woodcutting_reward_deliveries,
+                account.id,
+            )
+            for reward in pending:
+                await self._grant_woodcutting_combo_reward(account, reward)
+        await self._deliver_woodcutting_combo_audits()
+
+    async def _grant_woodcutting_combo_reward(
+        self,
+        account: MinecraftAccount,
+        reward: WoodcuttingComboRewardEvent,
+    ) -> None:
+        """Minecraft内だけに木こりXPを付与し、通常XP同期から除外する。"""
+        async with self._minecraft_xp_observation_lock:
+            reserved = await asyncio.to_thread(
+                self._accounts.reserve_woodcutting_reward_delivery,
+                event_id=reward.event_id,
+                account_id=account.id,
+                reward_xp=reward.reward_xp,
+                observed_at=reward.observed_at,
+            )
+            if not reserved:
+                return
+            try:
+                await self._execute_checked_rcon(
+                    experience_add_points_command(account.server_player_name, reward.reward_xp)
+                )
+            except ValueError:
+                await asyncio.to_thread(
+                    self._accounts.release_woodcutting_reward_delivery,
+                    event_id=reward.event_id,
+                    account_id=account.id,
+                    reward_xp=reward.reward_xp,
+                )
+                raise
+
+        for command in (
+            woodcutting_actionbar_command(
+                account.server_player_name,
+                reward.combo_count,
+                reward.reward_xp,
+            ),
+            woodcutting_xp_sound_command(account.server_player_name),
+        ):
+            try:
+                await self._execute_checked_rcon(command)
+            except (OSError, RconError, RuntimeError, ValueError) as error:
+                LOGGER.warning(
+                    "Could not notify woodcutting combo player=%s event=%s: %s",
+                    account.server_player_name,
+                    reward.event_id,
+                    error,
+                )
+
+    async def _deliver_woodcutting_combo_audits(self) -> bool:
+        events = await asyncio.to_thread(self._accounts.list_pending_woodcutting_audits)
+        for event in events:
+            if not await self._level_bot_xp.send_woodcutting_combo(event):
+                return False
+            await asyncio.to_thread(
+                self._accounts.mark_woodcutting_audit_delivered,
                 event.event_id,
             )
         return True

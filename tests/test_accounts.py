@@ -791,3 +791,83 @@ def test_only_one_store_can_reserve_advancement_minecraft_reward(tmp_path) -> No
         )
         is None
     )
+
+
+def test_tracks_woodcutting_milestones_resets_and_excludes_reward_from_sync(tmp_path) -> None:
+    store = AccountStore(tmp_path / "accounts.db")
+    store.initialize()
+    account = store.create_registration(
+        edition="java",
+        minecraft_name="Steve",
+        server_player_name="Steve",
+        discord_user_id=123,
+        discord_username="hoge",
+        source="self",
+        status="active",
+        created_by=123,
+    )
+    store.set_minecraft_xp_observation(
+        account_id=account.id,
+        current_xp=50,
+        observed_at="2026-08-04T00:00:00+00:00",
+    )
+
+    assert not store.observe_woodcutting_logs(
+        account_id=account.id,
+        discord_user_id=123,
+        guild_id=456,
+        log_count=100,
+        observed_at="2026-08-04T00:00:00+00:00",
+        combo_window_seconds=10,
+    )
+    rewards = store.observe_woodcutting_logs(
+        account_id=account.id,
+        discord_user_id=123,
+        guild_id=456,
+        log_count=110,
+        observed_at="2026-08-04T00:00:02+00:00",
+        combo_window_seconds=10,
+    )
+    assert [(event.combo_count, event.reward_xp) for event in rewards] == [(5, 2), (10, 5)]
+    first = rewards[0]
+    assert store.reserve_woodcutting_reward_delivery(
+        event_id=first.event_id,
+        account_id=account.id,
+        reward_xp=first.reward_xp,
+        observed_at=first.observed_at,
+    )
+    assert not store.reserve_woodcutting_reward_delivery(
+        event_id=first.event_id,
+        account_id=account.id,
+        reward_xp=first.reward_xp,
+        observed_at=first.observed_at,
+    )
+    assert (
+        store.observe_minecraft_xp(
+            account_id=account.id,
+            discord_user_id=123,
+            guild_id=456,
+            current_xp=52,
+            observed_at="2026-08-04T00:00:03+00:00",
+            double_in_game_xp=True,
+        )
+        is None
+    )
+
+    assert not store.observe_woodcutting_logs(
+        account_id=account.id,
+        discord_user_id=123,
+        guild_id=456,
+        log_count=111,
+        observed_at="2026-08-04T00:00:20+00:00",
+        combo_window_seconds=10,
+    )
+    reset_reward = store.observe_woodcutting_logs(
+        account_id=account.id,
+        discord_user_id=123,
+        guild_id=456,
+        log_count=115,
+        observed_at="2026-08-04T00:00:22+00:00",
+        combo_window_seconds=10,
+    )
+    assert [(event.combo_count, event.reward_xp) for event in reset_reward] == [(5, 2)]

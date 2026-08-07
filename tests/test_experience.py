@@ -4,7 +4,7 @@ from typing import Any
 
 import pytest
 
-from mc_bot.accounts import FishingComboRewardEvent
+from mc_bot.accounts import FishingComboRewardEvent, WoodcuttingComboRewardEvent
 from mc_bot.experience import (
     LevelBotXpClient,
     MinecraftLevelUpEvent,
@@ -181,6 +181,40 @@ def test_fishing_combo_sends_audit_payload_without_server_xp_fields() -> None:
             "combo_count": 2,
             "reward_xp": 5,
             "observed_at": "2026-08-09T00:00:00+00:00",
+        }
+
+    asyncio.run(exercise())
+
+
+def test_woodcutting_combo_sends_audit_payload_without_server_xp_fields() -> None:
+    async def exercise() -> None:
+        client = LevelBotXpClient("https://levels.example.test", "secret")
+        session = _FakeSession()
+        client._session = session  # type: ignore[assignment]
+        event = WoodcuttingComboRewardEvent(
+            event_id="wood-5",
+            account_id=7,
+            discord_user_id=2001,
+            guild_id=1001,
+            log_count=105,
+            combo_count=5,
+            reward_xp=2,
+            observed_at="2026-08-11T00:00:00+00:00",
+            reward_delivered=True,
+            audit_delivered=False,
+        )
+        assert await client.send_woodcutting_combo(event)
+        assert session.post_kwargs is not None
+        assert session.post_kwargs["url"].endswith("/woodcutting-combo-events")
+        assert session.post_kwargs["json"] == {
+            "event_id": "wood-5",
+            "guild_id": "1001",
+            "user_id": "2001",
+            "minecraft_account_id": "mc-bot:7",
+            "log_count": 105,
+            "combo_count": 5,
+            "reward_xp": 2,
+            "observed_at": "2026-08-11T00:00:00+00:00",
         }
 
     asyncio.run(exercise())
