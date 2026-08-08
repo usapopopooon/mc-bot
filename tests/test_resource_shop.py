@@ -20,6 +20,7 @@ from mc_bot.resource_shop import (
     MinecraftResourceShopPanelView,
     minecraft_resource_shop_embed,
     resource_exchange_actionbar_command,
+    resource_exchange_tellraw_command,
     resource_give_command,
 )
 
@@ -29,6 +30,7 @@ class ResourceRcon:
         self.response = response
         self.exception: Exception | None = None
         self.actionbar_failures = 0
+        self.tellraw_failures = 0
         self.commands: list[str] = []
 
     def execute(self, command: str) -> str:
@@ -41,6 +43,11 @@ class ResourceRcon:
             if self.actionbar_failures > 0:
                 self.actionbar_failures -= 1
                 raise OSError("actionbar response lost")
+            return ""
+        if command.startswith("tellraw @a "):
+            if self.tellraw_failures > 0:
+                self.tellraw_failures -= 1
+                raise OSError("tellraw response lost")
             return ""
         raise AssertionError(f"unexpected RCON command: {command}")
 
@@ -106,6 +113,7 @@ def test_resource_panel_lists_server_rates_and_is_persistent() -> None:
     assert embed.title == "Minecraft 資源交換所"
     assert "`サーバーXP 50` → `エメラルド x4`" in str(embed.fields[0].value)
     assert "足元へドロップ" in str(embed.fields[1].value)
+    assert embed.footer.text == ("残高・選択・確認画面は本人のみ、交換完了は全体へ通知されます")
     assert panel.timeout is None
     assert [child.custom_id for child in panel.children] == [
         "mc-resource-shop:open",
@@ -121,6 +129,11 @@ def test_resource_commands_allow_only_fixed_items_and_recipient() -> None:
     actionbar = resource_exchange_actionbar_command("Steve", "minecraft:emerald", 4, 50)
     assert actionbar.startswith("title Steve actionbar ")
     assert "エメラルド x4" in actionbar
+    tellraw = resource_exchange_tellraw_command(
+        "うさぽサーバー", "Steve", "minecraft:emerald", 4, 50
+    )
+    assert tellraw.startswith("tellraw @a ")
+    assert "エメラルド x4" in tellraw
     with pytest.raises(ValueError):
         resource_give_command("@a", "minecraft:diamond", 1)
     with pytest.raises(ValueError):
@@ -202,7 +215,7 @@ def test_parses_resource_shop_and_delivery_event() -> None:
         )
 
 
-def test_sync_grants_resource_once_and_notifies_only_recipient(tmp_path) -> None:
+def test_sync_grants_resource_once_and_announces_like_xp_exchange(tmp_path) -> None:
     bot, account = _bot(tmp_path)
     rcon = ResourceRcon()
     bot._rcon = rcon  # type: ignore[assignment]
@@ -213,6 +226,8 @@ def test_sync_grants_resource_once_and_notifies_only_recipient(tmp_path) -> None
     )
     update = AsyncMock(return_value=True)
     bot._level_bot_xp.update_resource_exchange = update  # type: ignore[method-assign]
+    send_log = AsyncMock()
+    bot._send = send_log  # type: ignore[method-assign]
 
     asyncio.run(
         bot._sync_minecraft_resource_exchanges(
@@ -224,13 +239,17 @@ def test_sync_grants_resource_once_and_notifies_only_recipient(tmp_path) -> None
 
     assert rcon.commands.count("give Steve minecraft:diamond 3") == 1
     assert sum(command.startswith("title Steve actionbar ") for command in rcon.commands) == 1
-    assert not any("@a" in command for command in rcon.commands)
+    assert sum(command.startswith("tellraw @a ") for command in rcon.commands) == 1
     assert [call.args[2] for call in update.await_args_list] == ["claim", "complete"]
     delivery = bot._accounts.get_minecraft_resource_exchange_delivery(event.event_id)
     assert delivery is not None
     assert delivery.reward_applied
     assert delivery.level_completed
     assert delivery.minecraft_notified
+    assert delivery.minecraft_public_notified
+    assert delivery.discord_notified
+    send_log.assert_awaited_once()
+    assert "ダイヤモンド x3" in str(send_log.await_args.args[0].description)
 
 
 def test_sync_refunds_explicit_give_failure(tmp_path) -> None:
@@ -337,12 +356,13 @@ def test_sync_resource_exchange_retries_lost_claim_with_same_token(tmp_path) -> 
     assert delivery.level_completed
 
 
-def test_sync_resource_exchange_retries_completion_and_private_notification(
+def test_sync_resource_exchange_retries_completion_and_each_notification(
     tmp_path,
 ) -> None:
     bot, account = _bot(tmp_path)
     rcon = ResourceRcon()
     rcon.actionbar_failures = 1
+    rcon.tellraw_failures = 1
     bot._rcon = rcon  # type: ignore[assignment]
     event = replace(_event(), minecraft_account_id=f"mc-bot:{account.id}")
     bot._level_bot_xp.fetch_resource_exchanges = AsyncMock(  # type: ignore[method-assign]
@@ -351,6 +371,8 @@ def test_sync_resource_exchange_retries_completion_and_private_notification(
     bot._level_bot_xp.update_resource_exchange = AsyncMock(  # type: ignore[method-assign]
         side_effect=[True, False, True]
     )
+    send_log = AsyncMock(side_effect=[RuntimeError("Discord unavailable"), None])
+    bot._send = send_log  # type: ignore[method-assign]
 
     async def exercise() -> None:
         for _ in range(2):
@@ -364,8 +386,11 @@ def test_sync_resource_exchange_retries_completion_and_private_notification(
 
     assert rcon.commands.count("give Steve minecraft:diamond 3") == 1
     assert sum(command.startswith("title Steve actionbar ") for command in rcon.commands) == 2
-    assert not any("@a" in command for command in rcon.commands)
+    assert sum(command.startswith("tellraw @a ") for command in rcon.commands) == 2
+    assert send_log.await_count == 2
     delivery = bot._accounts.get_minecraft_resource_exchange_delivery(event.event_id)
     assert delivery is not None
     assert delivery.level_completed
     assert delivery.minecraft_notified
+    assert delivery.minecraft_public_notified
+    assert delivery.discord_notified

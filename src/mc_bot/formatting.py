@@ -149,6 +149,29 @@ def format_xp_exchange(
     )
 
 
+def format_resource_exchange(
+    *,
+    server_name: str,
+    player_name: str,
+    discord_user_id: int,
+    cost_xp: int,
+    item_name: str,
+    item_count: int,
+) -> discord.Embed:
+    """サーバーXPからMinecraft内資源への交換成功ログ。"""
+    server_name = _escape_markdown(server_name)
+    player_name = _escape_markdown(player_name)
+    item_name = _escape_markdown(item_name)
+    return discord.Embed(
+        description=(
+            f"💎 **[{server_name}] {player_name} (<@{discord_user_id}>) さん** が"
+            f"サーバーXP **{cost_xp:,}**を交換し、Minecraft内の "
+            f"**{item_name} x{item_count:,}**を獲得しました!"
+        ),
+        color=discord.Color.green(),
+    )
+
+
 def format_fishing_combo_milestone(
     *, player_name: str, discord_user_id: int, combo_count: int, reward_xp: int
 ) -> discord.Embed:

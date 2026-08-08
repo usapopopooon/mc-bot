@@ -48,6 +48,34 @@ def resource_exchange_actionbar_command(
     )
 
 
+def resource_exchange_tellraw_command(
+    server_name: str,
+    player_name: str,
+    item_id: str,
+    item_count: int,
+    cost_xp: int,
+) -> str:
+    resource_give_command(player_name, item_id, item_count)
+    if cost_xp <= 0:
+        raise ValueError("cost_xp must be positive")
+    components = [
+        {"text": "["},
+        {"text": server_name, "color": "aqua"},
+        {"text": "] "},
+        {"text": player_name, "color": "yellow"},
+        {"text": "さんがサーバーXP "},
+        {"text": str(cost_xp), "color": "green", "bold": True},
+        {"text": "を交換し、"},
+        {
+            "text": f"{_RESOURCE_NAMES[item_id]} x{item_count}",
+            "color": "aqua",
+            "bold": True,
+        },
+        {"text": "を獲得しました!"},
+    ]
+    return f"tellraw @a {json.dumps(components, ensure_ascii=False, separators=(',', ':'))}"
+
+
 def minecraft_resource_shop_embed(
     packs: tuple[MinecraftResourcePack, ...],
 ) -> discord.Embed:
@@ -75,7 +103,7 @@ def minecraft_resource_shop_embed(
         ),
         inline=False,
     )
-    embed.set_footer(text="残高・選択・結果は本人にのみ表示されます")
+    embed.set_footer(text="残高・選択・確認画面は本人のみ、交換完了は全体へ通知されます")
     return embed
 
 
@@ -273,6 +301,7 @@ __all__ = [
     "MinecraftResourceShopPanelView",
     "minecraft_resource_shop_embed",
     "resource_exchange_actionbar_command",
+    "resource_exchange_tellraw_command",
     "resource_give_command",
     "wallet_text",
 ]

@@ -5,6 +5,7 @@ from mc_bot.formatting import (
     format_event,
     format_fishing_combo_milestone,
     format_level_up_event,
+    format_resource_exchange,
     format_server_announcement,
     format_server_xp_started,
     format_voice_bonus_started,
@@ -95,6 +96,24 @@ def test_formats_minecraft_xp_exchange() -> None:
     assert embed.description == (
         "⛏️ **[うさぽサーバー] Steve (<@123>) さん** が"
         "サーバーXP **10**を交換し、Minecraft内の **100 XP**を獲得しました!"
+    )
+    assert embed.color.value == 0x2ECC71
+
+
+def test_formats_minecraft_resource_exchange() -> None:
+    embed = format_resource_exchange(
+        server_name="うさぽサーバー",
+        player_name="*Steve*",
+        discord_user_id=123,
+        cost_xp=550,
+        item_name="ダイヤモンド",
+        item_count=3,
+    )
+
+    assert embed.description == (
+        r"💎 **[うさぽサーバー] \*Steve\* (<@123>) さん** が"
+        "サーバーXP **550**を交換し、Minecraft内の "
+        "**ダイヤモンド x3**を獲得しました!"
     )
     assert embed.color.value == 0x2ECC71
 

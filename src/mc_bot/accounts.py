@@ -99,6 +99,8 @@ class MinecraftResourceExchangeDelivery:
     reward_applied: bool
     level_completed: bool
     minecraft_notified: bool
+    minecraft_public_notified: bool
+    discord_notified: bool
 
 
 class AccountStore:
@@ -218,6 +220,10 @@ class AccountStore:
                         CHECK (level_completed IN (0, 1)),
                     minecraft_notified INTEGER NOT NULL DEFAULT 0
                         CHECK (minecraft_notified IN (0, 1)),
+                    minecraft_public_notified INTEGER NOT NULL DEFAULT 0
+                        CHECK (minecraft_public_notified IN (0, 1)),
+                    discord_notified INTEGER NOT NULL DEFAULT 0
+                        CHECK (discord_notified IN (0, 1)),
                     created_at TEXT NOT NULL
                 );
                 CREATE TABLE IF NOT EXISTS minecraft_fishing_combo_states (
@@ -308,12 +314,32 @@ class AccountStore:
                 connection,
                 "minecraft_woodcutting_combo_rewards",
             )
+            self._add_resource_exchange_notification_columns(connection)
 
     @staticmethod
     def _add_public_delivery_columns(connection: sqlite3.Connection, table: str) -> None:
         """Add delivery flags without replaying milestones created by older versions."""
         columns = {row["name"] for row in connection.execute(f"PRAGMA table_info({table})")}
         for column in ("minecraft_public_delivered", "discord_public_delivered"):
+            if column in columns:
+                continue
+            connection.execute(
+                f"""
+                ALTER TABLE {table}
+                ADD COLUMN {column} INTEGER NOT NULL DEFAULT 0
+                    CHECK ({column} IN (0, 1))
+                """
+            )
+            connection.execute(f"UPDATE {table} SET {column} = 1")
+
+    @staticmethod
+    def _add_resource_exchange_notification_columns(
+        connection: sqlite3.Connection,
+    ) -> None:
+        """Add public flags without replaying exchanges completed by older versions."""
+        table = "minecraft_resource_exchange_deliveries"
+        columns = {row["name"] for row in connection.execute(f"PRAGMA table_info({table})")}
+        for column in ("minecraft_public_notified", "discord_notified"):
             if column in columns:
                 continue
             connection.execute(
@@ -980,11 +1006,18 @@ class AccountStore:
                 (exchange_id,),
             )
 
-    def mark_minecraft_resource_exchange_notified(self, exchange_id: str) -> None:
+    def mark_minecraft_resource_exchange_notified(self, exchange_id: str, destination: str) -> None:
+        columns = {
+            "recipient": "minecraft_notified",
+            "minecraft": "minecraft_public_notified",
+            "discord": "discord_notified",
+        }
+        column = columns.get(destination)
+        if column is None:
+            raise ValueError("unknown resource exchange notification destination")
         with self._connect() as connection:
             connection.execute(
-                "UPDATE minecraft_resource_exchange_deliveries "
-                "SET minecraft_notified = 1 "
+                f"UPDATE minecraft_resource_exchange_deliveries SET {column} = 1 "
                 "WHERE exchange_id = ? AND level_completed = 1",
                 (exchange_id,),
             )
@@ -997,7 +1030,12 @@ class AccountStore:
                 """
                 SELECT * FROM minecraft_resource_exchange_deliveries
                 WHERE reward_applied = 1
-                  AND (level_completed = 0 OR minecraft_notified = 0)
+                  AND (
+                    level_completed = 0
+                    OR minecraft_notified = 0
+                    OR minecraft_public_notified = 0
+                    OR discord_notified = 0
+                  )
                 ORDER BY created_at, exchange_id
                 """
             ).fetchall()
@@ -1884,6 +1922,8 @@ def _minecraft_resource_exchange_delivery(
         reward_applied=bool(row["reward_applied"]),
         level_completed=bool(row["level_completed"]),
         minecraft_notified=bool(row["minecraft_notified"]),
+        minecraft_public_notified=bool(row["minecraft_public_notified"]),
+        discord_notified=bool(row["discord_notified"]),
     )
 
 

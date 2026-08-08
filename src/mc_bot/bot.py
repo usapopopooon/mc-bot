@@ -53,6 +53,7 @@ from mc_bot.formatting import (
     format_event,
     format_fishing_combo_milestone,
     format_level_up_event,
+    format_resource_exchange,
     format_server_announcement,
     format_server_xp_started,
     format_voice_bonus_started,
@@ -71,6 +72,7 @@ from mc_bot.resource_shop import (
     MinecraftResourceShopPanelView,
     minecraft_resource_shop_embed,
     resource_exchange_actionbar_command,
+    resource_exchange_tellraw_command,
     resource_give_command,
 )
 from mc_bot.server_admin import (
@@ -3341,6 +3343,8 @@ class MinecraftDiscordBot(discord.Client):
         deliveries = await asyncio.to_thread(
             self._accounts.list_pending_minecraft_resource_exchange_deliveries
         )
+        guild = self.get_guild(guild_id)
+        server_name = guild.name if guild is not None else "サーバー"
         for delivery in deliveries:
             if delivery.guild_id != guild_id:
                 continue
@@ -3382,6 +3386,53 @@ class MinecraftDiscordBot(discord.Client):
                     await asyncio.to_thread(
                         self._accounts.mark_minecraft_resource_exchange_notified,
                         delivery.exchange_id,
+                        "recipient",
+                    )
+            if not delivery.minecraft_public_notified:
+                try:
+                    await asyncio.to_thread(
+                        self._require_rcon().execute,
+                        resource_exchange_tellraw_command(
+                            server_name,
+                            delivery.player_name,
+                            delivery.item_id,
+                            delivery.item_count,
+                            delivery.cost_xp,
+                        ),
+                    )
+                except (OSError, RconError, RuntimeError, ValueError) as error:
+                    LOGGER.warning(
+                        "Could not announce resource exchange in Minecraft: %s",
+                        error,
+                    )
+                else:
+                    await asyncio.to_thread(
+                        self._accounts.mark_minecraft_resource_exchange_notified,
+                        delivery.exchange_id,
+                        "minecraft",
+                    )
+            if not delivery.discord_notified:
+                try:
+                    await self._send(
+                        format_resource_exchange(
+                            server_name=server_name,
+                            player_name=delivery.player_name,
+                            discord_user_id=delivery.discord_user_id,
+                            cost_xp=delivery.cost_xp,
+                            item_name=delivery.item_name,
+                            item_count=delivery.item_count,
+                        )
+                    )
+                except (RuntimeError, discord.DiscordException) as error:
+                    LOGGER.warning(
+                        "Could not announce resource exchange in Discord: %s",
+                        error,
+                    )
+                else:
+                    await asyncio.to_thread(
+                        self._accounts.mark_minecraft_resource_exchange_notified,
+                        delivery.exchange_id,
+                        "discord",
                     )
 
     async def _sync_voice_bonus_heartbeats(

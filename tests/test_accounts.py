@@ -67,6 +67,39 @@ def test_public_delivery_migration_does_not_replay_existing_combo_events(tmp_pat
     assert tuple(row) == (1, 1)
 
 
+def test_resource_notification_migration_does_not_replay_existing_exchanges(
+    tmp_path,
+) -> None:
+    database = tmp_path / "accounts.db"
+    with sqlite3.connect(database) as connection:
+        connection.row_factory = sqlite3.Row
+        connection.execute(
+            """
+            CREATE TABLE minecraft_resource_exchange_deliveries (
+                exchange_id TEXT PRIMARY KEY,
+                minecraft_notified INTEGER NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO minecraft_resource_exchange_deliveries (
+                exchange_id, minecraft_notified
+            ) VALUES ('old-exchange', 1)
+            """
+        )
+        AccountStore._add_resource_exchange_notification_columns(connection)
+        row = connection.execute(
+            """
+            SELECT minecraft_public_notified, discord_notified
+            FROM minecraft_resource_exchange_deliveries
+            WHERE exchange_id = 'old-exchange'
+            """
+        ).fetchone()
+    assert row is not None
+    assert tuple(row) == (1, 1)
+
+
 def test_imports_existing_whitelist_as_protected_and_unlinked(tmp_path) -> None:
     whitelist = tmp_path / "whitelist.json"
     whitelist.write_text(
