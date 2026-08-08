@@ -1022,6 +1022,17 @@ class MinecraftDiscordBot(discord.Client):
                 ephemeral=True,
             )
             return
+        if interaction.message is not None:
+            try:
+                await interaction.message.edit(
+                    embed=minecraft_resource_shop_embed(shop.packs),
+                    view=MinecraftResourceShopPanelView(self),
+                )
+            except discord.DiscordException as error:
+                LOGGER.warning(
+                    "Could not refresh Minecraft resource shop panel on use: %s",
+                    error,
+                )
         await interaction.followup.send(
             (
                 f"交換可能XP: **{shop.wallet.available_xp:,} XP**\n"

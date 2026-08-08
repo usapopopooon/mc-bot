@@ -1,5 +1,6 @@
 import asyncio
 from dataclasses import replace
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
@@ -93,7 +94,8 @@ def _bot(tmp_path) -> tuple[MinecraftDiscordBot, MinecraftAccount]:
 
 def test_resource_panel_lists_server_rates_and_is_persistent() -> None:
     packs = (
-        MinecraftResourcePack("minecraft:emerald", "エメラルド", 4, 50),
+        MinecraftResourcePack("minecraft:emerald", "エメラルド", 4, 100),
+        MinecraftResourcePack("minecraft:emerald", "エメラルド", 16, 360),
         MinecraftResourcePack("minecraft:diamond", "ダイヤモンド", 3, 550),
     )
     embed = minecraft_resource_shop_embed(packs)
@@ -111,7 +113,8 @@ def test_resource_panel_lists_server_rates_and_is_persistent() -> None:
     panel, select = asyncio.run(build_views())
 
     assert embed.title == "Minecraft 資源交換所"
-    assert "`サーバーXP 50` → `エメラルド x4`" in str(embed.fields[0].value)
+    assert "`サーバーXP 100` → `エメラルド x4`" in str(embed.fields[0].value)
+    assert "`サーバーXP 360` → `エメラルド x16`" in str(embed.fields[0].value)
     assert "足元へドロップ" in str(embed.fields[1].value)
     assert embed.fields[2].name == "📢 交換完了時の通知"
     assert "**Discordのログチャンネル**" in str(embed.fields[2].value)
@@ -122,18 +125,53 @@ def test_resource_panel_lists_server_rates_and_is_persistent() -> None:
         "mc-resource-shop:open",
         "mc-resource-shop:balance",
     ]
-    assert [option.value for option in select.children[0].options] == ["0", "1"]
+    assert [option.value for option in select.children[0].options] == ["0", "1", "2"]
+
+
+def test_open_resource_shop_refreshes_public_panel_and_private_menu_from_same_rates(
+    tmp_path,
+) -> None:
+    bot, _ = _bot(tmp_path)
+    packs = (
+        MinecraftResourcePack("minecraft:emerald", "エメラルド", 4, 100),
+        MinecraftResourcePack("minecraft:emerald", "エメラルド", 16, 360),
+    )
+    shop = MinecraftResourceShop(MinecraftXpWallet(600, 100, 500), packs)
+    bot._level_bot_xp.fetch_resource_shop = AsyncMock(  # type: ignore[method-assign]
+        return_value=shop
+    )
+    interaction = SimpleNamespace(
+        guild_id=456,
+        user=SimpleNamespace(id=123),
+        message=SimpleNamespace(edit=AsyncMock()),
+        response=SimpleNamespace(defer=AsyncMock()),
+        followup=SimpleNamespace(send=AsyncMock()),
+    )
+
+    asyncio.run(bot.show_minecraft_resource_shop(interaction))  # type: ignore[arg-type]
+
+    bot._level_bot_xp.fetch_resource_shop.assert_awaited_once_with(456, 123)  # type: ignore[attr-defined]
+    interaction.message.edit.assert_awaited_once()
+    public_embed = interaction.message.edit.await_args.kwargs["embed"]
+    assert "`サーバーXP 100` → `エメラルド x4`" in str(public_embed.fields[0].value)
+    assert "`サーバーXP 360` → `エメラルド x16`" in str(public_embed.fields[0].value)
+    interaction.followup.send.assert_awaited_once()
+    private_view = interaction.followup.send.await_args.kwargs["view"]
+    assert [option.label for option in private_view.children[0].options] == [
+        "エメラルド x4 (サーバーXP 100)",
+        "エメラルド x16 (サーバーXP 360)",
+    ]
 
 
 def test_resource_commands_allow_only_fixed_items_and_recipient() -> None:
     assert resource_give_command("Steve", "minecraft:diamond", 3) == (
         "give Steve minecraft:diamond 3"
     )
-    actionbar = resource_exchange_actionbar_command("Steve", "minecraft:emerald", 4, 50)
+    actionbar = resource_exchange_actionbar_command("Steve", "minecraft:emerald", 4, 100)
     assert actionbar.startswith("title Steve actionbar ")
     assert "エメラルド x4" in actionbar
     tellraw = resource_exchange_tellraw_command(
-        "うさぽサーバー", "Steve", "minecraft:emerald", 4, 50
+        "うさぽサーバー", "Steve", "minecraft:emerald", 4, 100
     )
     assert tellraw.startswith("tellraw @a ")
     assert "エメラルド x4" in tellraw
@@ -179,13 +217,13 @@ def test_confirmation_preserves_item_count_and_cost_mapping() -> None:
 def test_parses_resource_shop_and_delivery_event() -> None:
     shop = LevelBotXpClient._parse_resource_shop(
         {
-            "wallet": {"total_xp": 600, "spent_xp": 50, "available_xp": 550},
+            "wallet": {"total_xp": 600, "spent_xp": 100, "available_xp": 500},
             "packs": [
                 {
                     "item_id": "minecraft:emerald",
                     "item_name": "エメラルド",
                     "item_count": 4,
-                    "cost_xp": 50,
+                    "cost_xp": 100,
                 }
             ],
         }
