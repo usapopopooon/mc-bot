@@ -103,7 +103,15 @@ def minecraft_resource_shop_embed(
         ),
         inline=False,
     )
-    embed.set_footer(text="残高・選択・確認画面は本人のみ、交換完了は全体へ通知されます")
+    embed.add_field(
+        name="📢 交換完了時の通知",
+        value=(
+            "交換が完了すると、交換したことが**Discordのログチャンネル**と"
+            "**Minecraft内チャット**に通知されます。"
+        ),
+        inline=False,
+    )
+    embed.set_footer(text="残高・選択・確認画面は本人にのみ表示されます")
     return embed
 
 

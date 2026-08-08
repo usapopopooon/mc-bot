@@ -113,7 +113,10 @@ def test_resource_panel_lists_server_rates_and_is_persistent() -> None:
     assert embed.title == "Minecraft 資源交換所"
     assert "`サーバーXP 50` → `エメラルド x4`" in str(embed.fields[0].value)
     assert "足元へドロップ" in str(embed.fields[1].value)
-    assert embed.footer.text == ("残高・選択・確認画面は本人のみ、交換完了は全体へ通知されます")
+    assert embed.fields[2].name == "📢 交換完了時の通知"
+    assert "**Discordのログチャンネル**" in str(embed.fields[2].value)
+    assert "**Minecraft内チャット**" in str(embed.fields[2].value)
+    assert embed.footer.text == "残高・選択・確認画面は本人にのみ表示されます"
     assert panel.timeout is None
     assert [child.custom_id for child in panel.children] == [
         "mc-resource-shop:open",
