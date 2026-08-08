@@ -104,13 +104,13 @@ def test_formats_public_combo_milestones_for_discord_log() -> None:
         player_name="*Steve*", discord_user_id=123, combo_count=10, reward_xp=15
     )
     woodcutting = format_woodcutting_combo_milestone(
-        player_name="*Steve*", discord_user_id=123, combo_count=20, reward_xp=10
+        player_name="*Steve*", discord_user_id=123, combo_count=20, reward_xp=30
     )
     assert fishing.description == (
         r"🎣 **\*Steve\* (<@123>) さん** が釣り**10コンボ**を達成! **+15 XP**"
     )
     assert woodcutting.description == (
-        r"🪓 **\*Steve\* (<@123>) さん** が連続伐採**20本**を達成! **+10 XP**"
+        r"🪓 **\*Steve\* (<@123>) さん** が連続伐採**20本**を達成! **+30 XP**"
     )
 
 

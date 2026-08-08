@@ -205,7 +205,7 @@ def test_woodcutting_combo_sends_audit_payload_without_server_xp_fields() -> Non
             guild_id=1001,
             log_count=105,
             combo_count=5,
-            reward_xp=2,
+            reward_xp=5,
             observed_at="2026-08-11T00:00:00+00:00",
             reward_delivered=True,
             audit_delivered=False,
@@ -220,7 +220,7 @@ def test_woodcutting_combo_sends_audit_payload_without_server_xp_fields() -> Non
             "minecraft_account_id": "mc-bot:7",
             "log_count": 105,
             "combo_count": 5,
-            "reward_xp": 2,
+            "reward_xp": 5,
             "observed_at": "2026-08-11T00:00:00+00:00",
         }
 

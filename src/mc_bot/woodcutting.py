@@ -32,11 +32,11 @@ _LOG_OBJECTIVES = (
 
 def woodcutting_reward_xp(combo_count: int) -> int:
     if combo_count == 5:
-        return 2
-    if combo_count == 10:
         return 5
+    if combo_count == 10:
+        return 15
     if combo_count >= 20 and combo_count % 10 == 0:
-        return 10
+        return 30
     return 0
 
 

@@ -15,7 +15,7 @@ from mc_bot.woodcutting import (
 
 @pytest.mark.parametrize(
     ("combo_count", "expected"),
-    [(0, 0), (4, 0), (5, 2), (6, 0), (10, 5), (19, 0), (20, 10), (30, 10), (31, 0)],
+    [(0, 0), (4, 0), (5, 5), (6, 0), (10, 15), (19, 0), (20, 30), (30, 30), (31, 0)],
 )
 def test_woodcutting_reward_milestones(combo_count: int, expected: int) -> None:
     assert woodcutting_reward_xp(combo_count) == expected
@@ -46,8 +46,8 @@ def test_builds_and_sums_log_scoreboard_objectives() -> None:
 
 
 def test_builds_private_feedback_with_experience_pickup_sound() -> None:
-    assert woodcutting_actionbar_command("Steve", 10, 5).startswith(
-        'title Steve actionbar {"text":"🪓 連続伐採10本! +5 XP"'
+    assert woodcutting_actionbar_command("Steve", 10, 15).startswith(
+        'title Steve actionbar {"text":"🪓 連続伐採10本! +15 XP"'
     )
 
 
@@ -60,11 +60,11 @@ def test_public_woodcutting_milestones(combo_count: int, expected: bool) -> None
 
 
 def test_builds_public_woodcutting_milestone() -> None:
-    command = woodcutting_tellraw_command("Steve", 20, 10)
+    command = woodcutting_tellraw_command("Steve", 20, 30)
     assert command.startswith('tellraw @a [{"text":"🪓 "},{"text":"Steve"')
     assert "連続伐採" in command
     assert "20本" in command
-    assert "+10 XP" in command
+    assert "+30 XP" in command
     assert woodcutting_xp_sound_command("Steve") == (
         "playsound minecraft:entity.experience_orb.pickup player Steve ~ ~ ~ 1 1"
     )

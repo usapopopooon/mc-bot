@@ -219,13 +219,13 @@ def test_woodcutting_combo_rewards_with_private_actionbar_and_xp_sound(tmp_path)
 
     asyncio.run(exercise())
 
-    assert rcon.points == 2
-    assert rcon.commands.count("experience add Steve 2 points") == 1
+    assert rcon.points == 5
+    assert rcon.commands.count("experience add Steve 5 points") == 1
     private_messages = [
         command for command in rcon.commands if command.startswith("title Steve actionbar ")
     ]
     assert len(private_messages) == 1
-    assert "連続伐採5本! +2 XP" in private_messages[0]
+    assert "連続伐採5本! +5 XP" in private_messages[0]
     assert (
         rcon.commands.count(
             "playsound minecraft:entity.experience_orb.pickup player Steve ~ ~ ~ 1 1"
@@ -300,7 +300,9 @@ def test_public_woodcutting_milestone_replaces_actionbar_but_keeps_private_sound
     assert len(public_messages) == 2
     assert all("連続伐採" in command for command in public_messages)
     assert all("20本" in command for command in public_messages)
+    assert all("+30 XP" in command for command in public_messages)
     assert len(sounds) == 3
+    assert rcon.points == 50
     assert all(" player Steve " in command for command in sounds)
     sound_indices = [
         index for index, command in enumerate(rcon.commands) if command.startswith("playsound ")
@@ -314,6 +316,7 @@ def test_public_woodcutting_milestone_replaces_actionbar_but_keeps_private_sound
     assert not pending_after_failure[0].discord_public_delivered
     assert send_log.await_count == 2
     assert "20本" in send_log.await_args.args[0].description
+    assert "+30 XP" in send_log.await_args.args[0].description
     assert bot._accounts.list_pending_woodcutting_public_deliveries() == []
 
 

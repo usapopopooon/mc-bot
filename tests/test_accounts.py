@@ -860,7 +860,7 @@ def test_tracks_woodcutting_milestones_resets_and_excludes_reward_from_sync(tmp_
         observed_at="2026-08-04T00:00:02+00:00",
         combo_window_seconds=30,
     )
-    assert [(event.combo_count, event.reward_xp) for event in rewards] == [(5, 2), (10, 5)]
+    assert [(event.combo_count, event.reward_xp) for event in rewards] == [(5, 5), (10, 15)]
     first = rewards[0]
     assert store.reserve_woodcutting_reward_delivery(
         event_id=first.event_id,
@@ -879,7 +879,7 @@ def test_tracks_woodcutting_milestones_resets_and_excludes_reward_from_sync(tmp_
             account_id=account.id,
             discord_user_id=123,
             guild_id=456,
-            current_xp=52,
+            current_xp=55,
             observed_at="2026-08-04T00:00:03+00:00",
             double_in_game_xp=True,
         )
@@ -902,7 +902,7 @@ def test_tracks_woodcutting_milestones_resets_and_excludes_reward_from_sync(tmp_
         observed_at="2026-08-04T00:00:35+00:00",
         combo_window_seconds=30,
     )
-    assert [(event.combo_count, event.reward_xp) for event in reset_reward] == [(5, 2)]
+    assert [(event.combo_count, event.reward_xp) for event in reset_reward] == [(5, 5)]
 
     assert not store.observe_woodcutting_logs(
         account_id=account.id,
@@ -921,8 +921,8 @@ def test_tracks_woodcutting_milestones_resets_and_excludes_reward_from_sync(tmp_
         combo_window_seconds=30,
     )
     assert [(event.combo_count, event.reward_xp) for event in extended_rewards] == [
-        (10, 5),
-        (20, 10),
+        (10, 15),
+        (20, 30),
     ]
     public_reward = extended_rewards[-1]
     assert store.reserve_woodcutting_reward_delivery(
@@ -955,4 +955,4 @@ def test_tracks_woodcutting_milestones_resets_and_excludes_reward_from_sync(tmp_
         observed_at="2026-08-04T00:01:39+00:00",
         combo_window_seconds=30,
     )
-    assert [(event.combo_count, event.reward_xp) for event in long_combo_reward] == [(30, 10)]
+    assert [(event.combo_count, event.reward_xp) for event in long_combo_reward] == [(30, 30)]
