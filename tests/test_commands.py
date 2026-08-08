@@ -62,6 +62,7 @@ def test_registers_manager_only_configuration_commands() -> None:
         "channel",
         "panel",
         "player-count",
+        "resource-panel",
         "show",
         "status-panel",
         "xp-panel",

@@ -83,6 +83,24 @@ class MinecraftXpExchangeDelivery:
     discord_notified: bool
 
 
+@dataclass(frozen=True, slots=True)
+class MinecraftResourceExchangeDelivery:
+    exchange_id: str
+    level_exchange_id: int
+    account_id: int
+    discord_user_id: int
+    guild_id: int
+    player_name: str
+    item_id: str
+    item_name: str
+    item_count: int
+    cost_xp: int
+    claim_token: str
+    reward_applied: bool
+    level_completed: bool
+    minecraft_notified: bool
+
+
 class AccountStore:
     def __init__(self, path: Path) -> None:
         self._path = path
@@ -172,6 +190,34 @@ class AccountStore:
                         CHECK (minecraft_notified IN (0, 1)),
                     discord_notified INTEGER NOT NULL DEFAULT 0
                         CHECK (discord_notified IN (0, 1)),
+                    created_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS minecraft_resource_exchange_claims (
+                    exchange_id TEXT PRIMARY KEY,
+                    claim_token TEXT NOT NULL UNIQUE,
+                    created_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS minecraft_resource_exchange_deliveries (
+                    exchange_id TEXT PRIMARY KEY
+                        REFERENCES minecraft_resource_exchange_claims(exchange_id),
+                    level_exchange_id INTEGER NOT NULL,
+                    account_id INTEGER NOT NULL
+                        REFERENCES minecraft_accounts(id) ON DELETE CASCADE,
+                    discord_user_id INTEGER NOT NULL,
+                    guild_id INTEGER NOT NULL,
+                    player_name TEXT NOT NULL,
+                    item_id TEXT NOT NULL
+                        CHECK (item_id IN ('minecraft:diamond', 'minecraft:emerald')),
+                    item_name TEXT NOT NULL,
+                    item_count INTEGER NOT NULL CHECK (item_count > 0),
+                    cost_xp INTEGER NOT NULL CHECK (cost_xp > 0),
+                    claim_token TEXT NOT NULL,
+                    reward_applied INTEGER NOT NULL DEFAULT 0
+                        CHECK (reward_applied IN (0, 1)),
+                    level_completed INTEGER NOT NULL DEFAULT 0
+                        CHECK (level_completed IN (0, 1)),
+                    minecraft_notified INTEGER NOT NULL DEFAULT 0
+                        CHECK (minecraft_notified IN (0, 1)),
                     created_at TEXT NOT NULL
                 );
                 CREATE TABLE IF NOT EXISTS minecraft_fishing_combo_states (
@@ -816,6 +862,152 @@ class AccountStore:
                     observed_at = excluded.observed_at
                 """,
                 (account_id, current_xp, observed_at),
+            )
+
+    def get_or_create_minecraft_resource_exchange_claim_token(self, exchange_id: str) -> str:
+        if not exchange_id:
+            raise ValueError("exchange_id must not be empty")
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT claim_token FROM minecraft_resource_exchange_claims WHERE exchange_id = ?",
+                (exchange_id,),
+            ).fetchone()
+            if row is not None:
+                return str(row["claim_token"])
+            claim_token = str(uuid.uuid4())
+            connection.execute(
+                """
+                INSERT INTO minecraft_resource_exchange_claims (
+                    exchange_id, claim_token, created_at
+                ) VALUES (?, ?, ?)
+                """,
+                (exchange_id, claim_token, _now()),
+            )
+            return claim_token
+
+    def get_minecraft_resource_exchange_claim_token(self, exchange_id: str) -> str | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT claim_token FROM minecraft_resource_exchange_claims WHERE exchange_id = ?",
+                (exchange_id,),
+            ).fetchone()
+        return str(row["claim_token"]) if row is not None else None
+
+    def reserve_minecraft_resource_exchange_delivery(
+        self,
+        *,
+        exchange_id: str,
+        level_exchange_id: int,
+        account_id: int,
+        discord_user_id: int,
+        guild_id: int,
+        player_name: str,
+        item_id: str,
+        item_name: str,
+        item_count: int,
+        cost_xp: int,
+        claim_token: str,
+    ) -> bool:
+        if (
+            not exchange_id
+            or level_exchange_id <= 0
+            or account_id <= 0
+            or discord_user_id <= 0
+            or guild_id <= 0
+            or not player_name
+            or item_id not in {"minecraft:diamond", "minecraft:emerald"}
+            or not item_name
+            or not 1 <= item_count <= 64
+            or cost_xp <= 0
+            or not claim_token
+        ):
+            raise ValueError("invalid Minecraft resource exchange delivery")
+        with self._connect() as connection:
+            existing = connection.execute(
+                "SELECT 1 FROM minecraft_resource_exchange_deliveries WHERE exchange_id = ?",
+                (exchange_id,),
+            ).fetchone()
+            if existing is not None:
+                return False
+            connection.execute(
+                """
+                INSERT INTO minecraft_resource_exchange_deliveries (
+                    exchange_id, level_exchange_id, account_id, discord_user_id,
+                    guild_id, player_name, item_id, item_name, item_count,
+                    cost_xp, claim_token, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    exchange_id,
+                    level_exchange_id,
+                    account_id,
+                    discord_user_id,
+                    guild_id,
+                    player_name,
+                    item_id,
+                    item_name,
+                    item_count,
+                    cost_xp,
+                    claim_token,
+                    _now(),
+                ),
+            )
+        return True
+
+    def get_minecraft_resource_exchange_delivery(
+        self, exchange_id: str
+    ) -> MinecraftResourceExchangeDelivery | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM minecraft_resource_exchange_deliveries WHERE exchange_id = ?",
+                (exchange_id,),
+            ).fetchone()
+        return _minecraft_resource_exchange_delivery(row) if row is not None else None
+
+    def mark_minecraft_resource_exchange_reward_applied(self, exchange_id: str) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                "UPDATE minecraft_resource_exchange_deliveries SET reward_applied = 1 "
+                "WHERE exchange_id = ?",
+                (exchange_id,),
+            )
+
+    def mark_minecraft_resource_exchange_level_completed(self, exchange_id: str) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                "UPDATE minecraft_resource_exchange_deliveries SET level_completed = 1 "
+                "WHERE exchange_id = ? AND reward_applied = 1",
+                (exchange_id,),
+            )
+
+    def mark_minecraft_resource_exchange_notified(self, exchange_id: str) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                "UPDATE minecraft_resource_exchange_deliveries "
+                "SET minecraft_notified = 1 "
+                "WHERE exchange_id = ? AND level_completed = 1",
+                (exchange_id,),
+            )
+
+    def list_pending_minecraft_resource_exchange_deliveries(
+        self,
+    ) -> list[MinecraftResourceExchangeDelivery]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM minecraft_resource_exchange_deliveries
+                WHERE reward_applied = 1
+                  AND (level_completed = 0 OR minecraft_notified = 0)
+                ORDER BY created_at, exchange_id
+                """
+            ).fetchall()
+        return [_minecraft_resource_exchange_delivery(row) for row in rows]
+
+    def release_minecraft_resource_exchange_delivery(self, exchange_id: str) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                "DELETE FROM minecraft_resource_exchange_deliveries WHERE exchange_id = ?",
+                (exchange_id,),
             )
 
     def claim_advancement_reward(
@@ -1671,6 +1863,27 @@ def _minecraft_xp_exchange_delivery(row: sqlite3.Row) -> MinecraftXpExchangeDeli
         level_completed=bool(row["level_completed"]),
         minecraft_notified=bool(row["minecraft_notified"]),
         discord_notified=bool(row["discord_notified"]),
+    )
+
+
+def _minecraft_resource_exchange_delivery(
+    row: sqlite3.Row,
+) -> MinecraftResourceExchangeDelivery:
+    return MinecraftResourceExchangeDelivery(
+        exchange_id=str(row["exchange_id"]),
+        level_exchange_id=int(row["level_exchange_id"]),
+        account_id=int(row["account_id"]),
+        discord_user_id=int(row["discord_user_id"]),
+        guild_id=int(row["guild_id"]),
+        player_name=str(row["player_name"]),
+        item_id=str(row["item_id"]),
+        item_name=str(row["item_name"]),
+        item_count=int(row["item_count"]),
+        cost_xp=int(row["cost_xp"]),
+        claim_token=str(row["claim_token"]),
+        reward_applied=bool(row["reward_applied"]),
+        level_completed=bool(row["level_completed"]),
+        minecraft_notified=bool(row["minecraft_notified"]),
     )
 
 

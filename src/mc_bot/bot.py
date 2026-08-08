@@ -26,6 +26,7 @@ from mc_bot.experience import (
     ADVANCEMENT_REWARD_IN_GAME_XP,
     ADVANCEMENT_REWARD_LEVEL_BOT_SOURCE_XP,
     LevelBotXpClient,
+    MinecraftResourceExchangeRequest,
     MinecraftXpExchangeRequest,
     actionbar_clear_command,
     advancement_reward_tellraw_command,
@@ -65,6 +66,13 @@ from mc_bot.player_count import (
     player_count_status,
 )
 from mc_bot.rcon import RconClient, RconError
+from mc_bot.resource_shop import (
+    MinecraftResourcePackSelectView,
+    MinecraftResourceShopPanelView,
+    minecraft_resource_shop_embed,
+    resource_exchange_actionbar_command,
+    resource_give_command,
+)
 from mc_bot.server_admin import (
     announcement_command,
     clean_rcon_output,
@@ -233,6 +241,10 @@ class MinecraftDiscordBot(discord.Client):
             description="Minecraft XP交換所パネルを設置します",
         )(self._configure_xp_shop_panel)
         group.command(
+            name="resource-panel",
+            description="Minecraft 資源交換所パネルを設置します",
+        )(self._configure_resource_shop_panel)
+        group.command(
             name="show",
             description="現在のBot設定と稼働状態を表示します",
         )(self._show_configuration)
@@ -248,6 +260,7 @@ class MinecraftDiscordBot(discord.Client):
         self.add_view(AccessPanelView(self))
         self.add_view(AdminPanelView(self))
         self.add_view(MinecraftXpShopPanelView(self))
+        self.add_view(MinecraftResourceShopPanelView(self))
         for account in await asyncio.to_thread(self._accounts.list_pending_approvals):
             if account.approval_message_id is not None:
                 self.add_view(
@@ -265,6 +278,7 @@ class MinecraftDiscordBot(discord.Client):
         await self._refresh_access_panel()
         await self._refresh_admin_panel()
         await self._refresh_xp_shop_panel()
+        await self._refresh_resource_shop_panel()
         channel_id = self._settings.channel_id
         if channel_id is None:
             self._channel = None
@@ -578,6 +592,66 @@ class MinecraftDiscordBot(discord.Client):
             allowed_mentions=discord.AllowedMentions.none(),
         )
 
+    @app_commands.describe(channel="資源交換所パネルの投稿先。省略時は現在のチャンネル")
+    async def _configure_resource_shop_panel(
+        self,
+        interaction: discord.Interaction,
+        channel: discord.TextChannel | None = None,
+    ) -> None:
+        if not await self._require_server_manager(interaction):
+            return
+        target = channel or interaction.channel
+        if not isinstance(target, discord.TextChannel):
+            await interaction.response.send_message(
+                "パネルの投稿先にはテキストチャンネルを指定してください。",
+                ephemeral=True,
+            )
+            return
+        await interaction.response.defer(ephemeral=True)
+        try:
+            self._ensure_same_guild(target.guild.id)
+            await self._resolve_and_validate_channel(target.id, require_embeds=True)
+            shop = await self._level_bot_xp.fetch_resource_shop(
+                target.guild.id, interaction.user.id
+            )
+            if shop is None:
+                raise RuntimeError("level-botの資源交換APIへ接続できません")
+            old_channel_id = self._settings.resource_shop_panel_channel_id
+            old_message_id = self._settings.resource_shop_panel_message_id
+            message: discord.Message | None = None
+            if old_channel_id == target.id and old_message_id is not None:
+                try:
+                    message = await target.fetch_message(old_message_id)
+                    await message.edit(
+                        embed=minecraft_resource_shop_embed(shop.packs),
+                        view=MinecraftResourceShopPanelView(self),
+                    )
+                except discord.NotFound:
+                    message = None
+            if message is None:
+                message = await target.send(
+                    embed=minecraft_resource_shop_embed(shop.packs),
+                    view=MinecraftResourceShopPanelView(self),
+                )
+                await self._disable_old_panel(old_channel_id, old_message_id)
+            await self._save_settings(
+                replace(
+                    self._settings,
+                    guild_id=target.guild.id,
+                    resource_shop_panel_channel_id=target.id,
+                    resource_shop_panel_message_id=message.id,
+                )
+            )
+        except (RuntimeError, discord.DiscordException) as error:
+            LOGGER.warning("Could not configure Minecraft resource shop panel: %s", error)
+            await interaction.followup.send(f"設置できませんでした: {error}", ephemeral=True)
+            return
+        await interaction.followup.send(
+            f"Minecraft 資源交換所パネルを {target.mention} に設置しました。",
+            ephemeral=True,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
     @app_commands.describe(
         mode="自動承認または管理者承認",
         channel="管理者承認時に申請を投稿するチャンネル",
@@ -717,6 +791,8 @@ class MinecraftDiscordBot(discord.Client):
                     f"{self._channel_text(self._settings.status_panel_channel_id)}",
                     "XP交換所パネル: "
                     f"{self._channel_text(self._settings.xp_shop_panel_channel_id)}",
+                    "資源交換所パネル: "
+                    f"{self._channel_text(self._settings.resource_shop_panel_channel_id)}",
                     f"承認方式: {mode}",
                     f"申請確認先: {self._channel_text(self._settings.approval_channel_id)}",
                     "人数表示: "
@@ -904,6 +980,92 @@ class MinecraftDiscordBot(discord.Client):
             request_id,
             cost_xp,
             expected_reward_xp,
+        )
+
+    async def validate_resource_shop_panel(self, interaction: discord.Interaction) -> bool:
+        if (
+            interaction.message is None
+            or interaction.message.id != self._settings.resource_shop_panel_message_id
+        ):
+            await interaction.response.send_message(
+                "このパネルは現在使用されていません。最新のパネルをご利用ください。",
+                ephemeral=True,
+            )
+            return False
+        if interaction.guild_id != self._settings.guild_id:
+            await interaction.response.send_message(
+                "このDiscordサーバーでは利用できません。", ephemeral=True
+            )
+            return False
+        if not isinstance(interaction.user, discord.Member) or interaction.user.bot:
+            await interaction.response.send_message(
+                "Discordサーバーのメンバーだけが利用できます。", ephemeral=True
+            )
+            return False
+        return True
+
+    async def show_minecraft_resource_shop(self, interaction: discord.Interaction) -> None:
+        if interaction.guild_id is None:
+            await interaction.response.send_message(
+                "Discordサーバー内で利用してください。", ephemeral=True
+            )
+            return
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        shop = await self._level_bot_xp.fetch_resource_shop(
+            interaction.guild_id, interaction.user.id
+        )
+        if shop is None:
+            await interaction.followup.send(
+                "資源交換所を取得できませんでした。少し待ってから再度お試しください。",
+                ephemeral=True,
+            )
+            return
+        await interaction.followup.send(
+            (
+                f"交換可能XP: **{shop.wallet.available_xp:,} XP**\n"
+                "交換内容を選んでください。"
+                "Minecraftサーバーへの参加中のみ交換できます。"
+            ),
+            view=MinecraftResourcePackSelectView(self, owner_id=interaction.user.id, shop=shop),
+            ephemeral=True,
+        )
+
+    async def show_minecraft_resource_balance(self, interaction: discord.Interaction) -> None:
+        if interaction.guild_id is None:
+            await interaction.response.send_message(
+                "Discordサーバー内で利用してください。", ephemeral=True
+            )
+            return
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        shop = await self._level_bot_xp.fetch_resource_shop(
+            interaction.guild_id, interaction.user.id
+        )
+        if shop is None:
+            await interaction.followup.send(
+                "XP残高を取得できませんでした。少し待ってから再度お試しください。",
+                ephemeral=True,
+            )
+            return
+        await interaction.followup.send(wallet_text(shop.wallet), ephemeral=True)
+
+    async def confirm_minecraft_resource_exchange(
+        self,
+        interaction: discord.Interaction,
+        *,
+        request_id: str,
+        item_id: str,
+        item_count: int,
+        expected_cost_xp: int,
+    ) -> MinecraftResourceExchangeRequest | None:
+        if interaction.guild_id is None:
+            return None
+        return await self._level_bot_xp.request_resource_exchange(
+            interaction.guild_id,
+            interaction.user.id,
+            request_id,
+            item_id,
+            item_count,
+            expected_cost_xp,
         )
 
     async def confirm_registration(
@@ -2047,6 +2209,24 @@ class MinecraftDiscordBot(discord.Client):
         except (RuntimeError, discord.DiscordException) as error:
             LOGGER.warning("Could not refresh Minecraft XP shop panel: %s", error)
 
+    async def _refresh_resource_shop_panel(self) -> None:
+        channel_id = self._settings.resource_shop_panel_channel_id
+        message_id = self._settings.resource_shop_panel_message_id
+        if channel_id is None or message_id is None or self.user is None:
+            return
+        try:
+            channel = await self._resolve_and_validate_channel(channel_id, require_embeds=True)
+            shop = await self._level_bot_xp.fetch_resource_shop(channel.guild.id, self.user.id)
+            if shop is None:
+                raise RuntimeError("level-botの資源交換APIへ接続できません")
+            message = await channel.fetch_message(message_id)
+            await message.edit(
+                embed=minecraft_resource_shop_embed(shop.packs),
+                view=MinecraftResourceShopPanelView(self),
+            )
+        except (RuntimeError, discord.DiscordException) as error:
+            LOGGER.warning("Could not refresh Minecraft resource shop panel: %s", error)
+
     async def _disable_old_panel(self, channel_id: int | None, message_id: int | None) -> None:
         if channel_id is None or message_id is None:
             return
@@ -2810,6 +2990,11 @@ class MinecraftDiscordBot(discord.Client):
             online_names=self._online_player_names,
             linked_accounts=tuple(linked.values()),
         )
+        await self._sync_minecraft_resource_exchanges(
+            guild_id=guild_id,
+            online_names=self._online_player_names,
+            linked_accounts=tuple(linked.values()),
+        )
         observed_at = datetime.now(UTC).replace(microsecond=0).isoformat()
         previously_active_users = set(self._voice_bonus_active_users)
         active_bonus_users = await self._sync_voice_bonus_heartbeats(
@@ -3030,6 +3215,173 @@ class MinecraftDiscordBot(discord.Client):
                         self._accounts.mark_minecraft_xp_exchange_notified,
                         delivery.exchange_id,
                         "discord",
+                    )
+
+    async def _sync_minecraft_resource_exchanges(
+        self,
+        *,
+        guild_id: int,
+        online_names: set[str],
+        linked_accounts: tuple[MinecraftAccount, ...],
+    ) -> None:
+        await self._flush_minecraft_resource_exchange_deliveries(guild_id)
+        events = await self._level_bot_xp.fetch_resource_exchanges(guild_id)
+        if events is None:
+            return
+        accounts_by_external_id = {f"mc-bot:{account.id}": account for account in linked_accounts}
+        for event in events:
+            if event.guild_id != guild_id:
+                continue
+            claim_token = await asyncio.to_thread(
+                self._accounts.get_minecraft_resource_exchange_claim_token,
+                event.event_id,
+            )
+            if event.status == "delivering" and (
+                claim_token is None
+                or not await self._level_bot_xp.update_resource_exchange(
+                    event.id,
+                    guild_id,
+                    "claim",
+                    claim_token=claim_token,
+                )
+            ):
+                continue
+
+            existing_delivery = await asyncio.to_thread(
+                self._accounts.get_minecraft_resource_exchange_delivery,
+                event.event_id,
+            )
+            if existing_delivery is not None:
+                if not existing_delivery.reward_applied:
+                    LOGGER.error(
+                        "Resource exchange requires manual delivery audit event=%d",
+                        event.id,
+                    )
+                continue
+
+            account = accounts_by_external_id.get(event.minecraft_account_id)
+            if (
+                account is None
+                or account.discord_user_id != event.user_id
+                or account.server_player_name.casefold() not in online_names
+            ):
+                await self._level_bot_xp.update_resource_exchange(
+                    event.id,
+                    guild_id,
+                    "cancel",
+                    claim_token=claim_token,
+                )
+                continue
+            if event.status == "pending":
+                claim_token = await asyncio.to_thread(
+                    self._accounts.get_or_create_minecraft_resource_exchange_claim_token,
+                    event.event_id,
+                )
+                if not await self._level_bot_xp.update_resource_exchange(
+                    event.id,
+                    guild_id,
+                    "claim",
+                    claim_token=claim_token,
+                ):
+                    continue
+            if claim_token is None:
+                continue
+
+            reserved = await asyncio.to_thread(
+                self._accounts.reserve_minecraft_resource_exchange_delivery,
+                exchange_id=event.event_id,
+                level_exchange_id=event.id,
+                account_id=account.id,
+                discord_user_id=event.user_id,
+                guild_id=guild_id,
+                player_name=account.server_player_name,
+                item_id=event.item_id,
+                item_name=event.item_name,
+                item_count=event.item_count,
+                cost_xp=event.cost_xp,
+                claim_token=claim_token,
+            )
+            if not reserved:
+                continue
+            try:
+                await self._execute_checked_rcon(
+                    resource_give_command(
+                        account.server_player_name,
+                        event.item_id,
+                        event.item_count,
+                    )
+                )
+            except ValueError:
+                await asyncio.to_thread(
+                    self._accounts.release_minecraft_resource_exchange_delivery,
+                    event.event_id,
+                )
+                await self._level_bot_xp.update_resource_exchange(
+                    event.id,
+                    guild_id,
+                    "cancel",
+                    claim_token=claim_token,
+                )
+                continue
+            except (OSError, RconError, RuntimeError) as error:
+                LOGGER.warning(
+                    "Minecraft resource exchange delivery became ambiguous event=%d: %s",
+                    event.id,
+                    error,
+                )
+                continue
+            await asyncio.to_thread(
+                self._accounts.mark_minecraft_resource_exchange_reward_applied,
+                event.event_id,
+            )
+
+        await self._flush_minecraft_resource_exchange_deliveries(guild_id)
+
+    async def _flush_minecraft_resource_exchange_deliveries(self, guild_id: int) -> None:
+        deliveries = await asyncio.to_thread(
+            self._accounts.list_pending_minecraft_resource_exchange_deliveries
+        )
+        for delivery in deliveries:
+            if delivery.guild_id != guild_id:
+                continue
+            if not delivery.level_completed:
+                completed = await self._level_bot_xp.update_resource_exchange(
+                    delivery.level_exchange_id,
+                    guild_id,
+                    "complete",
+                    claim_token=delivery.claim_token,
+                )
+                if not completed:
+                    continue
+                await asyncio.to_thread(
+                    self._accounts.mark_minecraft_resource_exchange_level_completed,
+                    delivery.exchange_id,
+                )
+                delivery = await asyncio.to_thread(
+                    self._accounts.get_minecraft_resource_exchange_delivery,
+                    delivery.exchange_id,
+                )
+                if delivery is None:
+                    continue
+            if not delivery.minecraft_notified:
+                try:
+                    await self._execute_checked_rcon(
+                        resource_exchange_actionbar_command(
+                            delivery.player_name,
+                            delivery.item_id,
+                            delivery.item_count,
+                            delivery.cost_xp,
+                        )
+                    )
+                except (OSError, RconError, RuntimeError, ValueError) as error:
+                    LOGGER.warning(
+                        "Could not notify resource exchange recipient in Minecraft: %s",
+                        error,
+                    )
+                else:
+                    await asyncio.to_thread(
+                        self._accounts.mark_minecraft_resource_exchange_notified,
+                        delivery.exchange_id,
                     )
 
     async def _sync_voice_bonus_heartbeats(

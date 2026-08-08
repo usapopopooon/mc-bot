@@ -23,6 +23,10 @@ ADVANCEMENT_REWARD_IN_GAME_XP = 100
 LOGGER = logging.getLogger(__name__)
 _QUERY_RESULT = re.compile(r"\bhas\s+(\d+)\s+experience\s+(levels?|points?)\b", re.I)
 _SAFE_PLAYER_NAME = re.compile(r"\.?[A-Za-z0-9_]{1,32}")
+_RESOURCE_ITEM_NAMES = {
+    "minecraft:diamond": "ダイヤモンド",
+    "minecraft:emerald": "エメラルド",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,6 +85,43 @@ class MinecraftXpExchangeRequest:
     wallet_before: MinecraftXpWallet
     wallet_after: MinecraftXpWallet
     pack: MinecraftXpPack | None
+
+
+@dataclass(frozen=True, slots=True)
+class MinecraftResourcePack:
+    item_id: str
+    item_name: str
+    item_count: int
+    cost_xp: int
+
+
+@dataclass(frozen=True, slots=True)
+class MinecraftResourceShop:
+    wallet: MinecraftXpWallet
+    packs: tuple[MinecraftResourcePack, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class MinecraftResourceExchangeRequest:
+    status: str
+    message: str
+    wallet_before: MinecraftXpWallet
+    wallet_after: MinecraftXpWallet
+    pack: MinecraftResourcePack | None
+
+
+@dataclass(frozen=True, slots=True)
+class MinecraftResourceExchangeEvent:
+    id: int
+    event_id: str
+    guild_id: int
+    user_id: int
+    minecraft_account_id: str
+    item_id: str
+    item_name: str
+    item_count: int
+    cost_xp: int
+    status: str
 
 
 def parse_experience_query(response: str, unit: str) -> int:
@@ -503,6 +544,37 @@ class LevelBotXpClient:
             LOGGER.warning("Could not fetch XP shop from level-bot: %s", error)
             return None
 
+    async def fetch_resource_shop(
+        self, guild_id: int, user_id: int
+    ) -> MinecraftResourceShop | None:
+        if not self._token:
+            return None
+        session = self._require_session()
+        try:
+            async with session.get(
+                f"{self._base_url}/api/v1/integrations/minecraft/resource-shop",
+                headers={"Authorization": f"Bearer {self._token}"},
+                params={"guild_id": str(guild_id), "user_id": str(user_id)},
+            ) as response:
+                if response.status != 200:
+                    body = await response.text()
+                    LOGGER.warning(
+                        "level-bot resource shop fetch rejected status=%d body=%s",
+                        response.status,
+                        body[:300],
+                    )
+                    return None
+                return self._parse_resource_shop(await response.json())
+        except (
+            aiohttp.ClientError,
+            TimeoutError,
+            KeyError,
+            TypeError,
+            ValueError,
+        ) as error:
+            LOGGER.warning("Could not fetch resource shop from level-bot: %s", error)
+            return None
+
     async def request_xp_exchange(
         self,
         guild_id: int,
@@ -546,6 +618,50 @@ class LevelBotXpClient:
             LOGGER.warning("Could not request XP exchange from level-bot: %s", error)
             return None
 
+    async def request_resource_exchange(
+        self,
+        guild_id: int,
+        user_id: int,
+        request_id: str,
+        item_id: str,
+        item_count: int,
+        expected_cost_xp: int,
+    ) -> MinecraftResourceExchangeRequest | None:
+        if not self._token:
+            return None
+        session = self._require_session()
+        try:
+            async with session.post(
+                f"{self._base_url}/api/v1/integrations/minecraft/resource-shop/exchanges",
+                headers={"Authorization": f"Bearer {self._token}"},
+                json={
+                    "request_id": request_id,
+                    "guild_id": str(guild_id),
+                    "user_id": str(user_id),
+                    "item_id": item_id,
+                    "item_count": item_count,
+                    "expected_cost_xp": expected_cost_xp,
+                },
+            ) as response:
+                if response.status != 200:
+                    body = await response.text()
+                    LOGGER.warning(
+                        "level-bot resource exchange rejected status=%d body=%s",
+                        response.status,
+                        body[:300],
+                    )
+                    return None
+                return self._parse_resource_exchange_request(await response.json())
+        except (
+            aiohttp.ClientError,
+            TimeoutError,
+            KeyError,
+            TypeError,
+            ValueError,
+        ) as error:
+            LOGGER.warning("Could not request resource exchange from level-bot: %s", error)
+            return None
+
     async def update_xp_exchange(
         self,
         event_id: int,
@@ -574,6 +690,71 @@ class LevelBotXpClient:
                 )
         except (aiohttp.ClientError, TimeoutError) as error:
             LOGGER.warning("Could not %s XP exchange: %s", action, error)
+        return False
+
+    async def fetch_resource_exchanges(
+        self, guild_id: int
+    ) -> list[MinecraftResourceExchangeEvent] | None:
+        if not self._token:
+            return None
+        session = self._require_session()
+        try:
+            async with session.get(
+                f"{self._base_url}/api/v1/integrations/minecraft/resource-exchanges",
+                headers={"Authorization": f"Bearer {self._token}"},
+                params={"guild_id": str(guild_id), "limit": "20"},
+            ) as response:
+                if response.status != 200:
+                    body = await response.text()
+                    LOGGER.warning(
+                        "level-bot resource exchanges fetch rejected status=%d body=%s",
+                        response.status,
+                        body[:300],
+                    )
+                    return None
+                payload = await response.json()
+            if not isinstance(payload, list):
+                raise ValueError("resource exchange response must be a list")
+            return [self._parse_resource_exchange(item) for item in payload]
+        except (
+            aiohttp.ClientError,
+            TimeoutError,
+            KeyError,
+            TypeError,
+            ValueError,
+        ) as error:
+            LOGGER.warning("Could not fetch resource exchanges from level-bot: %s", error)
+            return None
+
+    async def update_resource_exchange(
+        self,
+        event_id: int,
+        guild_id: int,
+        action: str,
+        *,
+        claim_token: str | None = None,
+    ) -> bool:
+        if action not in {"claim", "complete", "cancel"} or not self._token:
+            return False
+        session = self._require_session()
+        try:
+            async with session.post(
+                f"{self._base_url}/api/v1/integrations/minecraft/"
+                f"resource-exchanges/{event_id}/{action}",
+                headers={"Authorization": f"Bearer {self._token}"},
+                json={"guild_id": str(guild_id), "claim_token": claim_token},
+            ) as response:
+                if response.status == 204:
+                    return True
+                body = await response.text()
+                LOGGER.warning(
+                    "level-bot resource exchange %s rejected status=%d body=%s",
+                    action,
+                    response.status,
+                    body[:300],
+                )
+        except (aiohttp.ClientError, TimeoutError) as error:
+            LOGGER.warning("Could not %s resource exchange: %s", action, error)
         return False
 
     def _require_session(self) -> aiohttp.ClientSession:
@@ -689,3 +870,75 @@ class LevelBotXpClient:
             wallet_after=cls._parse_wallet(item["wallet_after"]),
             pack=cls._parse_pack(pack_item) if pack_item is not None else None,
         )
+
+    @staticmethod
+    def _parse_resource_pack(item: object) -> MinecraftResourcePack:
+        if not isinstance(item, dict):
+            raise ValueError("resource pack must be an object")
+        pack = MinecraftResourcePack(
+            item_id=str(item["item_id"]),
+            item_name=str(item["item_name"]),
+            item_count=int(item["item_count"]),
+            cost_xp=int(item["cost_xp"]),
+        )
+        if (
+            pack.item_id not in {"minecraft:diamond", "minecraft:emerald"}
+            or pack.item_name != _RESOURCE_ITEM_NAMES.get(pack.item_id)
+            or not 1 <= pack.item_count <= 64
+            or pack.cost_xp <= 0
+        ):
+            raise ValueError("resource pack contains invalid values")
+        return pack
+
+    @classmethod
+    def _parse_resource_shop(cls, item: object) -> MinecraftResourceShop:
+        if not isinstance(item, dict) or not isinstance(item.get("packs"), list):
+            raise ValueError("resource shop must be an object")
+        packs = tuple(cls._parse_resource_pack(pack) for pack in item["packs"])
+        identities = {(pack.item_id, pack.item_count) for pack in packs}
+        if not packs or len(packs) > 25 or len(identities) != len(packs):
+            raise ValueError("resource shop packs contain invalid values")
+        return MinecraftResourceShop(wallet=cls._parse_wallet(item["wallet"]), packs=packs)
+
+    @classmethod
+    def _parse_resource_exchange_request(cls, item: object) -> MinecraftResourceExchangeRequest:
+        if not isinstance(item, dict):
+            raise ValueError("resource exchange request must be an object")
+        status = str(item["status"])
+        if status not in {"reserved", "offline", "insufficient_xp", "unavailable"}:
+            raise ValueError("resource exchange request has invalid status")
+        pack_item = item.get("pack")
+        return MinecraftResourceExchangeRequest(
+            status=status,
+            message=str(item["message"]),
+            wallet_before=cls._parse_wallet(item["wallet_before"]),
+            wallet_after=cls._parse_wallet(item["wallet_after"]),
+            pack=cls._parse_resource_pack(pack_item) if pack_item is not None else None,
+        )
+
+    @classmethod
+    def _parse_resource_exchange(cls, item: object) -> MinecraftResourceExchangeEvent:
+        if not isinstance(item, dict):
+            raise ValueError("resource exchange event must be an object")
+        pack = cls._parse_resource_pack(item)
+        event = MinecraftResourceExchangeEvent(
+            id=int(item["id"]),
+            event_id=str(item["event_id"]),
+            guild_id=int(item["guild_id"]),
+            user_id=int(item["user_id"]),
+            minecraft_account_id=str(item["minecraft_account_id"]),
+            item_id=pack.item_id,
+            item_name=pack.item_name,
+            item_count=pack.item_count,
+            cost_xp=pack.cost_xp,
+            status=str(item["status"]),
+        )
+        if (
+            event.id <= 0
+            or not event.event_id
+            or event.guild_id <= 0
+            or event.user_id <= 0
+            or event.status not in {"pending", "delivering"}
+        ):
+            raise ValueError("resource exchange event contains invalid values")
+        return event
