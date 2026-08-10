@@ -124,7 +124,19 @@ Bedrock版とDiscord連携状況を表示し、実行した管理者だけに見
 Bedrock版でモダンゲーマータグの `名前#数字` が入力された場合は、Minecraftで使われる
 クラシック形式の `名前数字` へ正規化してから確認・保存します。
 Whitelist反映に失敗した登録・解除は最大5回まで自動再試行し、上限後は
-状態と最後のエラーを保持したまま自動再試行を停止します。
+状態と最後のエラーを保持したまま自動再試行を停止します。解除に失敗した本人は
+「登録内容を確認・変更」からWhitelist解除を手動で再試行できます。
+
+MinecraftアカウントとDiscordユーザーの紐付けは、変更される可能性があるプレイヤー名では
+なくJava UUIDまたはBedrock XUID由来のFloodgate UUIDを本人識別子として扱います。新規登録時に
+UUIDを確認できない場合は名前だけの登録を作りません。既存Whitelistの取り込み、追加・削除、
+反映確認もUUIDを優先し、プレイヤー名はMinecraft内コマンド用の現在名として更新します。
+過去の名前基準処理で同じUUIDの登録が重複している場合は、同じDiscordユーザーの行だけを
+現行Whitelist名へ統合し、旧行は削除せず `missing` として退避します。所有者が異なる衝突は
+自動統合せず、安全側で停止します。UUID付きの削除済み登録も、別のDiscordユーザーからの
+通常登録では引き継げません。管理パネルの紐付け先修正を使って明示的に変更します。
+UUID競合などでWhitelistの取り込みに失敗した場合は、古い情報による誤操作を防ぐため
+未連携アカウントの選択画面も表示しません。
 
 管理パネルの「サーバー操作」は、「サーバーの管理」権限を持つ管理者だけが
 操作できるエフェメラルUIです。Minecraftを再起動せず、RCON経由で次の
@@ -146,12 +158,16 @@ Discordユーザー表示は通知なしのクリック可能なメンション�
 Discord連携済みの場合は `Minecraft名 (@Discord名) さん` の順で表示します。
 
 Whitelistの再開予定時刻は永続化され、mc-botの再起動後も引き継がれます。
-Minecraftへのアカウント追加・削除は、RCON応答だけでなく実際の `whitelist.json` への
-反映を確認してから登録状態を更新します。Botの登録情報と実Whitelistは定期的に照合され、
+Minecraftへのアカウント追加・削除は、RCON応答だけでなく実際の `whitelist.json` にある
+UUIDへの反映を確認してから登録状態を更新します。Bedrockの `fwhitelist` にはゲーマータグでは
+なくFloodgate UUIDを渡します。Java版は保存UUIDからMojang Session APIで現在名とUUIDの一致を
+確認し、検証済みの現在名だけを名前必須のWhitelistコマンドへ渡します。ゲーム内イベントは
+`usercache.json` から得たUUIDでDiscord登録を照合し、UUID付き登録についてはキャッシュが
+取得できない場合に名前照合へ戻りません。Botの登録情報と実Whitelistは定期的に照合され、
 未反映の管理対象アカウントは再追加されます。管理一覧では両方の件数と未反映状態を確認できます。
-RCON追加が実ファイルへ反映されない場合は、Java UUIDまたはBedrock XUIDをサーバーキャッシュ、
-公式API、公開XboxプロフィールAPIの順で確認し、既存項目を保持したまま `whitelist.json` を
-原子的に更新して `whitelist reload` を実行します。
+RCON操作が実ファイルへ反映されない場合は、Java UUIDまたはBedrock XUIDをサーバーキャッシュ、
+公式API、公開XboxプロフィールAPIの順で確認し、既存項目を保持したまま対象UUIDを
+`whitelist.json` へ原子的に追加・削除して `whitelist reload` を実行します。
 キック・告知・Whitelist・ワールド操作は、実行者のDiscordユーザーIDとともに
 mc-botのログへ記録されます。任意のMinecraftコマンドを入力する機能はありません。
 

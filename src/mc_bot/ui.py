@@ -348,11 +348,19 @@ class AccountSelect(discord.ui.Select):
             description = edition
             if purpose == "relink":
                 current = account.discord_username or f"Discord ID: {account.discord_user_id}"
-                state = " / 削除反映待ち" if account.status == "pending_remove" else ""
+                state = (
+                    " / 削除反映待ち"
+                    if account.status == "pending_remove"
+                    else " / 削除済み"
+                    if account.status == "missing"
+                    else ""
+                )
                 description = f"{edition} / 現在: {current}{state}"[:100]
             elif purpose == "correct_id":
                 current = account.discord_username or f"Discord ID: {account.discord_user_id}"
                 description = f"{edition} / 削除中 / {current}"[:100]
+            elif purpose == "remove" and account.status == "pending_remove":
+                description = f"{edition} / Whitelist解除を再試行"
             options.append(
                 discord.SelectOption(
                     label=account.minecraft_name[:100],
@@ -364,7 +372,7 @@ class AccountSelect(discord.ui.Select):
             "link": "紐付ける既存アカウントを選択",
             "relink": "紐付け先を修正するアカウントを選択",
             "correct_id": "誤登録したMinecraft IDを選択",
-            "remove": "解除するアカウントを選択",
+            "remove": "解除・再試行するアカウントを選択",
         }
         placeholder = placeholders.get(purpose, "Minecraftアカウントを選択")
         super().__init__(placeholder=placeholder, options=options)
@@ -392,9 +400,20 @@ class AccountSelect(discord.ui.Select):
                 MinecraftIdCorrectionModal(self.bot, account.id, account.edition)
             )
             return
+        account = self.accounts[account_id]
+        retrying_removal = account.status == "pending_remove"
         await interaction.response.edit_message(
-            content="このMinecraftアカウントの参加登録を解除しますか?",
-            view=ConfirmRemovalView(self.bot, interaction.user.id, account_id),
+            content=(
+                "このMinecraftアカウントのWhitelist解除を再試行しますか?"
+                if retrying_removal
+                else "このMinecraftアカウントの参加登録を解除しますか?"
+            ),
+            view=ConfirmRemovalView(
+                self.bot,
+                interaction.user.id,
+                account_id,
+                retrying_removal=retrying_removal,
+            ),
         )
 
 
@@ -538,11 +557,20 @@ class ConfirmMinecraftIdCorrectionView(discord.ui.View):
 
 
 class ConfirmRemovalView(discord.ui.View):
-    def __init__(self, bot: MinecraftDiscordBot, owner_id: int, account_id: int) -> None:
+    def __init__(
+        self,
+        bot: MinecraftDiscordBot,
+        owner_id: int,
+        account_id: int,
+        *,
+        retrying_removal: bool = False,
+    ) -> None:
         super().__init__(timeout=120)
         self.bot = bot
         self.owner_id = owner_id
         self.account_id = account_id
+        if retrying_removal:
+            self.confirm.label = "解除を再試行"
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id == self.owner_id:
