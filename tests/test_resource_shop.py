@@ -113,6 +113,7 @@ def test_resource_panel_lists_server_rates_and_is_persistent() -> None:
     panel, select = asyncio.run(build_views())
 
     assert embed.title == "Minecraft 資源交換所"
+    assert "最大 **64個・1スタック**" in str(embed.description)
     assert "`サーバーXP 100` → `エメラルド x4`" in str(embed.fields[0].value)
     assert "`サーバーXP 360` → `エメラルド x16`" in str(embed.fields[0].value)
     assert "足元へドロップ" in str(embed.fields[1].value)
@@ -209,6 +210,35 @@ def test_confirmation_preserves_item_count_and_cost_mapping() -> None:
             item_id="minecraft:diamond",
             item_count=3,
             expected_cost_xp=550,
+        )
+
+    asyncio.run(exercise())
+
+
+def test_confirmation_preserves_one_stack_item_count_and_cost_mapping() -> None:
+    async def exercise() -> None:
+        bot = MinecraftDiscordBot(Config(discord_token="secret"))
+        bot.confirm_minecraft_resource_exchange = AsyncMock(  # type: ignore[method-assign]
+            return_value=None
+        )
+        pack = MinecraftResourcePack("minecraft:diamond", "ダイヤモンド", 64, 11_200)
+        view = MinecraftResourceConfirmView(
+            bot,
+            owner_id=123,
+            request_id="00000000-0000-4000-8000-000000000064",
+            pack=pack,
+            affordable=True,
+        )
+        interaction = AsyncMock()
+
+        await view.confirm.callback(interaction)
+
+        bot.confirm_minecraft_resource_exchange.assert_awaited_once_with(
+            interaction,
+            request_id="00000000-0000-4000-8000-000000000064",
+            item_id="minecraft:diamond",
+            item_count=64,
+            expected_cost_xp=11_200,
         )
 
     asyncio.run(exercise())

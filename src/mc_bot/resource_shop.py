@@ -83,7 +83,8 @@ def minecraft_resource_shop_embed(
         title="Minecraft 資源交換所",
         description=(
             "活動で貯めたサーバーXPをMinecraft内の資源へ交換できます。\n"
-            "連携したMinecraftアカウントでサーバーに参加中のみ交換できます。"
+            "連携したMinecraftアカウントでサーバーに参加中のみ交換できます。\n"
+            "数量は小口から最大 **64個・1スタック** まで選べます。"
         ),
         color=discord.Color.teal(),
     )
