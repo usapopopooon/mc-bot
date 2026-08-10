@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock, Mock
 import discord
 from discord import app_commands
 
-from mc_bot.accounts import MinecraftAccount
+from mc_bot.accounts import AccountStore, MinecraftAccount
 from mc_bot.bot import MinecraftDiscordBot
 from mc_bot.config import Config
 from mc_bot.settings import RuntimeSettings
@@ -12,7 +12,9 @@ from mc_bot.ui import (
     AccountSelect,
     AccountSelectView,
     AdminPanelView,
+    ConfirmMinecraftIdCorrectionView,
     ConfirmRelinkView,
+    MinecraftIdCorrectionModal,
     RegistrationModal,
     ServerControlView,
     TargetUserSelect,
@@ -270,7 +272,8 @@ def test_admin_panel_exposes_server_controls() -> None:
     assert {item.label for item in admin_panel.children} >= {
         "Minecraft読み上げ",
         "Whitelist一覧",
-        "紐付け先を修正",
+        "Minecraft IDを修正",
+        "Discord紐付け先を修正",
         "サーバー操作",
     }
     assert {item.label for item in controls.children} == {
@@ -334,6 +337,38 @@ def test_relink_selects_account_then_new_discord_user() -> None:
     asyncio.run(exercise())
 
 
+def test_minecraft_id_correction_select_opens_name_modal() -> None:
+    async def exercise() -> None:
+        bot = MinecraftDiscordBot(Config(discord_token="secret"))
+        account = MinecraftAccount(
+            id=1,
+            edition="bedrock",
+            minecraft_name="WrongName",
+            server_player_name=".WrongName",
+            player_uuid="uuid-1",
+            discord_user_id=123,
+            discord_username="user",
+            managed=True,
+            source="admin",
+            status="pending_remove",
+            created_by=999,
+            approval_message_id=None,
+        )
+        select = AccountSelect(bot, [account], "correct_id")
+        select._values = ["1"]  # type: ignore[attr-defined]
+        interaction = Mock(spec=discord.Interaction)
+        interaction.response.send_modal = AsyncMock()
+
+        await select.callback(interaction)
+
+        modal = interaction.response.send_modal.await_args.args[0]
+        assert isinstance(modal, MinecraftIdCorrectionModal)
+        assert modal.account_id == 1
+        assert modal.correct_name_label.text == "正しいXboxゲーマータグ"
+
+    asyncio.run(exercise())
+
+
 def test_show_relinkable_accounts_passes_store_results_to_relink_view() -> None:
     async def exercise() -> None:
         bot = MinecraftDiscordBot(Config(discord_token="secret"))
@@ -368,6 +403,41 @@ def test_show_relinkable_accounts_passes_store_results_to_relink_view() -> None:
         assert select.purpose == "relink"
         assert [(option.value, option.label) for option in select.options] == [("1", "Steve")]
         assert select.options[0].description == "Java版 / 現在: wrong-user"
+
+    asyncio.run(exercise())
+
+
+def test_show_pending_removal_corrections_uses_separate_direction() -> None:
+    async def exercise() -> None:
+        bot = MinecraftDiscordBot(Config(discord_token="secret"))
+        bot._require_server_manager = AsyncMock(return_value=True)  # type: ignore[method-assign]
+        account = MinecraftAccount(
+            id=1,
+            edition="java",
+            minecraft_name="WrongName",
+            server_player_name="WrongName",
+            player_uuid=None,
+            discord_user_id=123,
+            discord_username="user",
+            managed=True,
+            source="admin",
+            status="pending_remove",
+            created_by=999,
+            approval_message_id=None,
+        )
+        bot._accounts = Mock()
+        bot._accounts.list_pending_removal_corrections.return_value = [account]
+        interaction = Mock(spec=discord.Interaction)
+        interaction.response.send_message = AsyncMock()
+
+        await bot.show_pending_removal_corrections(interaction)
+
+        bot._accounts.list_pending_removal_corrections.assert_called_once_with()
+        response = interaction.response.send_message.await_args.kwargs
+        assert "誤IDの削除は取り消さず" in interaction.response.send_message.await_args.args[0]
+        select = response["view"].children[0]
+        assert isinstance(select, AccountSelect)
+        assert select.purpose == "correct_id"
 
     asyncio.run(exercise())
 
@@ -598,6 +668,240 @@ def test_reassign_account_link_keeps_recovery_pending_when_whitelist_add_fails()
         assert "紐付け先を <@456> へ変更" in response["content"]
         assert "Whitelistは再反映待ち" in response["content"]
         assert "Botが後から再試行" in response["content"]
+
+    asyncio.run(exercise())
+
+
+def test_confirm_minecraft_id_correction_keeps_wrong_id_deletion() -> None:
+    async def exercise() -> None:
+        bot = MinecraftDiscordBot(Config(discord_token="secret"))
+        bot._require_server_manager = AsyncMock(return_value=True)  # type: ignore[method-assign]
+        old_account = MinecraftAccount(
+            id=1,
+            edition="java",
+            minecraft_name="WrongName",
+            server_player_name="WrongName",
+            player_uuid=None,
+            discord_user_id=123,
+            discord_username="user",
+            managed=True,
+            source="admin",
+            status="pending_remove",
+            created_by=999,
+            approval_message_id=None,
+        )
+        bot._accounts = Mock()
+        bot._accounts.get.return_value = old_account
+        bot._accounts.get_by_server_player_name.return_value = None
+        interaction = Mock(spec=discord.Interaction)
+        interaction.user.id = 999
+        interaction.response.send_message = AsyncMock()
+
+        await bot.confirm_minecraft_id_correction(interaction, 1, "CorrectName")
+
+        response = interaction.response.send_message.await_args.kwargs
+        content = interaction.response.send_message.await_args.args[0]
+        assert "誤登録・削除継続: **WrongName**" in content
+        assert "正しいID: **CorrectName**" in content
+        assert "削除反映待ちは取り消しません" in content
+        assert isinstance(response["view"], ConfirmMinecraftIdCorrectionView)
+        assert response["view"].expected_discord_user_id == 123
+
+    asyncio.run(exercise())
+
+
+def test_confirm_minecraft_id_correction_rejects_id_linked_to_another_user() -> None:
+    async def exercise() -> None:
+        bot = MinecraftDiscordBot(Config(discord_token="secret"))
+        bot._require_server_manager = AsyncMock(return_value=True)  # type: ignore[method-assign]
+        old_account = MinecraftAccount(
+            id=1,
+            edition="java",
+            minecraft_name="WrongName",
+            server_player_name="WrongName",
+            player_uuid=None,
+            discord_user_id=123,
+            discord_username="user",
+            managed=True,
+            source="admin",
+            status="pending_remove",
+            created_by=999,
+            approval_message_id=None,
+        )
+        used_account = MinecraftAccount(
+            id=2,
+            edition="java",
+            minecraft_name="CorrectName",
+            server_player_name="CorrectName",
+            player_uuid=None,
+            discord_user_id=456,
+            discord_username="other-user",
+            managed=True,
+            source="admin",
+            status="active",
+            created_by=999,
+            approval_message_id=None,
+        )
+        bot._accounts = Mock()
+        bot._accounts.get.return_value = old_account
+        bot._accounts.get_by_server_player_name.return_value = used_account
+        interaction = Mock(spec=discord.Interaction)
+        interaction.response.send_message = AsyncMock()
+
+        await bot.confirm_minecraft_id_correction(interaction, 1, "CorrectName")
+
+        content = interaction.response.send_message.await_args.args[0]
+        assert "別のDiscordユーザーに紐付いています" in content
+        assert interaction.response.send_message.await_args.kwargs["ephemeral"] is True
+
+    asyncio.run(exercise())
+
+
+def test_correct_minecraft_id_creates_new_registration_without_restoring_wrong_id(
+    tmp_path,
+) -> None:
+    async def exercise() -> None:
+        accounts_path = tmp_path / "accounts.db"
+        store = AccountStore(accounts_path)
+        store.initialize()
+        old_account = store.create_registration(
+            edition="java",
+            minecraft_name="WrongName",
+            server_player_name="WrongName",
+            discord_user_id=123,
+            discord_username="user",
+            source="admin",
+            status="active",
+            created_by=999,
+        )
+        store.update_status(old_account.id, "pending_remove")
+        bot = MinecraftDiscordBot(Config(discord_token="secret", accounts_path=accounts_path))
+        bot._require_server_manager = AsyncMock(return_value=True)  # type: ignore[method-assign]
+        bot._audit_server_action = Mock()  # type: ignore[method-assign]
+
+        async def mark_added(account: MinecraftAccount) -> None:
+            store.update_status(account.id, "active")
+
+        bot._add_to_whitelist = AsyncMock(side_effect=mark_added)  # type: ignore[method-assign]
+        interaction = Mock(spec=discord.Interaction)
+        interaction.user.id = 999
+        interaction.guild = None
+        interaction.response.edit_message = AsyncMock()
+
+        await bot.correct_pending_removal_minecraft_id(
+            interaction,
+            old_account_id=old_account.id,
+            expected_discord_user_id=123,
+            edition="java",
+            minecraft_name="CorrectName",
+        )
+
+        unchanged_old = store.get(old_account.id)
+        corrected = store.get_by_server_player_name("correctname")
+        assert unchanged_old is not None
+        assert unchanged_old.status == "pending_remove"
+        assert unchanged_old.minecraft_name == "WrongName"
+        assert corrected is not None
+        assert corrected.discord_user_id == 123
+        assert corrected.status == "active"
+        bot._add_to_whitelist.assert_awaited_once()
+        added_account = bot._add_to_whitelist.await_args.args[0]
+        assert added_account.id == corrected.id
+        assert added_account.minecraft_name == "CorrectName"
+        assert added_account.id != unchanged_old.id
+        content = interaction.response.edit_message.await_args.kwargs["content"]
+        assert "正しいMinecraft ID **CorrectName**" in content
+        assert "削除反映待ちはそのまま継続" in content
+
+    asyncio.run(exercise())
+
+
+def test_correct_minecraft_id_keeps_both_actions_pending_when_add_fails(tmp_path) -> None:
+    async def exercise() -> None:
+        accounts_path = tmp_path / "accounts.db"
+        store = AccountStore(accounts_path)
+        store.initialize()
+        old_account = store.create_registration(
+            edition="java",
+            minecraft_name="WrongName",
+            server_player_name="WrongName",
+            discord_user_id=123,
+            discord_username="user",
+            source="admin",
+            status="active",
+            created_by=999,
+        )
+        store.update_status(old_account.id, "pending_remove")
+        bot = MinecraftDiscordBot(Config(discord_token="secret", accounts_path=accounts_path))
+        bot._require_server_manager = AsyncMock(return_value=True)  # type: ignore[method-assign]
+        bot._audit_server_action = Mock()  # type: ignore[method-assign]
+        bot._add_to_whitelist = AsyncMock(side_effect=ValueError("RCON error"))  # type: ignore[method-assign]
+        interaction = Mock(spec=discord.Interaction)
+        interaction.user.id = 999
+        interaction.guild = None
+        interaction.response.edit_message = AsyncMock()
+
+        await bot.correct_pending_removal_minecraft_id(
+            interaction,
+            old_account_id=old_account.id,
+            expected_discord_user_id=123,
+            edition="java",
+            minecraft_name="CorrectName",
+        )
+
+        corrected = store.get_by_server_player_name("CorrectName")
+        assert corrected is not None
+        assert corrected.status == "pending_add"
+        assert store.get(old_account.id).status == "pending_remove"  # type: ignore[union-attr]
+        content = interaction.response.edit_message.await_args.kwargs["content"]
+        assert "Whitelistへの追加は反映待ち" in content
+        assert "誤登録の削除はそのまま継続" in content
+
+    asyncio.run(exercise())
+
+
+def test_correct_minecraft_id_links_existing_unlinked_whitelist(tmp_path) -> None:
+    async def exercise() -> None:
+        whitelist_path = tmp_path / "whitelist.json"
+        whitelist_path.write_text('[{"uuid":"uuid-2","name":"CorrectName"}]')
+        accounts_path = tmp_path / "accounts.db"
+        store = AccountStore(accounts_path)
+        store.initialize()
+        store.import_whitelist(whitelist_path)
+        old_account = store.create_registration(
+            edition="java",
+            minecraft_name="WrongName",
+            server_player_name="WrongName",
+            discord_user_id=123,
+            discord_username="user",
+            source="admin",
+            status="active",
+            created_by=999,
+        )
+        store.update_status(old_account.id, "pending_remove")
+        bot = MinecraftDiscordBot(Config(discord_token="secret", accounts_path=accounts_path))
+        bot._require_server_manager = AsyncMock(return_value=True)  # type: ignore[method-assign]
+        bot._audit_server_action = Mock()  # type: ignore[method-assign]
+        bot._add_to_whitelist = AsyncMock()  # type: ignore[method-assign]
+        interaction = Mock(spec=discord.Interaction)
+        interaction.user.id = 999
+        interaction.guild = None
+        interaction.response.edit_message = AsyncMock()
+
+        await bot.correct_pending_removal_minecraft_id(
+            interaction,
+            old_account_id=old_account.id,
+            expected_discord_user_id=123,
+            edition="java",
+            minecraft_name="CorrectName",
+        )
+
+        corrected = store.get_by_server_player_name("CorrectName")
+        assert corrected is not None
+        assert corrected.discord_user_id == 123
+        assert corrected.managed
+        assert store.get(old_account.id).status == "pending_remove"  # type: ignore[union-attr]
+        bot._add_to_whitelist.assert_not_awaited()
 
     asyncio.run(exercise())
 

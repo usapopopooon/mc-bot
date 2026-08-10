@@ -278,6 +278,7 @@ def test_reassign_cancels_pending_removal_only_in_recovery_mode(tmp_path) -> Non
     store.update_status(account.id, "pending_remove")
 
     assert [item.id for item in store.list_relinkable()] == [account.id]
+    assert [item.id for item in store.list_pending_removal_corrections()] == [account.id]
     try:
         store.reassign_discord_user(
             account.id,

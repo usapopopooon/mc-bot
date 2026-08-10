@@ -487,6 +487,17 @@ class AccountStore:
             ).fetchone()
         return _account(row) if row is not None else None
 
+    def get_by_server_player_name(self, player_name: str) -> MinecraftAccount | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT * FROM minecraft_accounts
+                WHERE server_player_name = ? COLLATE NOCASE
+                """,
+                (player_name,),
+            ).fetchone()
+        return _account(row) if row is not None else None
+
     def list_for_discord_user(self, discord_user_id: int) -> list[MinecraftAccount]:
         with self._connect() as connection:
             rows = connection.execute(
@@ -520,6 +531,19 @@ class AccountStore:
                 SELECT * FROM minecraft_accounts
                 WHERE discord_user_id IS NOT NULL
                   AND status IN ('active', 'pending_add', 'pending_remove')
+                ORDER BY edition, minecraft_name COLLATE NOCASE
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        return [_account(row) for row in rows]
+
+    def list_pending_removal_corrections(self, limit: int = 25) -> list[MinecraftAccount]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM minecraft_accounts
+                WHERE discord_user_id IS NOT NULL AND status = 'pending_remove'
                 ORDER BY edition, minecraft_name COLLATE NOCASE
                 LIMIT ?
                 """,

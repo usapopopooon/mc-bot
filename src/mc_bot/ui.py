@@ -109,7 +109,7 @@ class AdminPanelView(discord.ui.View):
             await self.bot.show_unlinked_accounts(interaction)
 
     @discord.ui.button(
-        label="紐付け先を修正",
+        label="Discord紐付け先を修正",
         emoji="🛠️",
         style=discord.ButtonStyle.secondary,
         custom_id="mc-admin:relink-existing",
@@ -118,6 +118,19 @@ class AdminPanelView(discord.ui.View):
     async def relink_existing(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if await self.bot.validate_panel_interaction(interaction, admin=True):
             await self.bot.show_relinkable_accounts(interaction)
+
+    @discord.ui.button(
+        label="Minecraft IDを修正",
+        emoji="✏️",
+        style=discord.ButtonStyle.secondary,
+        custom_id="mc-admin:correct-minecraft-id",
+        row=1,
+    )
+    async def correct_minecraft_id(
+        self, interaction: discord.Interaction, _: discord.ui.Button
+    ) -> None:
+        if await self.bot.validate_panel_interaction(interaction, admin=True):
+            await self.bot.show_pending_removal_corrections(interaction)
 
     @discord.ui.button(
         label="登録状況",
@@ -331,6 +344,9 @@ class AccountSelect(discord.ui.Select):
                 current = account.discord_username or f"Discord ID: {account.discord_user_id}"
                 state = " / 削除反映待ち" if account.status == "pending_remove" else ""
                 description = f"{edition} / 現在: {current}{state}"[:100]
+            elif purpose == "correct_id":
+                current = account.discord_username or f"Discord ID: {account.discord_user_id}"
+                description = f"{edition} / 削除中 / {current}"[:100]
             options.append(
                 discord.SelectOption(
                     label=account.minecraft_name[:100],
@@ -341,12 +357,14 @@ class AccountSelect(discord.ui.Select):
         placeholders = {
             "link": "紐付ける既存アカウントを選択",
             "relink": "紐付け先を修正するアカウントを選択",
+            "correct_id": "誤登録したMinecraft IDを選択",
             "remove": "解除するアカウントを選択",
         }
         placeholder = placeholders.get(purpose, "Minecraftアカウントを選択")
         super().__init__(placeholder=placeholder, options=options)
         self.bot = bot
         self.purpose = purpose
+        self.accounts = {account.id: account for account in accounts}
 
     async def callback(self, interaction: discord.Interaction) -> None:
         account_id = int(self.values[0])
@@ -360,6 +378,12 @@ class AccountSelect(discord.ui.Select):
             await interaction.response.edit_message(
                 content="新しい紐付け先のDiscordユーザーを選択してください。",
                 view=TargetUserView(self.bot, purpose="relink", account_id=account_id),
+            )
+            return
+        if self.purpose == "correct_id":
+            account = self.accounts[account_id]
+            await interaction.response.send_modal(
+                MinecraftIdCorrectionModal(self.bot, account.id, account.edition)
             )
             return
         await interaction.response.edit_message(
@@ -434,6 +458,73 @@ class ConfirmRelinkView(discord.ui.View):
     @discord.ui.button(label="キャンセル", style=discord.ButtonStyle.secondary)
     async def cancel(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         await interaction.response.edit_message(content="変更をキャンセルしました。", view=None)
+
+
+class MinecraftIdCorrectionModal(discord.ui.Modal):
+    def __init__(self, bot: MinecraftDiscordBot, account_id: int, edition: str) -> None:
+        edition_label = "Java版" if edition == "java" else "Bedrock版"
+        super().__init__(title=f"{edition_label}のMinecraft IDを修正")
+        self.bot = bot
+        self.account_id = account_id
+        label = "正しいプレイヤー名" if edition == "java" else "正しいXboxゲーマータグ"
+        self.correct_name = discord.ui.TextInput(
+            placeholder="Minecraft内で実際に表示される名前",
+            min_length=1,
+            max_length=16 if edition == "java" else 32,
+        )
+        self.correct_name_label = discord.ui.Label(
+            text=label,
+            description="ゲーム内でキャラクターの頭上に表示される名前",
+            component=self.correct_name,
+        )
+        self.add_item(self.correct_name_label)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        await self.bot.confirm_minecraft_id_correction(
+            interaction,
+            self.account_id,
+            str(self.correct_name),
+        )
+
+
+class ConfirmMinecraftIdCorrectionView(discord.ui.View):
+    def __init__(
+        self,
+        bot: MinecraftDiscordBot,
+        *,
+        owner_id: int,
+        old_account_id: int,
+        expected_discord_user_id: int,
+        edition: str,
+        minecraft_name: str,
+    ) -> None:
+        super().__init__(timeout=120)
+        self.bot = bot
+        self.owner_id = owner_id
+        self.old_account_id = old_account_id
+        self.expected_discord_user_id = expected_discord_user_id
+        self.edition = edition
+        self.minecraft_name = minecraft_name
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id == self.owner_id:
+            return True
+        await interaction.response.send_message("この確認画面は操作できません。", ephemeral=True)
+        return False
+
+    @discord.ui.button(label="正しいIDへ修正", style=discord.ButtonStyle.danger)
+    async def confirm(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await self.bot.correct_pending_removal_minecraft_id(
+            interaction,
+            old_account_id=self.old_account_id,
+            expected_discord_user_id=self.expected_discord_user_id,
+            edition=self.edition,
+            minecraft_name=self.minecraft_name,
+        )
+
+    @discord.ui.button(label="キャンセル", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await interaction.response.edit_message(content="修正をキャンセルしました。", view=None)
 
 
 class ConfirmRemovalView(discord.ui.View):

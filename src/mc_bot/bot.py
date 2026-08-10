@@ -100,6 +100,7 @@ from mc_bot.ui import (
     AccountSelectView,
     AdminPanelView,
     ApprovalView,
+    ConfirmMinecraftIdCorrectionView,
     ConfirmRegistrationView,
     ConfirmRelinkView,
     KickPlayerSelectView,
@@ -1229,6 +1230,231 @@ class MinecraftDiscordBot(discord.Client):
             "\n通常はWhitelistを変更しません。削除反映待ちは削除を取り消して復旧します。",
             view=AccountSelectView(self, accounts, "relink"),
             ephemeral=True,
+        )
+
+    async def show_pending_removal_corrections(self, interaction: discord.Interaction) -> None:
+        if not await self._require_server_manager(interaction):
+            return
+        accounts = await asyncio.to_thread(self._accounts.list_pending_removal_corrections)
+        if not accounts:
+            await interaction.response.send_message(
+                "Minecraft IDを修正できる削除反映待ちの登録はありません。",
+                ephemeral=True,
+            )
+            return
+        await interaction.response.send_message(
+            "誤って登録したMinecraft IDを選択してください。\n"
+            "誤IDの削除は取り消さず、同じDiscordユーザーへ正しいIDを登録します。",
+            view=AccountSelectView(self, accounts, "correct_id"),
+            ephemeral=True,
+        )
+
+    async def confirm_minecraft_id_correction(
+        self,
+        interaction: discord.Interaction,
+        account_id: int,
+        minecraft_name: str,
+    ) -> None:
+        if not await self._require_server_manager(interaction):
+            return
+        old_account = await asyncio.to_thread(self._accounts.get, account_id)
+        if (
+            old_account is None
+            or old_account.discord_user_id is None
+            or old_account.status not in {"pending_remove", "missing"}
+        ):
+            await interaction.response.send_message(
+                "この登録はMinecraft ID修正の対象ではありません。",
+                ephemeral=True,
+            )
+            return
+        try:
+            normalized_name, server_name = self._normalize_player_name(
+                old_account.edition, minecraft_name
+            )
+        except ValueError as error:
+            await interaction.response.send_message(str(error), ephemeral=True)
+            return
+        if server_name.casefold() == old_account.server_player_name.casefold():
+            await interaction.response.send_message(
+                "現在削除中のMinecraft IDと同じです。正しい別のIDを入力してください。",
+                ephemeral=True,
+            )
+            return
+        existing = await asyncio.to_thread(self._accounts.get_by_server_player_name, server_name)
+        if (
+            existing is not None
+            and existing.status != "missing"
+            and existing.discord_user_id not in {None, old_account.discord_user_id}
+        ):
+            await interaction.response.send_message(
+                "正しいMinecraft IDは別のDiscordユーザーに紐付いています。"
+                "先にDiscord側の紐付け先修正を行ってください。",
+                ephemeral=True,
+            )
+            return
+        if existing is not None and existing.status not in {
+            "active",
+            "pending_add",
+            "missing",
+        }:
+            await interaction.response.send_message(
+                "正しいMinecraft IDには処理中の登録があります。処理完了後に再試行してください。",
+                ephemeral=True,
+            )
+            return
+        edition_label = "Java版" if old_account.edition == "java" else "Bedrock版"
+        if existing is not None and existing.status == "active":
+            registration_action = (
+                "既存Whitelistを同じDiscordユーザーへ紐付けます。"
+                if existing.discord_user_id is None
+                else "正しいMinecraft IDはすでに同じDiscordユーザーへ登録済みです。"
+            )
+        elif existing is not None and existing.status == "pending_add":
+            registration_action = "正しいMinecraft IDは追加反映待ちです。"
+        else:
+            registration_action = "正しいMinecraft IDを新しくWhitelistへ登録します。"
+        old_registration_action = (
+            "誤登録・削除済み" if old_account.status == "missing" else "誤登録・削除継続"
+        )
+        old_deletion_note = (
+            "誤登録はすでに削除済みです。"
+            if old_account.status == "missing"
+            else "誤登録の削除反映待ちは取り消しません。"
+        )
+        await interaction.response.send_message(
+            "次の内容でMinecraft IDを修正します。\n\n"
+            f"Discord: <@{old_account.discord_user_id}>\n"
+            f"エディション: **{edition_label}**\n"
+            f"{old_registration_action}: "
+            f"**{discord.utils.escape_markdown(old_account.minecraft_name)}**\n"
+            f"正しいID: **{discord.utils.escape_markdown(normalized_name)}**\n\n"
+            f"{registration_action}\n"
+            f"{old_deletion_note}",
+            view=ConfirmMinecraftIdCorrectionView(
+                self,
+                owner_id=interaction.user.id,
+                old_account_id=old_account.id,
+                expected_discord_user_id=old_account.discord_user_id,
+                edition=old_account.edition,
+                minecraft_name=normalized_name,
+            ),
+            ephemeral=True,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+    async def correct_pending_removal_minecraft_id(
+        self,
+        interaction: discord.Interaction,
+        *,
+        old_account_id: int,
+        expected_discord_user_id: int,
+        edition: str,
+        minecraft_name: str,
+    ) -> None:
+        if not await self._require_server_manager(interaction):
+            return
+        old_account = await asyncio.to_thread(self._accounts.get, old_account_id)
+        if (
+            old_account is None
+            or old_account.discord_user_id != expected_discord_user_id
+            or old_account.edition != edition
+            or old_account.status not in {"pending_remove", "missing"}
+        ):
+            await interaction.response.edit_message(
+                content="誤登録の状態または紐付け情報が変更されたため、最初からやり直してください。",
+                view=None,
+            )
+            return
+        try:
+            normalized_name, server_name = self._normalize_player_name(edition, minecraft_name)
+        except ValueError as error:
+            await interaction.response.edit_message(content=str(error), view=None)
+            return
+        if server_name.casefold() == old_account.server_player_name.casefold():
+            await interaction.response.edit_message(
+                content="誤登録と同じMinecraft IDには修正できません。",
+                view=None,
+            )
+            return
+        existing = await asyncio.to_thread(self._accounts.get_by_server_player_name, server_name)
+        discord_username = old_account.discord_username or str(expected_discord_user_id)
+        if interaction.guild is not None:
+            target = interaction.guild.get_member(expected_discord_user_id)
+            if target is not None:
+                discord_username = target.display_name
+        try:
+            if existing is None or existing.status == "missing":
+                corrected = await asyncio.to_thread(
+                    self._accounts.create_registration,
+                    edition=edition,
+                    minecraft_name=normalized_name,
+                    server_player_name=server_name,
+                    discord_user_id=expected_discord_user_id,
+                    discord_username=discord_username,
+                    source="admin",
+                    status="pending_add",
+                    created_by=interaction.user.id,
+                )
+            elif existing.status == "active" and existing.discord_user_id is None:
+                corrected = await asyncio.to_thread(
+                    self._accounts.link_existing,
+                    existing.id,
+                    discord_user_id=expected_discord_user_id,
+                    discord_username=discord_username,
+                    managed=old_account.managed,
+                    created_by=interaction.user.id,
+                )
+            elif existing.discord_user_id == expected_discord_user_id and existing.status in {
+                "active",
+                "pending_add",
+            }:
+                corrected = existing
+            else:
+                raise ValueError(
+                    "正しいMinecraft IDは別の登録で使用されています。状態を確認してください。"
+                )
+        except ValueError as error:
+            await interaction.response.edit_message(content=str(error), view=None)
+            return
+
+        add_error: OSError | RconError | RuntimeError | ValueError | None = None
+        if corrected.status == "pending_add":
+            try:
+                await self._add_to_whitelist(corrected)
+            except (OSError, RconError, RuntimeError, ValueError) as error:
+                add_error = error
+        self._audit_server_action(
+            interaction,
+            "minecraft id correction "
+            f"old_account_id={old_account.id} old_name={old_account.server_player_name!r} "
+            f"new_account_id={corrected.id} new_name={server_name!r} "
+            f"discord_user_id={expected_discord_user_id}",
+        )
+        if add_error is not None:
+            await interaction.response.edit_message(
+                content=(
+                    f"⚠️ 正しいMinecraft ID "
+                    f"**{discord.utils.escape_markdown(normalized_name)}** を保存しましたが、"
+                    f"Whitelistへの追加は反映待ちです: {add_error}\n"
+                    "誤登録の削除はそのまま継続し、正しいIDの追加はBotが再試行します。"
+                ),
+                view=None,
+            )
+            return
+        deletion_state = (
+            "誤登録は削除済みです。"
+            if old_account.status == "missing"
+            else "誤登録の削除反映待ちはそのまま継続します。"
+        )
+        await interaction.response.edit_message(
+            content=(
+                f"✅ <@{expected_discord_user_id}> に正しいMinecraft ID "
+                f"**{discord.utils.escape_markdown(normalized_name)}** を登録しました。\n"
+                f"{deletion_state}"
+            ),
+            view=None,
+            allowed_mentions=discord.AllowedMentions.none(),
         )
 
     async def link_existing_account(
