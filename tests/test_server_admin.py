@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 
 import mc_bot.bot as bot_module
-from mc_bot.accounts import AccountStore
+from mc_bot.accounts import WHITELIST_RETRY_LIMIT, AccountStore
 from mc_bot.bot import MinecraftDiscordBot
 from mc_bot.config import Config
 from mc_bot.server_admin import (
@@ -592,6 +592,39 @@ def test_sync_repairs_managed_registration_missing_from_whitelist(tmp_path) -> N
     assert read_whitelisted_players(whitelist_path) == ["Steve"]
 
 
+def test_pending_whitelist_reconciliation_stops_after_retry_limit(tmp_path) -> None:
+    async def exercise() -> None:
+        accounts_path = tmp_path / "accounts.db"
+        store = AccountStore(accounts_path)
+        store.initialize()
+        account = store.create_registration(
+            edition="java",
+            minecraft_name="Missing",
+            server_player_name="Missing",
+            discord_user_id=123,
+            discord_username="hoge",
+            source="self",
+            status="pending_add",
+            created_by=123,
+        )
+        bot = MinecraftDiscordBot(Config(discord_token="secret", accounts_path=accounts_path))
+        bot._add_to_whitelist = AsyncMock(  # type: ignore[method-assign]
+            side_effect=ValueError("Minecraft IDが存在しません")
+        )
+
+        for _ in range(WHITELIST_RETRY_LIMIT + 2):
+            await bot._reconcile_pending_actions()
+
+        assert bot._add_to_whitelist.await_count == WHITELIST_RETRY_LIMIT
+        failed = store.get(account.id)
+        assert failed is not None
+        assert failed.status == "pending_add"
+        assert failed.whitelist_retry_count == WHITELIST_RETRY_LIMIT
+        assert failed.whitelist_last_error == "Minecraft IDが存在しません"
+
+    asyncio.run(exercise())
+
+
 def test_whitelist_overview_includes_unreflected_registrations(tmp_path) -> None:
     whitelist_path = tmp_path / "whitelist.json"
     whitelist_path.write_text(
@@ -611,7 +644,13 @@ def test_whitelist_overview_includes_unreflected_registrations(tmp_path) -> None
         status="pending_add",
         created_by=123,
     )
-    store.update_status(account.id, "active")
+    store.update_status(account.id, "pending_add")
+    for attempt in range(WHITELIST_RETRY_LIMIT):
+        store.record_whitelist_retry_failure(
+            account.id,
+            expected_status="pending_add",
+            error=f"failure {attempt + 1}",
+        )
     bot = MinecraftDiscordBot(
         Config(
             discord_token="secret",
@@ -630,4 +669,7 @@ def test_whitelist_overview_includes_unreflected_registrations(tmp_path) -> None
     embed = message["embed"]
     assert embed.title == "🛡️ Whitelist一覧 (実登録1件 / 登録情報1件)"
     assert "**Steve** (未連携)" in embed.description
-    assert "**.MissingUser (<@123>)**  ⚠️ Whitelist未反映" in embed.description
+    assert (
+        "**.MissingUser (<@123>)**  ⚠️ Whitelist追加失敗"
+        "\uff08自動再試行停止\uff09" in embed.description
+    )

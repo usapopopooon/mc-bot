@@ -5,7 +5,7 @@ import discord
 import pytest
 from discord import app_commands
 
-from mc_bot.accounts import AccountStore, MinecraftAccount
+from mc_bot.accounts import WHITELIST_RETRY_LIMIT, AccountStore, MinecraftAccount
 from mc_bot.bot import MinecraftDiscordBot
 from mc_bot.config import Config
 from mc_bot.settings import RuntimeSettings
@@ -96,6 +96,27 @@ def test_keeps_already_classic_bedrock_gamertag_unchanged() -> None:
         "yuki19911261",
         ".yuki19911261",
     )
+
+
+def test_account_line_shows_when_automatic_whitelist_retries_stopped() -> None:
+    account = MinecraftAccount(
+        id=1,
+        edition="bedrock",
+        minecraft_name="Missing",
+        server_player_name=".Missing",
+        player_uuid=None,
+        discord_user_id=123,
+        discord_username="user",
+        managed=True,
+        source="self",
+        status="pending_add",
+        created_by=123,
+        approval_message_id=None,
+        whitelist_retry_count=WHITELIST_RETRY_LIMIT,
+        whitelist_last_error="Minecraft IDが存在しません",
+    )
+
+    assert "追加失敗\uff08自動再試行停止\uff09" in MinecraftDiscordBot._account_line(account)
 
 
 @pytest.mark.parametrize("source", ["self", "admin"])
@@ -943,6 +964,7 @@ def test_correct_minecraft_id_creates_new_registration_without_restoring_wrong_i
         interaction.user.id = 999
         interaction.guild = None
         interaction.response.edit_message = AsyncMock()
+        interaction.edit_original_response = AsyncMock()
 
         await bot.correct_pending_removal_minecraft_id(
             interaction,
@@ -965,7 +987,11 @@ def test_correct_minecraft_id_creates_new_registration_without_restoring_wrong_i
         assert added_account.id == corrected.id
         assert added_account.minecraft_name == "CorrectName"
         assert added_account.id != unchanged_old.id
-        content = interaction.response.edit_message.await_args.kwargs["content"]
+        interaction.response.edit_message.assert_awaited_once_with(
+            content="⏳ Minecraft IDを確認しています…",
+            view=None,
+        )
+        content = interaction.edit_original_response.await_args.kwargs["content"]
         assert "正しいMinecraft ID **CorrectName**" in content
         assert "削除反映待ちはそのまま継続" in content
 
@@ -1000,6 +1026,7 @@ def test_correct_minecraft_id_commit_stores_normalized_bedrock_name(tmp_path) ->
         interaction.user.id = 999
         interaction.guild = None
         interaction.response.edit_message = AsyncMock()
+        interaction.edit_original_response = AsyncMock()
 
         await bot.correct_pending_removal_minecraft_id(
             interaction,
@@ -1015,7 +1042,11 @@ def test_correct_minecraft_id_commit_stores_normalized_bedrock_name(tmp_path) ->
         assert corrected.status == "active"
         added_account = bot._add_to_whitelist.await_args.args[0]
         assert added_account.server_player_name == ".yuki19911261"
-        content = interaction.response.edit_message.await_args.kwargs["content"]
+        interaction.response.edit_message.assert_awaited_once_with(
+            content="⏳ Minecraft IDを確認しています…",
+            view=None,
+        )
+        content = interaction.edit_original_response.await_args.kwargs["content"]
         assert "yuki19911261" in content
         assert "#1261" not in content
 
@@ -1041,11 +1072,22 @@ def test_correct_minecraft_id_keeps_both_actions_pending_when_add_fails(tmp_path
         bot = MinecraftDiscordBot(Config(discord_token="secret", accounts_path=accounts_path))
         bot._require_server_manager = AsyncMock(return_value=True)  # type: ignore[method-assign]
         bot._audit_server_action = Mock()  # type: ignore[method-assign]
-        bot._add_to_whitelist = AsyncMock(side_effect=ValueError("RCON error"))  # type: ignore[method-assign]
+
+        async def reject_missing_id(_: MinecraftAccount) -> None:
+            interaction.response.edit_message.assert_awaited_once_with(
+                content="⏳ Minecraft IDを確認しています…",
+                view=None,
+            )
+            raise ValueError("Minecraft IDが存在しません")
+
+        bot._add_to_whitelist = AsyncMock(  # type: ignore[method-assign]
+            side_effect=reject_missing_id
+        )
         interaction = Mock(spec=discord.Interaction)
         interaction.user.id = 999
         interaction.guild = None
         interaction.response.edit_message = AsyncMock()
+        interaction.edit_original_response = AsyncMock()
 
         await bot.correct_pending_removal_minecraft_id(
             interaction,
@@ -1059,7 +1101,8 @@ def test_correct_minecraft_id_keeps_both_actions_pending_when_add_fails(tmp_path
         assert corrected is not None
         assert corrected.status == "pending_add"
         assert store.get(old_account.id).status == "pending_remove"  # type: ignore[union-attr]
-        content = interaction.response.edit_message.await_args.kwargs["content"]
+        content = interaction.edit_original_response.await_args.kwargs["content"]
+        assert "Minecraft IDが存在しません" in content
         assert "Whitelistへの追加は反映待ち" in content
         assert "誤登録の削除はそのまま継続" in content
 
@@ -1093,6 +1136,7 @@ def test_correct_minecraft_id_links_existing_unlinked_whitelist(tmp_path) -> Non
         interaction.user.id = 999
         interaction.guild = None
         interaction.response.edit_message = AsyncMock()
+        interaction.edit_original_response = AsyncMock()
 
         await bot.correct_pending_removal_minecraft_id(
             interaction,
@@ -1108,6 +1152,11 @@ def test_correct_minecraft_id_links_existing_unlinked_whitelist(tmp_path) -> Non
         assert corrected.managed
         assert store.get(old_account.id).status == "pending_remove"  # type: ignore[union-attr]
         bot._add_to_whitelist.assert_not_awaited()
+        interaction.response.edit_message.assert_awaited_once_with(
+            content="⏳ Minecraft IDを確認しています…",
+            view=None,
+        )
+        interaction.edit_original_response.assert_awaited_once()
 
     asyncio.run(exercise())
 

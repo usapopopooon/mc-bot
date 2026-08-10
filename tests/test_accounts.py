@@ -3,7 +3,7 @@ import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from threading import Barrier
 
-from mc_bot.accounts import AccountStore
+from mc_bot.accounts import WHITELIST_RETRY_LIMIT, AccountStore
 
 
 def test_initialize_adds_minecraft_reward_delivery_column_to_existing_database(
@@ -33,6 +33,104 @@ def test_initialize_adds_minecraft_reward_delivery_column_to_existing_database(
             row[1] for row in connection.execute("PRAGMA table_info(minecraft_advancement_rewards)")
         }
     assert "minecraft_reward_delivered" in columns
+
+
+def test_whitelist_retry_migration_preserves_existing_accounts(tmp_path) -> None:
+    database = tmp_path / "accounts.db"
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            """
+            CREATE TABLE minecraft_accounts (
+                id INTEGER PRIMARY KEY,
+                edition TEXT NOT NULL,
+                minecraft_name TEXT NOT NULL,
+                server_player_name TEXT NOT NULL COLLATE NOCASE UNIQUE,
+                player_uuid TEXT,
+                discord_user_id INTEGER,
+                discord_username TEXT,
+                managed INTEGER NOT NULL DEFAULT 0,
+                source TEXT NOT NULL,
+                status TEXT NOT NULL,
+                created_by INTEGER,
+                approval_message_id INTEGER,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO minecraft_accounts (
+                edition, minecraft_name, server_player_name, managed, source,
+                status, created_at, updated_at
+            ) VALUES ('java', 'Steve', 'Steve', 1, 'self', 'pending_add', 'old', 'old')
+            """
+        )
+
+    AccountStore(database).initialize()
+
+    with sqlite3.connect(database) as connection:
+        row = connection.execute(
+            """
+            SELECT minecraft_name, status, whitelist_retry_count, whitelist_last_error
+            FROM minecraft_accounts WHERE server_player_name = 'Steve'
+            """
+        ).fetchone()
+    assert row is not None
+    assert tuple(row) == ("Steve", "pending_add", 0, None)
+
+
+def test_whitelist_retry_failures_persist_and_stop_at_limit(tmp_path) -> None:
+    store = AccountStore(tmp_path / "accounts.db")
+    store.initialize()
+    account = store.create_registration(
+        edition="java",
+        minecraft_name="Missing",
+        server_player_name="Missing",
+        discord_user_id=123,
+        discord_username="hoge",
+        source="self",
+        status="pending_add",
+        created_by=123,
+    )
+
+    for attempt in range(1, WHITELIST_RETRY_LIMIT + 1):
+        attempts, exhausted = store.record_whitelist_retry_failure(
+            account.id,
+            expected_status="pending_add",
+            error=f"failure {attempt}",
+        )
+        assert attempts == attempt
+        assert exhausted is (attempt == WHITELIST_RETRY_LIMIT)
+
+    failed = store.get(account.id)
+    assert failed is not None
+    assert failed.status == "pending_add"
+    assert failed.whitelist_retry_count == WHITELIST_RETRY_LIMIT
+    assert failed.whitelist_last_error == f"failure {WHITELIST_RETRY_LIMIT}"
+    assert store.list_pending_actions() == []
+
+    store.update_status(account.id, "pending_add")
+
+    reset = store.get(account.id)
+    assert reset is not None
+    assert reset.whitelist_retry_count == 0
+    assert reset.whitelist_last_error is None
+    assert [item.id for item in store.list_pending_actions()] == [account.id]
+
+    store.update_status(account.id, "pending_remove")
+    for _ in range(WHITELIST_RETRY_LIMIT):
+        store.record_whitelist_retry_failure(
+            account.id,
+            expected_status="pending_remove",
+            error="remove failed",
+        )
+
+    failed_remove = store.get(account.id)
+    assert failed_remove is not None
+    assert failed_remove.status == "pending_remove"
+    assert failed_remove.whitelist_retry_count == WHITELIST_RETRY_LIMIT
+    assert store.list_pending_actions() == []
 
 
 def test_public_delivery_migration_does_not_replay_existing_combo_events(tmp_path) -> None:

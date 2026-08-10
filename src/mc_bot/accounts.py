@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
+WHITELIST_RETRY_LIMIT = 5
+
 
 @dataclass(frozen=True, slots=True)
 class MinecraftAccount:
@@ -22,6 +24,8 @@ class MinecraftAccount:
     status: str
     created_by: int | None
     approval_message_id: int | None
+    whitelist_retry_count: int = 0
+    whitelist_last_error: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -130,6 +134,9 @@ class AccountStore:
                     ),
                     created_by INTEGER,
                     approval_message_id INTEGER,
+                    whitelist_retry_count INTEGER NOT NULL DEFAULT 0
+                        CHECK (whitelist_retry_count >= 0),
+                    whitelist_last_error TEXT,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
@@ -315,6 +322,7 @@ class AccountStore:
                 "minecraft_woodcutting_combo_rewards",
             )
             self._add_resource_exchange_notification_columns(connection)
+            self._add_whitelist_retry_columns(connection)
 
     @staticmethod
     def _add_public_delivery_columns(connection: sqlite3.Connection, table: str) -> None:
@@ -350,6 +358,27 @@ class AccountStore:
                 """
             )
             connection.execute(f"UPDATE {table} SET {column} = 1")
+
+    @staticmethod
+    def _add_whitelist_retry_columns(connection: sqlite3.Connection) -> None:
+        columns = {
+            row["name"] for row in connection.execute("PRAGMA table_info(minecraft_accounts)")
+        }
+        if "whitelist_retry_count" not in columns:
+            connection.execute(
+                """
+                ALTER TABLE minecraft_accounts
+                ADD COLUMN whitelist_retry_count INTEGER NOT NULL DEFAULT 0
+                    CHECK (whitelist_retry_count >= 0)
+                """
+            )
+        if "whitelist_last_error" not in columns:
+            connection.execute(
+                """
+                ALTER TABLE minecraft_accounts
+                ADD COLUMN whitelist_last_error TEXT
+                """
+            )
 
     def import_whitelist(self, whitelist_path: Path, bedrock_prefix: str = ".") -> int:
         if not whitelist_path.exists():
@@ -424,7 +453,9 @@ class AccountStore:
                     UPDATE minecraft_accounts
                     SET edition = ?, minecraft_name = ?, discord_user_id = ?,
                         discord_username = ?, managed = 1, source = ?, status = ?,
-                        created_by = ?, approval_message_id = NULL, updated_at = ?
+                        created_by = ?, approval_message_id = NULL,
+                        whitelist_retry_count = 0, whitelist_last_error = NULL,
+                        updated_at = ?
                     WHERE id = ?
                     """,
                     (
@@ -568,10 +599,43 @@ class AccountStore:
                 """
                 SELECT * FROM minecraft_accounts
                 WHERE status IN ('pending_add', 'pending_remove')
+                  AND whitelist_retry_count < ?
                 ORDER BY updated_at
-                """
+                """,
+                (WHITELIST_RETRY_LIMIT,),
             ).fetchall()
         return [_account(row) for row in rows]
+
+    def record_whitelist_retry_failure(
+        self,
+        account_id: int,
+        *,
+        expected_status: str,
+        error: str,
+    ) -> tuple[int, bool]:
+        if expected_status not in {"pending_add", "pending_remove"}:
+            raise ValueError("Whitelist retry status must be pending_add or pending_remove")
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE minecraft_accounts
+                SET whitelist_retry_count = whitelist_retry_count + 1,
+                    whitelist_last_error = ?, updated_at = ?
+                WHERE id = ? AND status = ?
+                """,
+                (error[:1000], _now(), account_id, expected_status),
+            )
+            if cursor.rowcount != 1:
+                return 0, False
+            row = connection.execute(
+                """
+                SELECT whitelist_retry_count FROM minecraft_accounts
+                WHERE id = ?
+                """,
+                (account_id,),
+            ).fetchone()
+        attempts = int(row["whitelist_retry_count"]) if row is not None else 0
+        return attempts, attempts >= WHITELIST_RETRY_LIMIT
 
     def list_whitelist_registrations(self) -> list[MinecraftAccount]:
         with self._connect() as connection:
@@ -614,7 +678,8 @@ class AccountStore:
                     connection.execute(
                         """
                         UPDATE minecraft_accounts
-                        SET status = ?, updated_at = ?
+                        SET status = ?, whitelist_retry_count = 0,
+                            whitelist_last_error = NULL, updated_at = ?
                         WHERE id = ?
                         """,
                         (new_status, now, row["id"]),
@@ -1842,6 +1907,7 @@ class AccountStore:
                         WHEN status IN ('pending_remove', 'missing') THEN 'pending_add'
                         ELSE status
                     END,
+                    whitelist_retry_count = 0, whitelist_last_error = NULL,
                     updated_at = ?
                 WHERE id = ? AND discord_user_id = ?
                   AND status IN (?, ?)
@@ -1867,7 +1933,8 @@ class AccountStore:
             connection.execute(
                 """
                 UPDATE minecraft_accounts
-                SET status = ?, updated_at = ?
+                SET status = ?, whitelist_retry_count = 0,
+                    whitelist_last_error = NULL, updated_at = ?
                 WHERE id = ?
                 """,
                 (status, _now(), account_id),
@@ -1964,6 +2031,8 @@ def _account(row: sqlite3.Row) -> MinecraftAccount:
         status=row["status"],
         created_by=row["created_by"],
         approval_message_id=row["approval_message_id"],
+        whitelist_retry_count=row["whitelist_retry_count"],
+        whitelist_last_error=row["whitelist_last_error"],
     )
 
 

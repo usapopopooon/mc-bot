@@ -15,6 +15,7 @@ import discord
 from discord import app_commands
 
 from mc_bot.accounts import (
+    WHITELIST_RETRY_LIMIT,
     AccountStore,
     FishingComboRewardEvent,
     MinecraftAccount,
@@ -1174,7 +1175,8 @@ class MinecraftDiscordBot(discord.Client):
         except (OSError, RconError, RuntimeError, ValueError) as error:
             LOGGER.warning("Could not add account through RCON: %s", error)
             await interaction.followup.send(
-                "登録を保存しましたが、Minecraftへの反映待ちです。管理者に通知してください。",
+                "登録を保存しましたが、Minecraftへの反映待ちです。"
+                f"Botが最大{WHITELIST_RETRY_LIMIT}回まで自動再試行します。",
                 ephemeral=True,
             )
             return
@@ -1363,6 +1365,10 @@ class MinecraftDiscordBot(discord.Client):
     ) -> None:
         if not await self._require_server_manager(interaction):
             return
+        await interaction.response.edit_message(
+            content="⏳ Minecraft IDを確認しています…",
+            view=None,
+        )
         old_account = await asyncio.to_thread(self._accounts.get, old_account_id)
         if (
             old_account is None
@@ -1370,7 +1376,7 @@ class MinecraftDiscordBot(discord.Client):
             or old_account.edition != edition
             or old_account.status not in {"pending_remove", "missing"}
         ):
-            await interaction.response.edit_message(
+            await interaction.edit_original_response(
                 content="誤登録の状態または紐付け情報が変更されたため、最初からやり直してください。",
                 view=None,
             )
@@ -1378,10 +1384,10 @@ class MinecraftDiscordBot(discord.Client):
         try:
             normalized_name, server_name = self._normalize_player_name(edition, minecraft_name)
         except ValueError as error:
-            await interaction.response.edit_message(content=str(error), view=None)
+            await interaction.edit_original_response(content=str(error), view=None)
             return
         if server_name.casefold() == old_account.server_player_name.casefold():
-            await interaction.response.edit_message(
+            await interaction.edit_original_response(
                 content="誤登録と同じMinecraft IDには修正できません。",
                 view=None,
             )
@@ -1424,7 +1430,7 @@ class MinecraftDiscordBot(discord.Client):
                     "正しいMinecraft IDは別の登録で使用されています。状態を確認してください。"
                 )
         except ValueError as error:
-            await interaction.response.edit_message(content=str(error), view=None)
+            await interaction.edit_original_response(content=str(error), view=None)
             return
 
         add_error: OSError | RconError | RuntimeError | ValueError | None = None
@@ -1441,12 +1447,13 @@ class MinecraftDiscordBot(discord.Client):
             f"discord_user_id={expected_discord_user_id}",
         )
         if add_error is not None:
-            await interaction.response.edit_message(
+            await interaction.edit_original_response(
                 content=(
                     f"⚠️ 正しいMinecraft ID "
                     f"**{discord.utils.escape_markdown(normalized_name)}** を保存しましたが、"
                     f"Whitelistへの追加は反映待ちです: {add_error}\n"
-                    "誤登録の削除はそのまま継続し、正しいIDの追加はBotが再試行します。"
+                    "誤登録の削除はそのまま継続し、正しいIDの追加は"
+                    f"Botが最大{WHITELIST_RETRY_LIMIT}回まで自動再試行します。"
                 ),
                 view=None,
             )
@@ -1456,7 +1463,7 @@ class MinecraftDiscordBot(discord.Client):
             if old_account.status == "missing"
             else "誤登録の削除反映待ちはそのまま継続します。"
         )
-        await interaction.response.edit_message(
+        await interaction.edit_original_response(
             content=(
                 f"✅ <@{expected_discord_user_id}> に正しいMinecraft ID "
                 f"**{discord.utils.escape_markdown(normalized_name)}** を登録しました。\n"
@@ -1603,7 +1610,7 @@ class MinecraftDiscordBot(discord.Client):
                     f"⚠️ **{discord.utils.escape_markdown(account.minecraft_name)}** の削除予約を"
                     f"取り消し、紐付け先を {target.mention} へ変更しました。\n"
                     "MinecraftのWhitelistは再反映待ちです。Botが後から再試行します: "
-                    f"{recovery_error}"
+                    f"{recovery_error}\n最大{WHITELIST_RETRY_LIMIT}回で自動再試行を停止します。"
                 ),
                 view=None,
                 allowed_mentions=discord.AllowedMentions.none(),
@@ -1659,7 +1666,10 @@ class MinecraftDiscordBot(discord.Client):
         except (OSError, RconError, RuntimeError, ValueError) as error:
             await asyncio.to_thread(self._accounts.update_status, account.id, "pending_remove")
             await interaction.edit_original_response(
-                content=f"解除を保存しましたが、Minecraftへの反映待ちです: {error}",
+                content=(
+                    f"解除を保存しましたが、Minecraftへの反映待ちです: {error}\n"
+                    f"最大{WHITELIST_RETRY_LIMIT}回で自動再試行を停止します。"
+                ),
                 view=None,
             )
             return
@@ -1707,7 +1717,9 @@ class MinecraftDiscordBot(discord.Client):
             await self._add_to_whitelist(account)
         except (OSError, RconError, RuntimeError, ValueError) as error:
             await interaction.followup.send(
-                f"Minecraftへ反映できませんでした: {error}", ephemeral=True
+                f"Minecraftへ反映できませんでした: {error}\n"
+                f"Botが最大{WHITELIST_RETRY_LIMIT}回まで自動再試行します。",
+                ephemeral=True,
             )
             return
         await interaction.edit_original_response(
@@ -1803,7 +1815,19 @@ class MinecraftDiscordBot(discord.Client):
             else:
                 account_text = f"**{escaped_name}** (未連携)"
             state = ""
-            if not is_present:
+            if (
+                account is not None
+                and account.whitelist_retry_count >= WHITELIST_RETRY_LIMIT
+                and account.status == "pending_add"
+            ):
+                state = "  ⚠️ Whitelist追加失敗\uff08自動再試行停止\uff09"
+            elif (
+                account is not None
+                and account.whitelist_retry_count >= WHITELIST_RETRY_LIMIT
+                and account.status == "pending_remove"
+            ):
+                state = "  ⚠️ Whitelist解除失敗\uff08自動再試行停止\uff09"
+            elif not is_present:
                 state = "  ⚠️ Whitelist未反映"
             elif account is not None and account.status == "pending_remove":
                 state = "  ⚠️ 削除反映待ち"
@@ -4411,11 +4435,29 @@ class MinecraftDiscordBot(discord.Client):
                 else:
                     await self._remove_from_whitelist(account)
             except (OSError, RconError, RuntimeError, ValueError) as error:
-                LOGGER.warning(
-                    "Minecraft account reconciliation remains pending for %s: %s",
-                    account.minecraft_name,
-                    error,
+                attempts, exhausted = await asyncio.to_thread(
+                    self._accounts.record_whitelist_retry_failure,
+                    account.id,
+                    expected_status=account.status,
+                    error=str(error),
                 )
+                if attempts == 0:
+                    continue
+                if exhausted:
+                    LOGGER.error(
+                        "Minecraft account reconciliation stopped after %d attempts for %s: %s",
+                        attempts,
+                        account.minecraft_name,
+                        error,
+                    )
+                else:
+                    LOGGER.warning(
+                        "Minecraft account reconciliation retry %d/%d for %s: %s",
+                        attempts,
+                        WHITELIST_RETRY_LIMIT,
+                        account.minecraft_name,
+                        error,
+                    )
 
     def _tailer_stopped(self, task: asyncio.Task[None]) -> None:
         self._remove_health_file()
@@ -4440,12 +4482,21 @@ class MinecraftDiscordBot(discord.Client):
     @staticmethod
     def _account_line(account: MinecraftAccount) -> str:
         edition = "Java版" if account.edition == "java" else "Bedrock版"
-        state = {
-            "active": "参加可能",
-            "pending_approval": "承認待ち",
-            "pending_add": "反映待ち",
-            "pending_remove": "解除反映待ち",
-        }.get(account.status, account.status)
+        if account.whitelist_retry_count >= WHITELIST_RETRY_LIMIT:
+            state = (
+                "追加失敗\uff08自動再試行停止\uff09"
+                if account.status == "pending_add"
+                else "解除失敗\uff08自動再試行停止\uff09"
+                if account.status == "pending_remove"
+                else account.status
+            )
+        else:
+            state = {
+                "active": "参加可能",
+                "pending_approval": "承認待ち",
+                "pending_add": "反映待ち",
+                "pending_remove": "解除反映待ち",
+            }.get(account.status, account.status)
         protection = "・保護" if not account.managed else ""
         name = discord.utils.escape_markdown(account.minecraft_name)
         return f"・**{name}** / {edition} / {state}{protection}"
