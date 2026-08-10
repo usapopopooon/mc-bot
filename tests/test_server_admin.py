@@ -1,6 +1,6 @@
 import asyncio
 import json
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -380,6 +380,66 @@ def test_keeps_registration_pending_when_rcon_command_fails(tmp_path) -> None:
 
     assert store.get(account.id).status == "pending_add"  # type: ignore[union-attr]
     assert read_whitelisted_players(whitelist_path) == []
+
+
+def test_relink_readds_removed_whitelist_and_skips_stale_removal_retry(tmp_path) -> None:
+    async def exercise() -> None:
+        whitelist_path = tmp_path / "whitelist.json"
+        whitelist_path.write_text("[]", encoding="utf-8")
+        accounts_path = tmp_path / "accounts.db"
+        store = AccountStore(accounts_path)
+        store.initialize()
+        account = store.create_registration(
+            edition="java",
+            minecraft_name="Steve",
+            server_player_name="Steve",
+            discord_user_id=123,
+            discord_username="wrong-user",
+            source="admin",
+            status="active",
+            created_by=999,
+        )
+        store.update_status(account.id, "pending_remove")
+        stale_removal = store.get(account.id)
+        assert stale_removal is not None
+        bot = MinecraftDiscordBot(
+            Config(
+                discord_token="secret",
+                accounts_path=accounts_path,
+                minecraft_whitelist_path=whitelist_path,
+                rcon_password="secret",
+            )
+        )
+        rcon = WhitelistRcon(whitelist_path)
+        bot._rcon = rcon  # type: ignore[assignment]
+        bot._require_server_manager = AsyncMock(return_value=True)  # type: ignore[method-assign]
+        bot._audit_server_action = Mock()  # type: ignore[method-assign]
+        target = Mock()
+        target.id = 456
+        target.display_name = "correct-user"
+        target.mention = "<@456>"
+        interaction = Mock()
+        interaction.user.id = 999
+        interaction.guild_id = 1001
+        interaction.response.edit_message = AsyncMock()
+
+        await bot.reassign_account_link(
+            interaction,
+            account_id=account.id,
+            expected_discord_user_id=123,
+            target=target,
+            recover_pending_remove=True,
+        )
+        await bot._remove_from_whitelist(stale_removal)
+
+        changed = store.get(account.id)
+        assert changed is not None
+        assert changed.discord_user_id == 456
+        assert changed.status == "active"
+        assert read_whitelisted_players(whitelist_path) == ["Steve"]
+        assert rcon.commands == ["whitelist add Steve"]
+
+    asyncio.run(exercise())
 
 
 def test_falls_back_to_direct_whitelist_update_when_rcon_is_not_reflected(

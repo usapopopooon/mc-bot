@@ -36,7 +36,7 @@ def admin_panel_embed() -> discord.Embed:
     return discord.Embed(
         title="🛠 Minecraft管理メニュー",
         description=(
-            "代理登録、既存whitelistの紐付け、登録状況の確認に加え、\n"
+            "代理登録、既存whitelistの紐付け・修正、登録状況の確認に加え、\n"
             "稼働中のMinecraftサーバーをリアルタイムで操作できます。"
         ),
         color=discord.Color.blurple(),
@@ -107,6 +107,17 @@ class AdminPanelView(discord.ui.View):
     async def link_existing(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if await self.bot.validate_panel_interaction(interaction, admin=True):
             await self.bot.show_unlinked_accounts(interaction)
+
+    @discord.ui.button(
+        label="紐付け先を修正",
+        emoji="🛠️",
+        style=discord.ButtonStyle.secondary,
+        custom_id="mc-admin:relink-existing",
+        row=1,
+    )
+    async def relink_existing(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if await self.bot.validate_panel_interaction(interaction, admin=True):
+            await self.bot.show_relinkable_accounts(interaction)
 
     @discord.ui.button(
         label="登録状況",
@@ -267,6 +278,13 @@ class TargetUserSelect(discord.ui.UserSelect):
                 allowed_mentions=discord.AllowedMentions.none(),
             )
             return
+        if self.purpose == "relink":
+            await self.bot.confirm_account_relink(
+                interaction,
+                self.account_id or 0,
+                selected,
+            )
+            return
         await interaction.response.edit_message(
             content=f"{selected.mention} への紐付け方法を選択してください。",
             view=LinkModeView(self.bot, self.account_id or 0, selected),
@@ -305,17 +323,27 @@ class AccountSelect(discord.ui.Select):
     def __init__(
         self, bot: MinecraftDiscordBot, accounts: list[MinecraftAccount], purpose: str
     ) -> None:
-        options = [
-            discord.SelectOption(
-                label=account.minecraft_name[:100],
-                description=("Java版" if account.edition == "java" else "Bedrock版"),
-                value=str(account.id),
+        options = []
+        for account in accounts:
+            edition = "Java版" if account.edition == "java" else "Bedrock版"
+            description = edition
+            if purpose == "relink":
+                current = account.discord_username or f"Discord ID: {account.discord_user_id}"
+                state = " / 削除反映待ち" if account.status == "pending_remove" else ""
+                description = f"{edition} / 現在: {current}{state}"[:100]
+            options.append(
+                discord.SelectOption(
+                    label=account.minecraft_name[:100],
+                    description=description,
+                    value=str(account.id),
+                )
             )
-            for account in accounts
-        ]
-        placeholder = (
-            "紐付ける既存アカウントを選択" if purpose == "link" else "解除するアカウントを選択"
-        )
+        placeholders = {
+            "link": "紐付ける既存アカウントを選択",
+            "relink": "紐付け先を修正するアカウントを選択",
+            "remove": "解除するアカウントを選択",
+        }
+        placeholder = placeholders.get(purpose, "Minecraftアカウントを選択")
         super().__init__(placeholder=placeholder, options=options)
         self.bot = bot
         self.purpose = purpose
@@ -326,6 +354,12 @@ class AccountSelect(discord.ui.Select):
             await interaction.response.edit_message(
                 content="紐付け先のDiscordユーザーを選択してください。",
                 view=TargetUserView(self.bot, purpose="link", account_id=account_id),
+            )
+            return
+        if self.purpose == "relink":
+            await interaction.response.edit_message(
+                content="新しい紐付け先のDiscordユーザーを選択してください。",
+                view=TargetUserView(self.bot, purpose="relink", account_id=account_id),
             )
             return
         await interaction.response.edit_message(
@@ -360,6 +394,46 @@ class LinkModeView(discord.ui.View):
         await self.bot.link_existing_account(
             interaction, self.account_id, self.target, managed=True
         )
+
+
+class ConfirmRelinkView(discord.ui.View):
+    def __init__(
+        self,
+        bot: MinecraftDiscordBot,
+        *,
+        owner_id: int,
+        account_id: int,
+        expected_discord_user_id: int,
+        target: discord.Member,
+        recover_pending_remove: bool = False,
+    ) -> None:
+        super().__init__(timeout=120)
+        self.bot = bot
+        self.owner_id = owner_id
+        self.account_id = account_id
+        self.expected_discord_user_id = expected_discord_user_id
+        self.target = target
+        self.recover_pending_remove = recover_pending_remove
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id == self.owner_id:
+            return True
+        await interaction.response.send_message("この確認画面は操作できません。", ephemeral=True)
+        return False
+
+    @discord.ui.button(label="紐付け先を変更", style=discord.ButtonStyle.danger)
+    async def confirm(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await self.bot.reassign_account_link(
+            interaction,
+            account_id=self.account_id,
+            expected_discord_user_id=self.expected_discord_user_id,
+            target=self.target,
+            recover_pending_remove=self.recover_pending_remove,
+        )
+
+    @discord.ui.button(label="キャンセル", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await interaction.response.edit_message(content="変更をキャンセルしました。", view=None)
 
 
 class ConfirmRemovalView(discord.ui.View):

@@ -165,6 +165,174 @@ def test_links_multiple_accounts_to_one_discord_user(tmp_path) -> None:
     assert {account.managed for account in linked} == {False, True}
 
 
+def test_reassigns_discord_user_without_changing_minecraft_registration(tmp_path) -> None:
+    store = AccountStore(tmp_path / "accounts.db")
+    store.initialize()
+    account = store.create_registration(
+        edition="java",
+        minecraft_name="Steve",
+        server_player_name="Steve",
+        discord_user_id=123,
+        discord_username="wrong-user",
+        source="admin",
+        status="active",
+        created_by=999,
+    )
+    store.update_player_uuid(account.id, "8667ba71-b85a-4004-af54-457a9734eed7")
+    assert (
+        store.observe_minecraft_xp(
+            account_id=account.id,
+            discord_user_id=123,
+            guild_id=1001,
+            current_xp=100,
+            observed_at="2026-08-10T00:00:00+00:00",
+        )
+        is None
+    )
+    store.observe_minecraft_xp(
+        account_id=account.id,
+        discord_user_id=123,
+        guild_id=1001,
+        current_xp=110,
+        observed_at="2026-08-10T00:01:00+00:00",
+    )
+
+    changed = store.reassign_discord_user(
+        account.id,
+        expected_discord_user_id=123,
+        discord_user_id=456,
+        discord_username="correct-user",
+    )
+
+    assert changed.discord_user_id == 456
+    assert changed.discord_username == "correct-user"
+    assert changed.player_uuid == "8667ba71-b85a-4004-af54-457a9734eed7"
+    assert changed.managed
+    assert changed.source == "admin"
+    assert changed.status == "active"
+    assert changed.created_by == 999
+    assert store.list_for_discord_user(123) == []
+    assert store.list_for_discord_user(456) == [changed]
+    assert store.list_relinkable() == [changed]
+    store.observe_minecraft_xp(
+        account_id=account.id,
+        discord_user_id=456,
+        guild_id=1001,
+        current_xp=120,
+        observed_at="2026-08-10T00:02:00+00:00",
+    )
+    assert [event.discord_user_id for event in store.list_minecraft_xp_outbox()] == [
+        123,
+        456,
+    ]
+
+
+def test_reassign_rejects_stale_discord_owner(tmp_path) -> None:
+    store = AccountStore(tmp_path / "accounts.db")
+    store.initialize()
+    account = store.create_registration(
+        edition="java",
+        minecraft_name="Steve",
+        server_player_name="Steve",
+        discord_user_id=123,
+        discord_username="first-user",
+        source="admin",
+        status="active",
+        created_by=999,
+    )
+    store.reassign_discord_user(
+        account.id,
+        expected_discord_user_id=123,
+        discord_user_id=456,
+        discord_username="second-user",
+    )
+
+    try:
+        store.reassign_discord_user(
+            account.id,
+            expected_discord_user_id=123,
+            discord_user_id=789,
+            discord_username="third-user",
+        )
+    except ValueError as error:
+        assert "すでに変更" in str(error)
+    else:
+        raise AssertionError("expected stale owner to be rejected")
+
+    assert store.get(account.id).discord_user_id == 456  # type: ignore[union-attr]
+
+
+def test_reassign_cancels_pending_removal_only_in_recovery_mode(tmp_path) -> None:
+    store = AccountStore(tmp_path / "accounts.db")
+    store.initialize()
+    account = store.create_registration(
+        edition="java",
+        minecraft_name="Steve",
+        server_player_name="Steve",
+        discord_user_id=123,
+        discord_username="wrong-user",
+        source="admin",
+        status="active",
+        created_by=999,
+    )
+    store.update_status(account.id, "pending_remove")
+
+    assert [item.id for item in store.list_relinkable()] == [account.id]
+    try:
+        store.reassign_discord_user(
+            account.id,
+            expected_discord_user_id=123,
+            discord_user_id=456,
+            discord_username="correct-user",
+        )
+    except ValueError as error:
+        assert "修正できません" in str(error)
+    else:
+        raise AssertionError("expected pending removal to require recovery mode")
+
+    changed = store.reassign_discord_user(
+        account.id,
+        expected_discord_user_id=123,
+        discord_user_id=456,
+        discord_username="correct-user",
+        recover_pending_remove=True,
+    )
+
+    assert changed.discord_user_id == 456
+    assert changed.discord_username == "correct-user"
+    assert changed.status == "pending_add"
+    assert changed.managed
+    assert changed.source == "admin"
+
+
+def test_reassign_recovers_when_pending_removal_completed_during_confirmation(tmp_path) -> None:
+    store = AccountStore(tmp_path / "accounts.db")
+    store.initialize()
+    account = store.create_registration(
+        edition="java",
+        minecraft_name="Steve",
+        server_player_name="Steve",
+        discord_user_id=123,
+        discord_username="wrong-user",
+        source="admin",
+        status="active",
+        created_by=999,
+    )
+    store.update_status(account.id, "pending_remove")
+    store.update_status(account.id, "missing")
+
+    changed = store.reassign_discord_user(
+        account.id,
+        expected_discord_user_id=123,
+        discord_user_id=456,
+        discord_username="correct-user",
+        recover_pending_remove=True,
+    )
+
+    assert changed.discord_user_id == 456
+    assert changed.status == "pending_add"
+
+
 def test_updates_resolved_player_uuid(tmp_path) -> None:
     store = AccountStore(tmp_path / "accounts.db")
     store.initialize()

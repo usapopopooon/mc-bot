@@ -101,6 +101,7 @@ from mc_bot.ui import (
     AdminPanelView,
     ApprovalView,
     ConfirmRegistrationView,
+    ConfirmRelinkView,
     KickPlayerSelectView,
     ServerControlView,
     VoiceControlView,
@@ -1213,6 +1214,23 @@ class MinecraftDiscordBot(discord.Client):
             ephemeral=True,
         )
 
+    async def show_relinkable_accounts(self, interaction: discord.Interaction) -> None:
+        if not await self._require_server_manager(interaction):
+            return
+        accounts = await asyncio.to_thread(self._accounts.list_relinkable)
+        if not accounts:
+            await interaction.response.send_message(
+                "紐付け先を修正できるMinecraftアカウントはありません。",
+                ephemeral=True,
+            )
+            return
+        await interaction.response.send_message(
+            "Discordの紐付け先を修正するMinecraftアカウントを選択してください。"
+            "\n通常はWhitelistを変更しません。削除反映待ちは削除を取り消して復旧します。",
+            view=AccountSelectView(self, accounts, "relink"),
+            ephemeral=True,
+        )
+
     async def link_existing_account(
         self,
         interaction: discord.Interaction,
@@ -1240,6 +1258,133 @@ class MinecraftDiscordBot(discord.Client):
             content=(
                 f"**{discord.utils.escape_markdown(account.minecraft_name)}** を "
                 f"{target.mention} に紐付けました。\n管理方法: {policy}"
+            ),
+            view=None,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+    async def confirm_account_relink(
+        self,
+        interaction: discord.Interaction,
+        account_id: int,
+        target: discord.Member,
+    ) -> None:
+        if not await self._require_server_manager(interaction):
+            return
+        account = await asyncio.to_thread(self._accounts.get, account_id)
+        if (
+            account is None
+            or account.discord_user_id is None
+            or account.status not in {"active", "pending_add", "pending_remove"}
+        ):
+            await interaction.response.edit_message(
+                content="このMinecraftアカウントの紐付け先は修正できません。",
+                view=None,
+            )
+            return
+        if account.discord_user_id == target.id:
+            await interaction.response.edit_message(
+                content=f"すでに {target.mention} に紐付いています。",
+                view=None,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            return
+        recovering_removal = account.status == "pending_remove"
+        recovery_text = (
+            "⚠️ 削除反映待ちを取り消し、Whitelistに残っているか確認して、削除済みなら再追加します。"
+            if recovering_removal
+            else "WhitelistとMinecraft側の登録状態は変更しません。"
+        )
+        await interaction.response.edit_message(
+            content=(
+                "次の内容でDiscordの紐付け先だけを変更します。\n\n"
+                f"Minecraftアカウント: "
+                f"**{discord.utils.escape_markdown(account.minecraft_name)}**\n"
+                f"現在: <@{account.discord_user_id}>\n"
+                f"変更後: {target.mention}\n\n"
+                "管理方法は変更しません。\n"
+                f"{recovery_text}\n"
+                "すでに付与済み・送信待ちのXPは移動せず、変更後に発生したXPから"
+                "新しいユーザーへ反映されます。"
+            ),
+            view=ConfirmRelinkView(
+                self,
+                owner_id=interaction.user.id,
+                account_id=account.id,
+                expected_discord_user_id=account.discord_user_id,
+                target=target,
+                recover_pending_remove=recovering_removal,
+            ),
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+    async def reassign_account_link(
+        self,
+        interaction: discord.Interaction,
+        *,
+        account_id: int,
+        expected_discord_user_id: int,
+        target: discord.Member,
+        recover_pending_remove: bool = False,
+    ) -> None:
+        if not await self._require_server_manager(interaction):
+            return
+        recovery_error: OSError | RconError | RuntimeError | ValueError | None = None
+        try:
+            if recover_pending_remove:
+                async with self._whitelist_operation_lock:
+                    account = await asyncio.to_thread(
+                        self._accounts.reassign_discord_user,
+                        account_id,
+                        expected_discord_user_id=expected_discord_user_id,
+                        discord_user_id=target.id,
+                        discord_username=target.display_name,
+                        recover_pending_remove=True,
+                    )
+                    try:
+                        await self._add_to_whitelist_locked(account)
+                    except (OSError, RconError, RuntimeError, ValueError) as error:
+                        recovery_error = error
+            else:
+                account = await asyncio.to_thread(
+                    self._accounts.reassign_discord_user,
+                    account_id,
+                    expected_discord_user_id=expected_discord_user_id,
+                    discord_user_id=target.id,
+                    discord_username=target.display_name,
+                )
+        except ValueError as error:
+            await interaction.response.edit_message(content=str(error), view=None)
+            return
+        self._audit_server_action(
+            interaction,
+            "account relink "
+            f"account_id={account.id} old_user_id={expected_discord_user_id} "
+            f"new_user_id={target.id} recovered_removal={recover_pending_remove}",
+        )
+        if recovery_error is not None:
+            await interaction.response.edit_message(
+                content=(
+                    f"⚠️ **{discord.utils.escape_markdown(account.minecraft_name)}** の削除予約を"
+                    f"取り消し、紐付け先を {target.mention} へ変更しました。\n"
+                    "MinecraftのWhitelistは再反映待ちです。Botが後から再試行します: "
+                    f"{recovery_error}"
+                ),
+                view=None,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            return
+        unchanged_or_recovered = (
+            "管理方法は変更していません。\n"
+            "削除予約を取り消し、Whitelistへの参加状態を復旧しました。"
+            if recover_pending_remove
+            else "Whitelistと管理方法は変更していません。"
+        )
+        await interaction.response.edit_message(
+            content=(
+                f"✅ **{discord.utils.escape_markdown(account.minecraft_name)}** の紐付け先を "
+                f"<@{expected_discord_user_id}> から {target.mention} へ変更しました。\n"
+                f"{unchanged_or_recovered}"
             ),
             view=None,
             allowed_mentions=discord.AllowedMentions.none(),
@@ -1951,22 +2096,34 @@ class MinecraftDiscordBot(discord.Client):
         )
 
     async def _add_to_whitelist(self, account: MinecraftAccount) -> None:
+        async with self._whitelist_operation_lock:
+            await self._add_to_whitelist_locked(account)
+
+    async def _add_to_whitelist_locked(self, account: MinecraftAccount) -> None:
         command = (
             f"whitelist add {account.minecraft_name}"
             if account.edition == "java"
             else f'fwhitelist add "{account.minecraft_name}"'
         )
-        await self._ensure_player_whitelist_state(account, expected=True, command=command)
+        await self._ensure_player_whitelist_state_locked(account, expected=True, command=command)
         await asyncio.to_thread(self._accounts.update_status, account.id, "active")
 
     async def _remove_from_whitelist(self, account: MinecraftAccount) -> None:
+        async with self._whitelist_operation_lock:
+            if account.status == "pending_remove":
+                current = await asyncio.to_thread(self._accounts.get, account.id)
+                if current is None or current.status != "pending_remove":
+                    return
+            await self._remove_from_whitelist_locked(account)
+
+    async def _remove_from_whitelist_locked(self, account: MinecraftAccount) -> None:
         rcon = self._require_rcon()
         command = (
             f"whitelist remove {account.minecraft_name}"
             if account.edition == "java"
             else f'fwhitelist remove "{account.minecraft_name}"'
         )
-        await self._ensure_player_whitelist_state(account, expected=False, command=command)
+        await self._ensure_player_whitelist_state_locked(account, expected=False, command=command)
         try:
             await asyncio.to_thread(
                 rcon.execute,
@@ -1976,31 +2133,30 @@ class MinecraftDiscordBot(discord.Client):
             LOGGER.debug("Could not kick %s; player may be offline", account.server_player_name)
         await asyncio.to_thread(self._accounts.update_status, account.id, "missing")
 
-    async def _ensure_player_whitelist_state(
+    async def _ensure_player_whitelist_state_locked(
         self,
         account: MinecraftAccount,
         *,
         expected: bool,
         command: str,
     ) -> None:
-        async with self._whitelist_operation_lock:
+        if await self._player_is_whitelisted(account.server_player_name) is expected:
+            return
+        response = await self._execute_checked_rcon(command)
+        for attempt in range(20):
             if await self._player_is_whitelisted(account.server_player_name) is expected:
                 return
-            response = await self._execute_checked_rcon(command)
-            for attempt in range(20):
-                if await self._player_is_whitelisted(account.server_player_name) is expected:
-                    return
-                if attempt < 19:
-                    await asyncio.sleep(0.25)
-            if expected:
-                LOGGER.warning(
-                    "RCON whitelist add was not reflected for %s; using direct JSON fallback "
-                    "response=%r",
-                    account.minecraft_name,
-                    response,
-                )
-                await self._add_to_whitelist_file(account)
-                return
+            if attempt < 19:
+                await asyncio.sleep(0.25)
+        if expected:
+            LOGGER.warning(
+                "RCON whitelist add was not reflected for %s; using direct JSON fallback "
+                "response=%r",
+                account.minecraft_name,
+                response,
+            )
+            await self._add_to_whitelist_file(account)
+            return
         state = "追加" if expected else "削除"
         raise RuntimeError(f"{account.server_player_name}のWhitelist{state}を確認できませんでした")
 

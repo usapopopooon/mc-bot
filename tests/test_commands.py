@@ -9,9 +9,13 @@ from mc_bot.bot import MinecraftDiscordBot
 from mc_bot.config import Config
 from mc_bot.settings import RuntimeSettings
 from mc_bot.ui import (
+    AccountSelect,
+    AccountSelectView,
     AdminPanelView,
+    ConfirmRelinkView,
     RegistrationModal,
     ServerControlView,
+    TargetUserSelect,
     VoiceControlView,
     access_panel_embed,
 )
@@ -266,6 +270,7 @@ def test_admin_panel_exposes_server_controls() -> None:
     assert {item.label for item in admin_panel.children} >= {
         "Minecraft読み上げ",
         "Whitelist一覧",
+        "紐付け先を修正",
         "サーバー操作",
     }
     assert {item.label for item in controls.children} == {
@@ -285,6 +290,316 @@ def test_admin_panel_exposes_server_controls() -> None:
         "読み上げ確認",
         "切断",
     }
+
+
+def test_relink_selects_account_then_new_discord_user() -> None:
+    async def exercise() -> None:
+        bot = MinecraftDiscordBot(Config(discord_token="secret"))
+        bot.confirm_account_relink = AsyncMock()  # type: ignore[method-assign]
+        account = MinecraftAccount(
+            id=1,
+            edition="java",
+            minecraft_name="Steve",
+            server_player_name="Steve",
+            player_uuid="uuid-1",
+            discord_user_id=123,
+            discord_username="wrong-user",
+            managed=True,
+            source="admin",
+            status="active",
+            created_by=999,
+            approval_message_id=None,
+        )
+        account_select = AccountSelect(bot, [account], "relink")
+        account_select._values = ["1"]  # type: ignore[attr-defined]
+        interaction = Mock(spec=discord.Interaction)
+        interaction.response.edit_message = AsyncMock()
+
+        await account_select.callback(interaction)
+
+        account_response = interaction.response.edit_message.await_args.kwargs
+        target_select = account_response["view"].children[0]
+        assert isinstance(target_select, TargetUserSelect)
+        assert target_select.purpose == "relink"
+        assert target_select.account_id == 1
+
+        target = Mock(spec=discord.Member)
+        target.id = 456
+        target.bot = False
+        target_select._values = [target]  # type: ignore[attr-defined]
+        await target_select.callback(interaction)
+
+        bot.confirm_account_relink.assert_awaited_once_with(interaction, 1, target)
+
+    asyncio.run(exercise())
+
+
+def test_show_relinkable_accounts_passes_store_results_to_relink_view() -> None:
+    async def exercise() -> None:
+        bot = MinecraftDiscordBot(Config(discord_token="secret"))
+        bot._require_server_manager = AsyncMock(return_value=True)  # type: ignore[method-assign]
+        account = MinecraftAccount(
+            id=1,
+            edition="java",
+            minecraft_name="Steve",
+            server_player_name="Steve",
+            player_uuid="uuid-1",
+            discord_user_id=123,
+            discord_username="wrong-user",
+            managed=True,
+            source="admin",
+            status="active",
+            created_by=999,
+            approval_message_id=None,
+        )
+        bot._accounts = Mock()
+        bot._accounts.list_relinkable.return_value = [account]
+        interaction = Mock(spec=discord.Interaction)
+        interaction.response.send_message = AsyncMock()
+
+        await bot.show_relinkable_accounts(interaction)
+
+        bot._accounts.list_relinkable.assert_called_once_with()
+        response = interaction.response.send_message.await_args.kwargs
+        assert response["ephemeral"] is True
+        assert isinstance(response["view"], AccountSelectView)
+        select = response["view"].children[0]
+        assert isinstance(select, AccountSelect)
+        assert select.purpose == "relink"
+        assert [(option.value, option.label) for option in select.options] == [("1", "Steve")]
+        assert select.options[0].description == "Java版 / 現在: wrong-user"
+
+    asyncio.run(exercise())
+
+
+def test_reassign_account_link_preserves_whitelist_management() -> None:
+    async def exercise() -> None:
+        bot = MinecraftDiscordBot(Config(discord_token="secret"))
+        bot._require_server_manager = AsyncMock(return_value=True)  # type: ignore[method-assign]
+        bot._audit_server_action = Mock()  # type: ignore[method-assign]
+        bot._add_to_whitelist = AsyncMock()  # type: ignore[method-assign]
+        changed = MinecraftAccount(
+            id=1,
+            edition="java",
+            minecraft_name="Steve",
+            server_player_name="Steve",
+            player_uuid="uuid-1",
+            discord_user_id=456,
+            discord_username="correct-user",
+            managed=True,
+            source="admin",
+            status="active",
+            created_by=999,
+            approval_message_id=None,
+        )
+        bot._accounts = Mock()
+        bot._accounts.reassign_discord_user.return_value = changed
+        target = Mock(spec=discord.Member)
+        target.id = 456
+        target.display_name = "correct-user"
+        target.mention = "<@456>"
+        interaction = Mock(spec=discord.Interaction)
+        interaction.user.id = 999
+        interaction.guild_id = 1001
+        interaction.response.edit_message = AsyncMock()
+
+        await bot.reassign_account_link(
+            interaction,
+            account_id=1,
+            expected_discord_user_id=123,
+            target=target,
+        )
+
+        bot._accounts.reassign_discord_user.assert_called_once_with(
+            1,
+            expected_discord_user_id=123,
+            discord_user_id=456,
+            discord_username="correct-user",
+        )
+        bot._add_to_whitelist.assert_not_awaited()
+        response = interaction.response.edit_message.await_args.kwargs
+        assert "Whitelistと管理方法は変更していません" in response["content"]
+        bot._audit_server_action.assert_called_once()
+
+    asyncio.run(exercise())
+
+
+def test_confirm_account_relink_displays_old_and_new_owner() -> None:
+    async def exercise() -> None:
+        bot = MinecraftDiscordBot(Config(discord_token="secret"))
+        bot._require_server_manager = AsyncMock(return_value=True)  # type: ignore[method-assign]
+        account = MinecraftAccount(
+            id=1,
+            edition="java",
+            minecraft_name="Steve",
+            server_player_name="Steve",
+            player_uuid="uuid-1",
+            discord_user_id=123,
+            discord_username="wrong-user",
+            managed=False,
+            source="legacy",
+            status="active",
+            created_by=999,
+            approval_message_id=None,
+        )
+        bot._accounts = Mock()
+        bot._accounts.get.return_value = account
+        target = Mock(spec=discord.Member)
+        target.id = 456
+        target.mention = "<@456>"
+        interaction = Mock(spec=discord.Interaction)
+        interaction.user.id = 999
+        interaction.response.edit_message = AsyncMock()
+
+        await bot.confirm_account_relink(interaction, 1, target)
+
+        response = interaction.response.edit_message.await_args.kwargs
+        assert "現在: <@123>" in response["content"]
+        assert "変更後: <@456>" in response["content"]
+        assert "送信待ちのXPは移動せず" in response["content"]
+        assert isinstance(response["view"], ConfirmRelinkView)
+        assert response["view"].expected_discord_user_id == 123
+
+    asyncio.run(exercise())
+
+
+def test_confirm_account_relink_explains_pending_removal_recovery() -> None:
+    async def exercise() -> None:
+        bot = MinecraftDiscordBot(Config(discord_token="secret"))
+        bot._require_server_manager = AsyncMock(return_value=True)  # type: ignore[method-assign]
+        account = MinecraftAccount(
+            id=1,
+            edition="java",
+            minecraft_name="Steve",
+            server_player_name="Steve",
+            player_uuid="uuid-1",
+            discord_user_id=123,
+            discord_username="wrong-user",
+            managed=True,
+            source="admin",
+            status="pending_remove",
+            created_by=999,
+            approval_message_id=None,
+        )
+        bot._accounts = Mock()
+        bot._accounts.get.return_value = account
+        target = Mock(spec=discord.Member)
+        target.id = 456
+        target.mention = "<@456>"
+        interaction = Mock(spec=discord.Interaction)
+        interaction.user.id = 999
+        interaction.response.edit_message = AsyncMock()
+
+        await bot.confirm_account_relink(interaction, 1, target)
+
+        response = interaction.response.edit_message.await_args.kwargs
+        assert "削除反映待ちを取り消し" in response["content"]
+        assert "削除済みなら再追加" in response["content"]
+        assert isinstance(response["view"], ConfirmRelinkView)
+        assert response["view"].recover_pending_remove is True
+
+    asyncio.run(exercise())
+
+
+def test_reassign_account_link_recovers_pending_removal() -> None:
+    async def exercise() -> None:
+        bot = MinecraftDiscordBot(Config(discord_token="secret"))
+        bot._require_server_manager = AsyncMock(return_value=True)  # type: ignore[method-assign]
+        bot._audit_server_action = Mock()  # type: ignore[method-assign]
+        changed = MinecraftAccount(
+            id=1,
+            edition="java",
+            minecraft_name="Steve",
+            server_player_name="Steve",
+            player_uuid="uuid-1",
+            discord_user_id=456,
+            discord_username="correct-user",
+            managed=True,
+            source="admin",
+            status="pending_add",
+            created_by=999,
+            approval_message_id=None,
+        )
+        bot._accounts = Mock()
+        bot._accounts.reassign_discord_user.return_value = changed
+        bot._add_to_whitelist_locked = AsyncMock()  # type: ignore[method-assign]
+        target = Mock(spec=discord.Member)
+        target.id = 456
+        target.display_name = "correct-user"
+        target.mention = "<@456>"
+        interaction = Mock(spec=discord.Interaction)
+        interaction.user.id = 999
+        interaction.guild_id = 1001
+        interaction.response.edit_message = AsyncMock()
+
+        await bot.reassign_account_link(
+            interaction,
+            account_id=1,
+            expected_discord_user_id=123,
+            target=target,
+            recover_pending_remove=True,
+        )
+
+        bot._accounts.reassign_discord_user.assert_called_once_with(
+            1,
+            expected_discord_user_id=123,
+            discord_user_id=456,
+            discord_username="correct-user",
+            recover_pending_remove=True,
+        )
+        bot._add_to_whitelist_locked.assert_awaited_once_with(changed)
+        response = interaction.response.edit_message.await_args.kwargs
+        assert "削除予約を取り消し" in response["content"]
+        assert "参加状態を復旧" in response["content"]
+
+    asyncio.run(exercise())
+
+
+def test_reassign_account_link_keeps_recovery_pending_when_whitelist_add_fails() -> None:
+    async def exercise() -> None:
+        bot = MinecraftDiscordBot(Config(discord_token="secret"))
+        bot._require_server_manager = AsyncMock(return_value=True)  # type: ignore[method-assign]
+        bot._audit_server_action = Mock()  # type: ignore[method-assign]
+        changed = MinecraftAccount(
+            id=1,
+            edition="java",
+            minecraft_name="Steve",
+            server_player_name="Steve",
+            player_uuid="uuid-1",
+            discord_user_id=456,
+            discord_username="correct-user",
+            managed=True,
+            source="admin",
+            status="pending_add",
+            created_by=999,
+            approval_message_id=None,
+        )
+        bot._accounts = Mock()
+        bot._accounts.reassign_discord_user.return_value = changed
+        bot._add_to_whitelist_locked = AsyncMock(side_effect=ValueError("RCON error"))  # type: ignore[method-assign]
+        target = Mock(spec=discord.Member)
+        target.id = 456
+        target.display_name = "correct-user"
+        target.mention = "<@456>"
+        interaction = Mock(spec=discord.Interaction)
+        interaction.user.id = 999
+        interaction.guild_id = 1001
+        interaction.response.edit_message = AsyncMock()
+
+        await bot.reassign_account_link(
+            interaction,
+            account_id=1,
+            expected_discord_user_id=123,
+            target=target,
+            recover_pending_remove=True,
+        )
+
+        response = interaction.response.edit_message.await_args.kwargs
+        assert "紐付け先を <@456> へ変更" in response["content"]
+        assert "Whitelistは再反映待ち" in response["content"]
+        assert "Botが後から再試行" in response["content"]
+
+    asyncio.run(exercise())
 
 
 def test_server_announcement_is_also_sent_to_discord_log() -> None:

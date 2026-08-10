@@ -513,6 +513,20 @@ class AccountStore:
             ).fetchall()
         return [_account(row) for row in rows]
 
+    def list_relinkable(self, limit: int = 25) -> list[MinecraftAccount]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM minecraft_accounts
+                WHERE discord_user_id IS NOT NULL
+                  AND status IN ('active', 'pending_add', 'pending_remove')
+                ORDER BY edition, minecraft_name COLLATE NOCASE
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        return [_account(row) for row in rows]
+
     def list_pending_approvals(self) -> list[MinecraftAccount]:
         with self._connect() as connection:
             rows = connection.execute(
@@ -1779,6 +1793,49 @@ class AccountStore:
         account = self.get(account_id)
         if account is None:
             raise RuntimeError("Linked account disappeared")
+        return account
+
+    def reassign_discord_user(
+        self,
+        account_id: int,
+        *,
+        expected_discord_user_id: int,
+        discord_user_id: int,
+        discord_username: str,
+        recover_pending_remove: bool = False,
+    ) -> MinecraftAccount:
+        if min(account_id, expected_discord_user_id, discord_user_id) <= 0:
+            raise ValueError("アカウントIDとDiscordユーザーIDは正の値で指定してください。")
+        allowed_statuses = (
+            ("pending_remove", "missing") if recover_pending_remove else ("active", "pending_add")
+        )
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE minecraft_accounts
+                SET discord_user_id = ?, discord_username = ?,
+                    status = CASE
+                        WHEN status IN ('pending_remove', 'missing') THEN 'pending_add'
+                        ELSE status
+                    END,
+                    updated_at = ?
+                WHERE id = ? AND discord_user_id = ?
+                  AND status IN (?, ?)
+                """,
+                (
+                    discord_user_id,
+                    discord_username,
+                    _now(),
+                    account_id,
+                    expected_discord_user_id,
+                    *allowed_statuses,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("紐付け情報がすでに変更されたか、このアカウントは修正できません。")
+        account = self.get(account_id)
+        if account is None:
+            raise RuntimeError("Reassigned account disappeared")
         return account
 
     def update_status(self, account_id: int, status: str) -> None:
