@@ -130,6 +130,11 @@ from mc_bot.xp_shop import (
 
 LOGGER = logging.getLogger(__name__)
 _JAVA_NAME = re.compile(r"[A-Za-z0-9_]{3,16}")
+_MODERN_GAMERTAG_SUFFIX = re.compile("^(.+)[#\uff03]([0-9\uff10-\uff19]+)$")
+_FULLWIDTH_DIGITS = str.maketrans(
+    "\uff10\uff11\uff12\uff13\uff14\uff15\uff16\uff17\uff18\uff19",
+    "0123456789",
+)
 _VOICE_CONNECTED_SPEECH = "せつぞくしました"
 _VOICE_CHECK_SPEECH = "マインクラフトの読み上げは正常に動作しています"
 _MOJANG_PROFILE_URL = "https://api.mojang.com/users/profiles/minecraft/"
@@ -1126,14 +1131,18 @@ class MinecraftDiscordBot(discord.Client):
         target: discord.Member,
         source: str,
     ) -> None:
-        _, server_name = self._normalize_player_name(edition, minecraft_name)
+        try:
+            normalized_name, server_name = self._normalize_player_name(edition, minecraft_name)
+        except ValueError as error:
+            await interaction.followup.send(str(error), ephemeral=True)
+            return
         automatic = self._settings.approval_mode == "automatic" or source == "admin"
         status = "pending_add" if automatic else "pending_approval"
         try:
             account = await asyncio.to_thread(
                 self._accounts.create_registration,
                 edition=edition,
-                minecraft_name=minecraft_name,
+                minecraft_name=normalized_name,
                 server_player_name=server_name,
                 discord_user_id=target.id,
                 discord_username=target.display_name,
@@ -1170,7 +1179,7 @@ class MinecraftDiscordBot(discord.Client):
             )
             return
         await interaction.followup.send(
-            f"✅ **{discord.utils.escape_markdown(minecraft_name)}** を登録しました。"
+            f"✅ **{discord.utils.escape_markdown(normalized_name)}** を登録しました。"
             "\nMinecraftサーバーへ参加できます。",
             ephemeral=True,
         )
@@ -2512,6 +2521,12 @@ class MinecraftDiscordBot(discord.Client):
                 )
             return name, name
         name = name.removeprefix(self._config.floodgate_username_prefix).strip()
+        suffix_match = _MODERN_GAMERTAG_SUFFIX.fullmatch(name)
+        if suffix_match is not None:
+            base, suffix = suffix_match.groups()
+            name = base.rstrip() + suffix.translate(_FULLWIDTH_DIGITS)
+        if "#" in name or "\uff03" in name:
+            raise ValueError("Bedrock版の # は末尾の数字サフィックスを含めて入力してください。")
         if not 1 <= len(name) <= 32 or any(
             character in name for character in ('"', "\\", "\n", "\r", "\0")
         ):

@@ -2,6 +2,7 @@ import asyncio
 from unittest.mock import AsyncMock, Mock
 
 import discord
+import pytest
 from discord import app_commands
 
 from mc_bot.accounts import AccountStore, MinecraftAccount
@@ -13,6 +14,7 @@ from mc_bot.ui import (
     AccountSelectView,
     AdminPanelView,
     ConfirmMinecraftIdCorrectionView,
+    ConfirmRegistrationView,
     ConfirmRelinkView,
     MinecraftIdCorrectionModal,
     RegistrationModal,
@@ -52,6 +54,125 @@ def test_registration_modal_uses_edition_specific_labels() -> None:
         bedrock_modal.minecraft_name_label.description or ""
     )
     assert "." not in (bedrock_modal.minecraft_name.placeholder or "")
+
+
+@pytest.mark.parametrize(
+    "entered_name",
+    [
+        "yuki1991#1261",
+        "yuki1991 #1261",
+        "yuki1991\uff031261",
+        "yuki1991\uff03\uff11\uff12\uff16\uff11",
+    ],
+)
+def test_normalizes_modern_bedrock_gamertag_to_minecraft_name(entered_name: str) -> None:
+    bot = MinecraftDiscordBot(Config(discord_token="secret"))
+
+    assert bot._normalize_player_name("bedrock", entered_name) == (
+        "yuki19911261",
+        ".yuki19911261",
+    )
+
+
+@pytest.mark.parametrize("entered_name", ["yuki1991#", "yuki1991#abc", "a#b#1234"])
+def test_rejects_invalid_bedrock_gamertag_suffix(entered_name: str) -> None:
+    bot = MinecraftDiscordBot(Config(discord_token="secret"))
+
+    with pytest.raises(ValueError, match="末尾の数字サフィックス"):
+        bot._normalize_player_name("bedrock", entered_name)
+
+
+def test_java_name_still_rejects_hash_suffix() -> None:
+    bot = MinecraftDiscordBot(Config(discord_token="secret"))
+
+    with pytest.raises(ValueError, match="Java版の名前"):
+        bot._normalize_player_name("java", "yuki1991#1261")
+
+
+def test_keeps_already_classic_bedrock_gamertag_unchanged() -> None:
+    bot = MinecraftDiscordBot(Config(discord_token="secret"))
+
+    assert bot._normalize_player_name("bedrock", "yuki19911261") == (
+        "yuki19911261",
+        ".yuki19911261",
+    )
+
+
+@pytest.mark.parametrize("source", ["self", "admin"])
+def test_registration_confirmation_shows_normalized_bedrock_name(source: str) -> None:
+    async def exercise() -> None:
+        bot = MinecraftDiscordBot(Config(discord_token="secret"))
+        target = Mock(spec=discord.Member)
+        target.id = 123
+        target.mention = "<@123>"
+        interaction = Mock(spec=discord.Interaction)
+        interaction.user.id = 123
+        interaction.response.send_message = AsyncMock()
+
+        await bot.confirm_registration(
+            interaction,
+            edition="bedrock",
+            minecraft_name="yuki1991#1261",
+            target=target,
+            source=source,
+        )
+
+        content = interaction.response.send_message.await_args.args[0]
+        response = interaction.response.send_message.await_args.kwargs
+        assert "yuki19911261" in content
+        assert "#1261" not in content
+        assert isinstance(response["view"], ConfirmRegistrationView)
+        assert response["view"].minecraft_name == "yuki19911261"
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize("source", ["self", "admin"])
+def test_registration_commit_stores_only_normalized_bedrock_name(source: str) -> None:
+    async def exercise() -> None:
+        bot = MinecraftDiscordBot(Config(discord_token="secret"))
+        account = MinecraftAccount(
+            id=1,
+            edition="bedrock",
+            minecraft_name="yuki19911261",
+            server_player_name=".yuki19911261",
+            player_uuid=None,
+            discord_user_id=123,
+            discord_username="user",
+            managed=True,
+            source=source,
+            status="pending_add",
+            created_by=123,
+            approval_message_id=None,
+        )
+        bot._accounts = Mock()
+        bot._accounts.create_registration.return_value = account
+        bot._add_to_whitelist = AsyncMock()  # type: ignore[method-assign]
+        target = Mock(spec=discord.Member)
+        target.id = 123
+        target.display_name = "user"
+        interaction = Mock(spec=discord.Interaction)
+        interaction.user.id = 123
+        interaction.followup.send = AsyncMock()
+
+        await bot.register_account(
+            interaction,
+            edition="bedrock",
+            minecraft_name="yuki1991\uff03\uff11\uff12\uff16\uff11",
+            target=target,
+            source=source,
+        )
+
+        create_args = bot._accounts.create_registration.call_args.kwargs
+        assert create_args["minecraft_name"] == "yuki19911261"
+        assert create_args["server_player_name"] == ".yuki19911261"
+        bot._add_to_whitelist.assert_awaited_once_with(account)
+        content = interaction.followup.send.await_args.args[0]
+        assert "yuki19911261" in content
+        assert "#" not in content
+        assert "\uff03" not in content
+
+    asyncio.run(exercise())
 
 
 def test_registers_manager_only_configuration_commands() -> None:
@@ -710,6 +831,41 @@ def test_confirm_minecraft_id_correction_keeps_wrong_id_deletion() -> None:
     asyncio.run(exercise())
 
 
+def test_minecraft_id_correction_normalizes_modern_bedrock_gamertag() -> None:
+    async def exercise() -> None:
+        bot = MinecraftDiscordBot(Config(discord_token="secret"))
+        bot._require_server_manager = AsyncMock(return_value=True)  # type: ignore[method-assign]
+        old_account = MinecraftAccount(
+            id=1,
+            edition="bedrock",
+            minecraft_name="WrongName",
+            server_player_name=".WrongName",
+            player_uuid=None,
+            discord_user_id=123,
+            discord_username="user",
+            managed=True,
+            source="admin",
+            status="pending_remove",
+            created_by=999,
+            approval_message_id=None,
+        )
+        bot._accounts = Mock()
+        bot._accounts.get.return_value = old_account
+        bot._accounts.get_by_server_player_name.return_value = None
+        interaction = Mock(spec=discord.Interaction)
+        interaction.user.id = 999
+        interaction.response.send_message = AsyncMock()
+
+        await bot.confirm_minecraft_id_correction(interaction, 1, "yuki1991#1261")
+
+        bot._accounts.get_by_server_player_name.assert_called_once_with(".yuki19911261")
+        response = interaction.response.send_message.await_args.kwargs
+        assert isinstance(response["view"], ConfirmMinecraftIdCorrectionView)
+        assert response["view"].minecraft_name == "yuki19911261"
+
+    asyncio.run(exercise())
+
+
 def test_confirm_minecraft_id_correction_rejects_id_linked_to_another_user() -> None:
     async def exercise() -> None:
         bot = MinecraftDiscordBot(Config(discord_token="secret"))
@@ -812,6 +968,56 @@ def test_correct_minecraft_id_creates_new_registration_without_restoring_wrong_i
         content = interaction.response.edit_message.await_args.kwargs["content"]
         assert "正しいMinecraft ID **CorrectName**" in content
         assert "削除反映待ちはそのまま継続" in content
+
+    asyncio.run(exercise())
+
+
+def test_correct_minecraft_id_commit_stores_normalized_bedrock_name(tmp_path) -> None:
+    async def exercise() -> None:
+        accounts_path = tmp_path / "accounts.db"
+        store = AccountStore(accounts_path)
+        store.initialize()
+        old_account = store.create_registration(
+            edition="bedrock",
+            minecraft_name="WrongName",
+            server_player_name=".WrongName",
+            discord_user_id=123,
+            discord_username="user",
+            source="admin",
+            status="active",
+            created_by=999,
+        )
+        store.update_status(old_account.id, "missing")
+        bot = MinecraftDiscordBot(Config(discord_token="secret", accounts_path=accounts_path))
+        bot._require_server_manager = AsyncMock(return_value=True)  # type: ignore[method-assign]
+        bot._audit_server_action = Mock()  # type: ignore[method-assign]
+
+        async def mark_added(account: MinecraftAccount) -> None:
+            store.update_status(account.id, "active")
+
+        bot._add_to_whitelist = AsyncMock(side_effect=mark_added)  # type: ignore[method-assign]
+        interaction = Mock(spec=discord.Interaction)
+        interaction.user.id = 999
+        interaction.guild = None
+        interaction.response.edit_message = AsyncMock()
+
+        await bot.correct_pending_removal_minecraft_id(
+            interaction,
+            old_account_id=old_account.id,
+            expected_discord_user_id=123,
+            edition="bedrock",
+            minecraft_name="yuki1991#1261",
+        )
+
+        corrected = store.get_by_server_player_name(".yuki19911261")
+        assert corrected is not None
+        assert corrected.minecraft_name == "yuki19911261"
+        assert corrected.status == "active"
+        added_account = bot._add_to_whitelist.await_args.args[0]
+        assert added_account.server_player_name == ".yuki19911261"
+        content = interaction.response.edit_message.await_args.kwargs["content"]
+        assert "yuki19911261" in content
+        assert "#1261" not in content
 
     asyncio.run(exercise())
 

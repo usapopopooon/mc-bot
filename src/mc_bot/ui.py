@@ -18,7 +18,8 @@ def access_panel_embed(approval_mode: str) -> discord.Embed:
         "、つまりJava版のプレイヤー名を入力してください。\n\n"
         "🪨 **Bedrock版**\n"
         "Switch・Xbox・PlayStation・スマホ・Windowsのゲーム内で、自分のキャラクターの"
-        "頭上に表示される名前、つまりXboxゲーマータグを入力してください。\n\n"
+        "頭上に表示される名前、つまりXboxゲーマータグを入力してください。"
+        "`名前#数字`を入力した場合はゲーム内形式の`名前数字`へ自動変換します。\n\n"
         "複数のMinecraftアカウントを登録できます。"
     )
     if approval_mode == "automatic":
@@ -193,10 +194,15 @@ class RegistrationModal(discord.ui.Modal):
             label = "Java版のプレイヤー名"
             placeholder = "例: Steve123"
             max_length = 16
+            description = "ゲーム内で自分のキャラクターの頭上に表示される名前"
         else:
             label = "Xboxゲーマータグ"
             placeholder = "Minecraftに表示されるゲーマータグ"
             max_length = 32
+            description = (
+                "ゲーム内で自分のキャラクターの頭上に表示される名前。"
+                "名前#数字はゲーム内形式の名前数字へ自動変換します"
+            )
         self.minecraft_name = discord.ui.TextInput(
             placeholder=placeholder,
             min_length=1,
@@ -204,7 +210,7 @@ class RegistrationModal(discord.ui.Modal):
         )
         self.minecraft_name_label = discord.ui.Label(
             text=label,
-            description="ゲーム内で自分のキャラクターの頭上に表示される名前",
+            description=description,
             component=self.minecraft_name,
         )
         self.add_item(self.minecraft_name_label)
@@ -474,7 +480,11 @@ class MinecraftIdCorrectionModal(discord.ui.Modal):
         )
         self.correct_name_label = discord.ui.Label(
             text=label,
-            description="ゲーム内でキャラクターの頭上に表示される名前",
+            description=(
+                "ゲーム内でキャラクターの頭上に表示される名前"
+                if edition == "java"
+                else "名前#数字はゲーム内形式の名前数字へ自動変換します"
+            ),
             component=self.correct_name,
         )
         self.add_item(self.correct_name_label)
