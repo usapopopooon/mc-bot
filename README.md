@@ -48,12 +48,21 @@ Discord連携済みのプレイヤーが釣るとMinecraft内の釣りボーナ�
 獲得表示は対象プレイヤー本人の
 アクションバーだけに表示し、公開チャット・Discord通知・追加効果音は使用しません。
 このボーナスはlevel-botへ監査記録だけを送り、level-bot側のXPには加算しません。
+釣果はMinecraft側の `UsapoEventBridge` Paperプラグインが即時検知し、UUID付きの
+構造化ログを既存ログ監視へ渡します。scoreboardの定期照会は行いません。
 
 Discord連携済みのプレイヤーが原木・表皮を剥いだ原木・ネザーの幹を連続で壊すと、
 5本で5 XP、10本で15 XP、20本以降は10本ごとに30 XPを付与します。次の原木までの
 猶予は常に30秒で、壊すたびに更新されます。
 通知は本人のアクションバーだけに表示し、経験値オーブ取得音も本人だけに再生します。
 板材と葉は対象外です。釣りと同様、level-botには監査記録だけを残します。
+伐採もPaperのブロック破壊イベントから即時検知し、RCONポーリングは行いません。
+
+通常プレイで自然に獲得したMinecraft経験値もPaperイベントで検知します。高頻度な
+経験値オーブ取得をそのまま外部送信せず、Paper側でプレイヤーごとに5秒分を合算してから
+UUID付き構造化ログへ出力します。mc-botは増加量を直接level-botへ送り、30秒ごとの
+`experience query`は行いません。起動時のオンライン状態確認を除き、参加・退出は
+Minecraftログから追従します。
 
 釣りは10回以降10回ごと、木こりは20本・50本・以降50本ごとを公開節目として、
 Minecraft全体チャットとDiscord通知チャンネルへ記録を流します。公開節目では本人用の
@@ -62,6 +71,8 @@ Minecraft全体チャットとDiscord通知チャンネルへ記録を流しま�
 
 Discord連携済みのプレイヤーがMinecraftとDiscord VCに同時接続している間は、
 level-botのVC XPと、通常プレイで獲得したMinecraft内の経験値が2倍になります。
+VC倍率のON/OFFは状態が変わった時だけPaperプラグインへ伝え、自然経験値イベントの
+獲得量をサーバー内で直接2倍にします。経験値オーブごとのRCON追加は行いません。
 同時接続が始まった時だけ、Minecraft内の
 `tellraw` とDiscordの通知チャンネルへ開始通知を送ります。短時間の再接続は60秒の
 クールダウンで連投を防ぎ、終了通知は送りません。
@@ -75,6 +86,7 @@ ja_jp.json: 82ae51a68e114943fd95cc870643317dc02fe5e4
 
 ```text
 Minecraftコンテナ
+  ├─ UsapoEventBridge → 釣り・伐採イベントを構造化ログへ出力
   └─ minecraft-crossplay-data:/data
                     │ 読み取り専用で共有
                     ▼
@@ -245,6 +257,7 @@ Minecraftサーバーの再起動は必要ありません。
 | `VOICEVOX_TTS_API_TOKEN` | 読み上げ時 | VOICEVOX側と共有するBearerトークン |
 | `VOICEVOX_SPEAKER_ID` | いいえ | 話者ID。既定値は小夜/SAYOの `46` |
 | `VOICEVOX_SPEED` | いいえ | 読み上げ速度。既定値は `1.0` |
+| `MINECRAFT_INTEGRATION_SYNC_SECONDS` | いいえ | level-bot交換・VC状態の同期間隔。既定値は30秒。Minecraft XP量は照会しない |
 
 `MINECRAFT_DATA_VOLUME` はBotの動作設定ではなく、コンテナ起動前に外部ボリュームを
 解決するDocker Compose側のインフラ設定です。Coolifyの変数一覧に表示されるよう、

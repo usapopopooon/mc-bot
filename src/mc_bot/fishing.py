@@ -3,14 +3,9 @@ from __future__ import annotations
 import json
 import re
 
-FISHING_OBJECTIVE = "mc_fish_caught"
 FISHING_COMBO_WINDOW_SECONDS = 90
 
 _SAFE_PLAYER_NAME = re.compile(r"\.?[A-Za-z0-9_]{1,32}")
-_SCORE = re.compile(
-    rf"\bhas\s+(\d+)\s+\[{re.escape(FISHING_OBJECTIVE)}]",
-    re.IGNORECASE,
-)
 
 
 def fishing_reward_xp(combo_count: int) -> int:
@@ -31,24 +26,6 @@ def fishing_reward_xp(combo_count: int) -> int:
 
 def is_public_fishing_milestone(combo_count: int) -> bool:
     return combo_count >= 10 and combo_count % 10 == 0
-
-
-def fishing_objective_command() -> str:
-    return f"scoreboard objectives add {FISHING_OBJECTIVE} minecraft.custom:minecraft.fish_caught"
-
-
-def fishing_score_query_command(player_name: str) -> str:
-    _validate_player_name(player_name)
-    return f"scoreboard players get {player_name} {FISHING_OBJECTIVE}"
-
-
-def parse_fishing_score(response: str) -> int:
-    if match := _SCORE.search(response):
-        return int(match[1])
-    lowered = response.casefold()
-    if "none is set" in lowered or "has no score" in lowered:
-        return 0
-    raise ValueError("Minecraftの釣果数を読み取れませんでした")
 
 
 def fishing_combo_actionbar_command(

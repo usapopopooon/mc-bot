@@ -1161,6 +1161,148 @@ def test_fishing_bonus_starts_at_one_and_resets_after_window(tmp_path) -> None:
     assert [(event.combo_count, event.reward_xp) for event in restarted_second] == [(2, 5)]
 
 
+def test_event_driven_fishing_is_idempotent_and_uses_event_timestamps(tmp_path) -> None:
+    store = AccountStore(tmp_path / "accounts.db")
+    store.initialize()
+    account = store.create_registration(
+        edition="java",
+        minecraft_name="Steve",
+        server_player_name="Steve",
+        discord_user_id=123,
+        discord_username="hoge",
+        source="self",
+        status="active",
+        created_by=123,
+    )
+    common = {
+        "account_id": account.id,
+        "discord_user_id": 123,
+        "guild_id": 456,
+        "combo_window_seconds": 90,
+    }
+
+    first = store.record_fishing_catch(
+        **common,
+        event_id="00000000-0000-0000-0000-000000000001",
+        observed_at="2026-08-09T00:00:00+00:00",
+    )
+    replay = store.record_fishing_catch(
+        **common,
+        event_id="00000000-0000-0000-0000-000000000001",
+        observed_at="2026-08-09T00:00:01+00:00",
+    )
+    second = store.record_fishing_catch(
+        **common,
+        event_id="00000000-0000-0000-0000-000000000002",
+        observed_at="2026-08-09T00:01:30+00:00",
+    )
+    reset = store.record_fishing_catch(
+        **common,
+        event_id="00000000-0000-0000-0000-000000000003",
+        observed_at="2026-08-09T00:03:01+00:00",
+    )
+
+    assert first is not None
+    assert (first.catch_count, first.combo_count, first.reward_xp) == (1, 1, 2)
+    assert replay is None
+    assert second is not None and (second.catch_count, second.combo_count, second.reward_xp) == (
+        2,
+        2,
+        5,
+    )
+    assert reset is not None and (reset.catch_count, reset.combo_count, reset.reward_xp) == (
+        3,
+        1,
+        2,
+    )
+
+
+def test_natural_minecraft_xp_event_creates_idempotent_outbox_entry(tmp_path) -> None:
+    store = AccountStore(tmp_path / "accounts.db")
+    store.initialize()
+    account = store.create_registration(
+        edition="java",
+        minecraft_name="Steve",
+        server_player_name="Steve",
+        discord_user_id=123,
+        discord_username="hoge",
+        source="self",
+        status="active",
+        created_by=123,
+    )
+    event_id = "00000000-0000-0000-0000-000000000009"
+    arguments = {
+        "event_id": event_id,
+        "account_id": account.id,
+        "discord_user_id": 123,
+        "guild_id": 456,
+        "minecraft_xp": 37,
+        "observed_at": "2026-08-11T00:00:00+00:00",
+    }
+
+    recorded = store.record_minecraft_xp_gain(**arguments)
+    replay = store.record_minecraft_xp_gain(**arguments)
+
+    assert recorded is not None
+    assert recorded.event_id == event_id
+    assert recorded.minecraft_xp == 37
+    assert replay is None
+    assert store.list_minecraft_xp_outbox() == [recorded]
+
+
+def test_natural_xp_event_matches_legacy_positive_delta_pseudo_oracle(tmp_path) -> None:
+    store = AccountStore(tmp_path / "accounts.db")
+    store.initialize()
+    account = store.create_registration(
+        edition="java",
+        minecraft_name="Steve",
+        server_player_name="Steve",
+        discord_user_id=123,
+        discord_username="hoge",
+        source="self",
+        status="active",
+        created_by=123,
+    )
+    observed_at = "2026-08-11T00:00:05+00:00"
+    store.set_minecraft_xp_observation(
+        account_id=account.id,
+        current_xp=100,
+        observed_at="2026-08-11T00:00:00+00:00",
+    )
+
+    legacy = store.observe_minecraft_xp(
+        account_id=account.id,
+        discord_user_id=123,
+        guild_id=456,
+        current_xp=137,
+        observed_at=observed_at,
+    )
+    event_driven = store.record_minecraft_xp_gain(
+        event_id="00000000-0000-0000-0000-000000000010",
+        account_id=account.id,
+        discord_user_id=123,
+        guild_id=456,
+        minecraft_xp=37,
+        observed_at=observed_at,
+    )
+
+    assert legacy is not None
+    assert event_driven is not None
+    assert (
+        event_driven.account_id,
+        event_driven.discord_user_id,
+        event_driven.guild_id,
+        event_driven.minecraft_xp,
+        event_driven.observed_at,
+    ) == (
+        legacy.account_id,
+        legacy.discord_user_id,
+        legacy.guild_id,
+        legacy.minecraft_xp,
+        legacy.observed_at,
+    )
+
+
 def test_fishing_combo_creates_each_missed_catch_reward_once(tmp_path) -> None:
     store = AccountStore(tmp_path / "accounts.db")
     store.initialize()
@@ -1536,6 +1678,54 @@ def test_only_one_store_can_reserve_advancement_minecraft_reward(tmp_path) -> No
         )
         is None
     )
+
+
+def test_event_driven_woodcutting_deduplicates_non_reward_events(tmp_path) -> None:
+    store = AccountStore(tmp_path / "accounts.db")
+    store.initialize()
+    account = store.create_registration(
+        edition="java",
+        minecraft_name="Steve",
+        server_player_name="Steve",
+        discord_user_id=123,
+        discord_username="hoge",
+        source="self",
+        status="active",
+        created_by=123,
+    )
+    common = {
+        "account_id": account.id,
+        "discord_user_id": 123,
+        "guild_id": 456,
+        "combo_window_seconds": 30,
+    }
+
+    for index in range(1, 5):
+        assert (
+            store.record_woodcutting_log(
+                **common,
+                event_id=f"00000000-0000-0000-0000-{index:012d}",
+                observed_at=f"2026-08-11T00:00:0{index}+00:00",
+            )
+            is None
+        )
+    assert (
+        store.record_woodcutting_log(
+            **common,
+            event_id="00000000-0000-0000-0000-000000000001",
+            observed_at="2026-08-11T00:00:05+00:00",
+        )
+        is None
+    )
+    reward = store.record_woodcutting_log(
+        **common,
+        event_id="00000000-0000-0000-0000-000000000005",
+        observed_at="2026-08-11T00:00:05+00:00",
+    )
+
+    assert reward is not None
+    assert (reward.log_count, reward.combo_count, reward.reward_xp) == (5, 5, 5)
+    assert store.list_pending_woodcutting_reward_deliveries() == [reward]
 
 
 def test_tracks_woodcutting_milestones_resets_and_excludes_reward_from_sync(tmp_path) -> None:

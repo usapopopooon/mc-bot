@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import uuid
 from dataclasses import dataclass
 
 import aiohttp
@@ -170,6 +171,12 @@ def experience_add_points_command(player_name: str, points: int) -> str:
     if points <= 0:
         raise ValueError("points must be positive")
     return f"experience add {player_name} {points} points"
+
+
+def voice_bonus_state_command(player_uuid: str, *, active: bool) -> str:
+    normalized_uuid = str(uuid.UUID(player_uuid))
+    state = "on" if active else "off"
+    return f"usapo-event-bridge voice-bonus {normalized_uuid} {state}"
 
 
 def actionbar_clear_command(player_name: str) -> str:

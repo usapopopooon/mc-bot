@@ -26,9 +26,7 @@ class Config:
     voicevox_speed: float = 1.0
     level_bot_api_url: str = ""
     level_bot_api_token: str = ""
-    minecraft_xp_poll_seconds: int = 30
-    fishing_combo_poll_seconds: int = 5
-    woodcutting_combo_poll_seconds: int = 2
+    minecraft_integration_sync_seconds: int = 30
 
     @classmethod
     def from_environment(cls, environment: Mapping[str, str] | None = None) -> Config:
@@ -64,27 +62,13 @@ class Config:
             raise ValueError("LEVEL_BOT_API_URL and LEVEL_BOT_API_TOKEN must be set together")
         if level_bot_url and not level_bot_url.startswith(("http://", "https://")):
             raise ValueError("LEVEL_BOT_API_URL must be an HTTP or HTTPS URL")
-        poll_text = values.get("MINECRAFT_XP_POLL_SECONDS", "30").strip()
+        sync_text = values.get("MINECRAFT_INTEGRATION_SYNC_SECONDS", "30").strip()
         try:
-            poll_seconds = int(poll_text)
+            sync_seconds = int(sync_text)
         except ValueError as error:
-            raise ValueError("MINECRAFT_XP_POLL_SECONDS must be an integer") from error
-        if not 10 <= poll_seconds <= 60:
-            raise ValueError("MINECRAFT_XP_POLL_SECONDS must be between 10 and 60")
-        fishing_poll_text = values.get("FISHING_COMBO_POLL_SECONDS", "5").strip()
-        try:
-            fishing_poll_seconds = int(fishing_poll_text)
-        except ValueError as error:
-            raise ValueError("FISHING_COMBO_POLL_SECONDS must be an integer") from error
-        if not 1 <= fishing_poll_seconds <= 30:
-            raise ValueError("FISHING_COMBO_POLL_SECONDS must be between 1 and 30")
-        woodcutting_poll_text = values.get("WOODCUTTING_COMBO_POLL_SECONDS", "2").strip()
-        try:
-            woodcutting_poll_seconds = int(woodcutting_poll_text)
-        except ValueError as error:
-            raise ValueError("WOODCUTTING_COMBO_POLL_SECONDS must be an integer") from error
-        if not 1 <= woodcutting_poll_seconds <= 10:
-            raise ValueError("WOODCUTTING_COMBO_POLL_SECONDS must be between 1 and 10")
+            raise ValueError("MINECRAFT_INTEGRATION_SYNC_SECONDS must be an integer") from error
+        if not 10 <= sync_seconds <= 60:
+            raise ValueError("MINECRAFT_INTEGRATION_SYNC_SECONDS must be between 10 and 60")
         return cls(
             discord_token=token,
             rcon_host=values.get("MINECRAFT_RCON_HOST", "minecraft").strip() or "minecraft",
@@ -97,9 +81,7 @@ class Config:
             voicevox_speed=speed,
             level_bot_api_url=level_bot_url,
             level_bot_api_token=level_bot_token,
-            minecraft_xp_poll_seconds=poll_seconds,
-            fishing_combo_poll_seconds=fishing_poll_seconds,
-            woodcutting_combo_poll_seconds=woodcutting_poll_seconds,
+            minecraft_integration_sync_seconds=sync_seconds,
         )
 
 

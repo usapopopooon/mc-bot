@@ -6,28 +6,6 @@ import re
 WOODCUTTING_COMBO_WINDOW_SECONDS = 30
 
 _SAFE_PLAYER_NAME = re.compile(r"\.?[A-Za-z0-9_]{1,32}")
-_OVERWORLD_WOODS = (
-    "oak",
-    "spruce",
-    "birch",
-    "jungle",
-    "acacia",
-    "dark_oak",
-    "mangrove",
-    "cherry",
-    "pale_oak",
-)
-_LOG_OBJECTIVES = (
-    *((f"wc_{wood.replace('_', '')}", f"minecraft:{wood}_log") for wood in _OVERWORLD_WOODS),
-    *(
-        (f"wcs_{wood.replace('_', '')}", f"minecraft:stripped_{wood}_log")
-        for wood in _OVERWORLD_WOODS
-    ),
-    ("wc_crimson", "minecraft:crimson_stem"),
-    ("wc_warped", "minecraft:warped_stem"),
-    ("wcs_crimson", "minecraft:stripped_crimson_stem"),
-    ("wcs_warped", "minecraft:stripped_warped_stem"),
-)
 
 
 def woodcutting_reward_xp(combo_count: int) -> int:
@@ -42,30 +20,6 @@ def woodcutting_reward_xp(combo_count: int) -> int:
 
 def is_public_woodcutting_milestone(combo_count: int) -> bool:
     return combo_count == 20 or (combo_count >= 50 and combo_count % 50 == 0)
-
-
-def woodcutting_objective_commands() -> tuple[str, ...]:
-    return tuple(
-        f"scoreboard objectives add {objective} minecraft.mined:{block}"
-        for objective, block in _LOG_OBJECTIVES
-    )
-
-
-def woodcutting_scores_query_command(player_name: str) -> str:
-    _validate_player_name(player_name)
-    return f"scoreboard players list {player_name}"
-
-
-def parse_log_break_count(response: str) -> int:
-    total = 0
-    for objective, _block in _LOG_OBJECTIVES:
-        match = re.search(
-            rf"(?:\[{re.escape(objective)}\]|\b{re.escape(objective)})\s*:\s*(\d+)",
-            response,
-        )
-        if match is not None:
-            total += int(match[1])
-    return total
 
 
 def woodcutting_actionbar_command(player_name: str, combo_count: int, reward_xp: int) -> str:

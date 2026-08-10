@@ -3,6 +3,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from mc_bot.activity import ActivityKind, MinecraftActivityEvent
 from mc_bot.bot import MinecraftDiscordBot
 from mc_bot.config import Config
 from mc_bot.experience import (
@@ -10,6 +11,7 @@ from mc_bot.experience import (
     MinecraftVoiceHeartbeatResult,
     MinecraftXpExchangeEvent,
 )
+from mc_bot.rcon import RconError
 from mc_bot.settings import RuntimeSettings
 from mc_bot.tailer import Cursor, PendingLine
 
@@ -21,12 +23,12 @@ class ExperienceRcon:
         self.add_error_response: str | None = None
         self.add_exception: Exception | None = None
         self.tellraw_failures = 0
-        self.fishing_catches = 0
-        self.woodcutting_logs = 0
         self.commands: list[str] = []
 
     def execute(self, command: str) -> str:
         self.commands.append(command)
+        if command.startswith("usapo-event-bridge voice-bonus "):
+            return "Voice XP bonus state updated"
         if command.startswith("tellraw @a "):
             if self.tellraw_failures > 0:
                 self.tellraw_failures -= 1
@@ -42,14 +44,6 @@ class ExperienceRcon:
             return f"Added {added} experience points to Steve"
         if command == "list":
             return "There are 1 of a max of 20 players online: Steve"
-        if command.startswith("scoreboard objectives add mc_fish_caught "):
-            return "Created new objective [mc_fish_caught]"
-        if command.startswith("scoreboard objectives add wc"):
-            return "Created new objective"
-        if command == "scoreboard players get Steve mc_fish_caught":
-            return f"Steve has {self.fishing_catches} [mc_fish_caught]"
-        if command == "scoreboard players list Steve":
-            return f"Player Steve has 1 score: [wc_oak]: {self.woodcutting_logs}"
         if command.startswith("title Steve actionbar "):
             return ""
         if command.startswith("playsound minecraft:entity.experience_orb.pickup player Steve "):
@@ -59,6 +53,22 @@ class ExperienceRcon:
         if command == "experience query Steve points":
             return f"Steve has {self.points} experience points"
         raise AssertionError(f"unexpected RCON command: {command}")
+
+
+PLAYER_UUID = "8667ba71-b85a-4004-af54-457a9734eed7"
+
+
+def activity(
+    kind: ActivityKind, index: int, second: int, *, amount: int = 1
+) -> MinecraftActivityEvent:
+    return MinecraftActivityEvent(
+        event_id=f"00000000-0000-0000-0000-{index:012d}",
+        kind=kind,
+        player_uuid=PLAYER_UUID,
+        player_name="Steve",
+        amount=amount,
+        occurred_at=f"2026-08-11T00:00:{second:02d}+00:00",
+    )
 
 
 def test_fishing_combo_rewards_minecraft_xp_with_private_actionbar_only(
@@ -82,6 +92,7 @@ def test_fishing_combo_rewards_minecraft_xp_with_private_actionbar_only(
         source="self",
         status="active",
         created_by=123,
+        player_uuid=PLAYER_UUID,
     )
     bot._settings = RuntimeSettings(guild_id=456)
     rcon = ExperienceRcon()
@@ -95,11 +106,9 @@ def test_fishing_combo_rewards_minecraft_xp_with_private_actionbar_only(
     bot._level_bot_xp.send_fishing_combo = send_audit  # type: ignore[method-assign]
 
     async def exercise() -> None:
-        await bot._sync_fishing_combos()  # baseline
-        rcon.fishing_catches = 1
-        await bot._sync_fishing_combos()
-        rcon.fishing_catches = 2
-        await bot._sync_fishing_combos()
+        await bot._record_activity_event(activity(ActivityKind.FISHING, 1, 1))
+        await bot._record_activity_event(activity(ActivityKind.FISHING, 2, 2))
+        await bot._deliver_pending_activity_events()
 
     asyncio.run(exercise())
 
@@ -117,6 +126,9 @@ def test_fishing_combo_rewards_minecraft_xp_with_private_actionbar_only(
     assert send_audit.await_count == 2
     assert bot._accounts.list_pending_fishing_audits() == []
     assert bot._accounts.list_pending_fishing_reward_deliveries() == []
+    assert not any(
+        command == "list" or command.startswith("scoreboard ") for command in rcon.commands
+    )
 
 
 def test_public_fishing_milestone_replaces_private_actionbar_and_stays_silent(
@@ -140,6 +152,7 @@ def test_public_fishing_milestone_replaces_private_actionbar_and_stays_silent(
         source="self",
         status="active",
         created_by=123,
+        player_uuid=PLAYER_UUID,
     )
     bot._settings = RuntimeSettings(guild_id=456)
     rcon = ExperienceRcon()
@@ -156,9 +169,9 @@ def test_public_fishing_milestone_replaces_private_actionbar_and_stays_silent(
     bot._send = send_log  # type: ignore[method-assign]
 
     async def exercise() -> None:
-        await bot._sync_fishing_combos()
-        rcon.fishing_catches = 10
-        await bot._sync_fishing_combos()
+        for index in range(1, 11):
+            await bot._record_activity_event(activity(ActivityKind.FISHING, index, index))
+        await bot._deliver_pending_activity_events()
 
     asyncio.run(exercise())
 
@@ -199,10 +212,10 @@ def test_woodcutting_combo_rewards_with_private_actionbar_and_xp_sound(tmp_path)
         source="self",
         status="active",
         created_by=123,
+        player_uuid=PLAYER_UUID,
     )
     bot._settings = RuntimeSettings(guild_id=456)
     rcon = ExperienceRcon()
-    rcon.woodcutting_logs = 100
     bot._rcon = rcon  # type: ignore[assignment]
     bot._accounts.set_minecraft_xp_observation(
         account_id=account.id,
@@ -213,9 +226,9 @@ def test_woodcutting_combo_rewards_with_private_actionbar_and_xp_sound(tmp_path)
     bot._level_bot_xp.send_woodcutting_combo = send_audit  # type: ignore[method-assign]
 
     async def exercise() -> None:
-        await bot._sync_woodcutting_combos()  # baseline
-        rcon.woodcutting_logs = 105
-        await bot._sync_woodcutting_combos()
+        for index in range(1, 6):
+            await bot._record_activity_event(activity(ActivityKind.WOODCUTTING, index, index))
+        await bot._deliver_pending_activity_events()
 
     asyncio.run(exercise())
 
@@ -236,6 +249,52 @@ def test_woodcutting_combo_rewards_with_private_actionbar_and_xp_sound(tmp_path)
     send_audit.assert_awaited_once()
     assert bot._accounts.list_pending_woodcutting_audits() == []
     assert bot._accounts.list_pending_woodcutting_reward_deliveries() == []
+
+
+def test_failed_fishing_delivery_does_not_block_woodcutting_delivery(tmp_path) -> None:
+    config = Config(
+        discord_token="test",
+        accounts_path=tmp_path / "accounts.db",
+        rcon_password="test",
+        level_bot_api_url="https://levels.example.test",
+        level_bot_api_token="xp-secret",
+    )
+    bot = MinecraftDiscordBot(config)
+    bot._accounts.initialize()
+    bot._accounts.create_registration(
+        edition="java",
+        minecraft_name="Steve",
+        server_player_name="Steve",
+        discord_user_id=123,
+        discord_username="hoge",
+        source="self",
+        status="active",
+        created_by=123,
+        player_uuid=PLAYER_UUID,
+    )
+    bot._settings = RuntimeSettings(guild_id=456)
+
+    async def exercise() -> None:
+        await bot._record_activity_event(activity(ActivityKind.FISHING, 1, 1))
+        for index in range(2, 7):
+            await bot._record_activity_event(activity(ActivityKind.WOODCUTTING, index, index))
+
+        bot._grant_fishing_combo_reward = AsyncMock(  # type: ignore[method-assign]
+            side_effect=OSError("fishing RCON connection lost")
+        )
+        bot._grant_woodcutting_combo_reward = AsyncMock()  # type: ignore[method-assign]
+        bot._deliver_fishing_public_announcements = AsyncMock()  # type: ignore[method-assign]
+        bot._deliver_fishing_combo_audits = AsyncMock()  # type: ignore[method-assign]
+        bot._deliver_woodcutting_public_announcements = AsyncMock()  # type: ignore[method-assign]
+        bot._deliver_woodcutting_combo_audits = AsyncMock()  # type: ignore[method-assign]
+
+        await bot._deliver_pending_activity_events()
+
+        bot._grant_fishing_combo_reward.assert_awaited_once()  # type: ignore[attr-defined]
+        bot._grant_woodcutting_combo_reward.assert_awaited_once()  # type: ignore[attr-defined]
+        await bot.close()
+
+    asyncio.run(exercise())
 
 
 def test_public_woodcutting_milestone_replaces_actionbar_but_keeps_private_sound(
@@ -259,10 +318,10 @@ def test_public_woodcutting_milestone_replaces_actionbar_but_keeps_private_sound
         source="self",
         status="active",
         created_by=123,
+        player_uuid=PLAYER_UUID,
     )
     bot._settings = RuntimeSettings(guild_id=456)
     rcon = ExperienceRcon()
-    rcon.woodcutting_logs = 100
     bot._rcon = rcon  # type: ignore[assignment]
     bot._accounts.set_minecraft_xp_observation(
         account_id=account.id,
@@ -279,9 +338,9 @@ def test_public_woodcutting_milestone_replaces_actionbar_but_keeps_private_sound
     pending_after_failure = []
 
     async def exercise() -> None:
-        await bot._sync_woodcutting_combos()
-        rcon.woodcutting_logs = 120
-        await bot._sync_woodcutting_combos()
+        for index in range(1, 21):
+            await bot._record_activity_event(activity(ActivityKind.WOODCUTTING, index, index))
+        await bot._deliver_pending_activity_events()
         pending_after_failure.extend(bot._accounts.list_pending_woodcutting_public_deliveries())
         await bot._deliver_woodcutting_public_announcements()
 
@@ -330,6 +389,105 @@ class OneLineTailer:
 
     def acknowledge(self, line: PendingLine) -> None:
         self.acknowledged.append(line)
+
+
+def test_structured_fishing_log_wires_uuid_to_reward_without_scoreboard_poll(tmp_path) -> None:
+    config = Config(
+        discord_token="test",
+        accounts_path=tmp_path / "accounts.db",
+        rcon_password="test",
+        level_bot_api_url="https://levels.example.test",
+        level_bot_api_token="xp-secret",
+    )
+    bot = MinecraftDiscordBot(config)
+    bot._accounts.initialize()
+    account = bot._accounts.create_registration(
+        edition="java",
+        minecraft_name="OldName",
+        server_player_name="Steve",
+        discord_user_id=123,
+        discord_username="hoge",
+        source="self",
+        status="active",
+        created_by=123,
+        player_uuid=PLAYER_UUID,
+    )
+    bot._accounts.set_minecraft_xp_observation(
+        account_id=account.id,
+        current_xp=0,
+        observed_at="2026-08-11T00:00:00+00:00",
+    )
+    bot._settings = RuntimeSettings(guild_id=456)
+    rcon = ExperienceRcon()
+    bot._rcon = rcon  # type: ignore[assignment]
+    bot._level_bot_xp.send_fishing_combo = AsyncMock(  # type: ignore[method-assign]
+        return_value=True
+    )
+    pending = PendingLine(
+        text=(
+            "[00:00:01] [Server thread/INFO]: [UsapoEventBridge] USAPO_ACTIVITY|1|"
+            "00000000-0000-0000-0000-000000000001|fishing|"
+            f"{PLAYER_UUID}|TmV3TmFtZQ|1|1786406401000"
+        ),
+        cursor=Cursor("log-1", 123),
+    )
+    tailer = OneLineTailer(pending)
+    bot._tailer = tailer  # type: ignore[assignment]
+
+    asyncio.run(bot._forward_logs())
+
+    assert tailer.acknowledged == [pending]
+    assert rcon.commands.count("experience add Steve 2 points") == 1
+    assert any("釣りボーナス! +2 XP" in command for command in rcon.commands)
+    assert not any(
+        command == "list" or command.startswith("scoreboard ") for command in rcon.commands
+    )
+
+
+def test_structured_experience_log_wires_uuid_and_amount_without_xp_poll(tmp_path) -> None:
+    config = Config(
+        discord_token="test",
+        accounts_path=tmp_path / "accounts.db",
+        rcon_password="test",
+        level_bot_api_url="https://levels.example.test",
+        level_bot_api_token="xp-secret",
+    )
+    bot = MinecraftDiscordBot(config)
+    bot._accounts.initialize()
+    bot._accounts.create_registration(
+        edition="java",
+        minecraft_name="OldName",
+        server_player_name="Steve",
+        discord_user_id=123,
+        discord_username="hoge",
+        source="self",
+        status="active",
+        created_by=123,
+        player_uuid=PLAYER_UUID,
+    )
+    bot._settings = RuntimeSettings(guild_id=456)
+    send = AsyncMock(return_value=True)
+    bot._level_bot_xp.send = send  # type: ignore[method-assign]
+    pending = PendingLine(
+        text=(
+            "[00:00:01] [Server thread/INFO]: [UsapoEventBridge] USAPO_ACTIVITY|1|"
+            "00000000-0000-0000-0000-000000000099|experience|"
+            f"{PLAYER_UUID}|TmV3TmFtZQ|37|1786406401000"
+        ),
+        cursor=Cursor("log-1", 456),
+    )
+    tailer = OneLineTailer(pending)
+    bot._tailer = tailer  # type: ignore[assignment]
+
+    asyncio.run(bot._forward_logs())
+
+    assert tailer.acknowledged == [pending]
+    send.assert_awaited_once()
+    event = send.await_args.args[0]
+    assert event.minecraft_xp == 37
+    assert event.discord_user_id == 123
+    assert event.account_id == 1
+    assert bot._accounts.list_minecraft_xp_outbox() == []
 
 
 def test_sync_delivers_online_minecraft_xp_exchange_once(tmp_path) -> None:
@@ -646,7 +804,7 @@ def test_sync_does_not_charge_ambiguous_rcon_delivery(tmp_path) -> None:
     bot._send.assert_not_awaited()  # type: ignore[attr-defined]
 
 
-def test_sync_baselines_then_delivers_positive_xp_delta(tmp_path) -> None:
+def test_natural_xp_event_delivers_exact_gain_without_experience_queries(tmp_path) -> None:
     config = Config(
         discord_token="test",
         accounts_path=tmp_path / "accounts.db",
@@ -665,6 +823,7 @@ def test_sync_baselines_then_delivers_positive_xp_delta(tmp_path) -> None:
         source="self",
         status="active",
         created_by=123,
+        player_uuid=PLAYER_UUID,
     )
     bot._settings = RuntimeSettings(guild_id=456)
     rcon = ExperienceRcon()
@@ -676,11 +835,8 @@ def test_sync_baselines_then_delivers_positive_xp_delta(tmp_path) -> None:
     )
 
     async def exercise() -> None:
-        await bot._sync_minecraft_xp()
-        send.assert_not_awaited()
-
-        rcon.points = 5
-        await bot._sync_minecraft_xp()
+        assert await bot._record_activity_event(activity(ActivityKind.EXPERIENCE, 99, 1, amount=5))
+        await bot._deliver_pending_activity_events()
 
     asyncio.run(exercise())
 
@@ -690,6 +846,9 @@ def test_sync_baselines_then_delivers_positive_xp_delta(tmp_path) -> None:
     assert event.discord_user_id == 123
     assert event.guild_id == 456
     assert bot._accounts.list_minecraft_xp_outbox() == []
+    assert not any(
+        command == "list" or command.startswith("experience query ") for command in rcon.commands
+    )
 
 
 def test_sync_announces_voice_bonus_start_once_with_cooldown(tmp_path) -> None:
@@ -702,7 +861,7 @@ def test_sync_announces_voice_bonus_start_once_with_cooldown(tmp_path) -> None:
     )
     bot = MinecraftDiscordBot(config)
     bot._accounts.initialize()
-    bot._accounts.create_registration(
+    account = bot._accounts.create_registration(
         edition="java",
         minecraft_name="Steve",
         server_player_name="Steve",
@@ -711,10 +870,21 @@ def test_sync_announces_voice_bonus_start_once_with_cooldown(tmp_path) -> None:
         source="self",
         status="active",
         created_by=123,
+        player_uuid=PLAYER_UUID,
     )
     bot._settings = RuntimeSettings(guild_id=456)
     rcon = ExperienceRcon()
     bot._rcon = rcon  # type: ignore[assignment]
+    bot._online_player_names = {"steve"}
+    bot._linked_accounts_by_online_name = AsyncMock(  # type: ignore[method-assign]
+        return_value={"steve": account}
+    )
+    bot._level_bot_xp.fetch_xp_exchanges = AsyncMock(  # type: ignore[method-assign]
+        return_value=[]
+    )
+    bot._level_bot_xp.fetch_resource_exchanges = AsyncMock(  # type: ignore[method-assign]
+        return_value=[]
+    )
     bot._level_bot_xp.send = AsyncMock(return_value=True)  # type: ignore[method-assign]
     bot._level_bot_xp.send_voice_heartbeat = AsyncMock(  # type: ignore[method-assign]
         side_effect=[
@@ -764,7 +934,7 @@ def test_sync_doubles_in_game_xp_once_while_voice_bonus_is_active(tmp_path) -> N
     )
     bot = MinecraftDiscordBot(config)
     bot._accounts.initialize()
-    bot._accounts.create_registration(
+    account = bot._accounts.create_registration(
         edition="java",
         minecraft_name="Steve",
         server_player_name="Steve",
@@ -773,11 +943,22 @@ def test_sync_doubles_in_game_xp_once_while_voice_bonus_is_active(tmp_path) -> N
         source="self",
         status="active",
         created_by=123,
+        player_uuid=PLAYER_UUID,
     )
     bot._settings = RuntimeSettings(guild_id=456)
     rcon = ExperienceRcon()
     rcon.level = 0
     bot._rcon = rcon  # type: ignore[assignment]
+    bot._online_player_names = {"steve"}
+    bot._linked_accounts_by_online_name = AsyncMock(  # type: ignore[method-assign]
+        return_value={"steve": account}
+    )
+    bot._level_bot_xp.fetch_xp_exchanges = AsyncMock(  # type: ignore[method-assign]
+        return_value=[]
+    )
+    bot._level_bot_xp.fetch_resource_exchanges = AsyncMock(  # type: ignore[method-assign]
+        return_value=[]
+    )
     bot._level_bot_xp.send = AsyncMock(return_value=True)  # type: ignore[method-assign]
     bot._level_bot_xp.send_voice_heartbeat = AsyncMock(  # type: ignore[method-assign]
         return_value=MinecraftVoiceHeartbeatResult(30, True)
@@ -789,23 +970,30 @@ def test_sync_doubles_in_game_xp_once_while_voice_bonus_is_active(tmp_path) -> N
 
     async def exercise() -> None:
         await bot._sync_minecraft_xp()
-        rcon.points = 3
         await bot._sync_minecraft_xp()
         await bot._sync_minecraft_xp()
 
     asyncio.run(exercise())
 
-    bonus_commands = [
-        command for command in rcon.commands if command.startswith("experience add Steve ")
-    ]
-    assert bonus_commands == ["experience add Steve 3 points"]
-    assert rcon.points == 6
-    sent_events = bot._level_bot_xp.send.await_args_list  # type: ignore[attr-defined]
-    assert len(sent_events) == 1
-    assert sent_events[0].args[0].minecraft_xp == 3
+    assert rcon.commands.count(f"usapo-event-bridge voice-bonus {PLAYER_UUID} on") == 1
+    assert not any(command.startswith("experience query ") for command in rcon.commands)
+    assert not any(command.startswith("experience add Steve ") for command in rcon.commands)
+    assert "list" not in rcon.commands
+    bot._level_bot_xp.send.assert_not_awaited()  # type: ignore[attr-defined]
 
 
-def test_voice_bonus_activation_baselines_prior_xp_before_doubling(tmp_path) -> None:
+def test_online_player_cache_uses_one_startup_list_query() -> None:
+    bot = MinecraftDiscordBot(Config(discord_token="test", rcon_password="test"))
+    rcon = ExperienceRcon()
+    bot._rcon = rcon  # type: ignore[assignment]
+
+    asyncio.run(bot._refresh_online_player_cache())
+
+    assert rcon.commands == ["list"]
+    assert bot._online_player_names == {"steve"}
+
+
+def test_voice_bonus_activation_is_sent_to_paper_without_xp_query(tmp_path) -> None:
     config = Config(
         discord_token="test",
         accounts_path=tmp_path / "accounts.db",
@@ -824,17 +1012,12 @@ def test_voice_bonus_activation_baselines_prior_xp_before_doubling(tmp_path) -> 
         source="self",
         status="active",
         created_by=123,
+        player_uuid=PLAYER_UUID,
     )
     bot._settings = RuntimeSettings(guild_id=456)
     rcon = ExperienceRcon()
     rcon.level = 0
     bot._rcon = rcon  # type: ignore[assignment]
-    bot._accounts.set_minecraft_xp_observation(
-        account_id=account.id,
-        current_xp=0,
-        observed_at="2026-08-04T00:00:00+00:00",
-    )
-    rcon.points = 3
     bot._level_bot_xp.send = AsyncMock(return_value=True)  # type: ignore[method-assign]
     bot._level_bot_xp.send_voice_heartbeat = AsyncMock(  # type: ignore[method-assign]
         return_value=MinecraftVoiceHeartbeatResult(0, True)
@@ -846,20 +1029,15 @@ def test_voice_bonus_activation_baselines_prior_xp_before_doubling(tmp_path) -> 
 
     async def exercise() -> None:
         await bot._sync_voice_bonus_for_account(account)
-        assert not any(command.startswith("experience add Steve ") for command in rcon.commands)
-        rcon.points = 5
-        await bot._sync_minecraft_xp()
 
     asyncio.run(exercise())
 
-    bonus_commands = [
-        command for command in rcon.commands if command.startswith("experience add Steve ")
-    ]
-    assert bonus_commands == ["experience add Steve 2 points"]
-    assert rcon.points == 7
+    assert rcon.commands[0] == f"usapo-event-bridge voice-bonus {PLAYER_UUID} on"
+    assert sum(command.startswith("tellraw @a ") for command in rcon.commands) == 1
+    assert not any(command.startswith("experience query ") for command in rcon.commands)
 
 
-def test_voice_bonus_deactivation_settles_xp_earned_while_active(tmp_path) -> None:
+def test_voice_bonus_deactivation_is_sent_to_paper_without_xp_query(tmp_path) -> None:
     config = Config(
         discord_token="test",
         accounts_path=tmp_path / "accounts.db",
@@ -878,26 +1056,56 @@ def test_voice_bonus_deactivation_settles_xp_earned_while_active(tmp_path) -> No
         source="self",
         status="active",
         created_by=123,
+        player_uuid=PLAYER_UUID,
     )
     bot._settings = RuntimeSettings(guild_id=456)
     rcon = ExperienceRcon()
-    rcon.level = 0
-    rcon.points = 3
     bot._rcon = rcon  # type: ignore[assignment]
     bot._voice_bonus_active_users.add(123)
-    bot._accounts.set_minecraft_xp_observation(
-        account_id=account.id,
-        current_xp=0,
-        observed_at="2026-08-04T00:00:00+00:00",
-    )
     bot._level_bot_xp.send_voice_heartbeat = AsyncMock(  # type: ignore[method-assign]
         return_value=MinecraftVoiceHeartbeatResult(0, False)
     )
 
     asyncio.run(bot._sync_voice_bonus_for_account(account))
 
-    assert rcon.points == 6
+    assert rcon.commands == [f"usapo-event-bridge voice-bonus {PLAYER_UUID} off"]
+    assert not any(command.startswith("experience query ") for command in rcon.commands)
     assert 123 not in bot._voice_bonus_active_users
+
+
+def test_failed_paper_voice_bonus_activation_remains_retryable(tmp_path) -> None:
+    config = Config(
+        discord_token="test",
+        accounts_path=tmp_path / "accounts.db",
+        rcon_password="test",
+        level_bot_api_url="https://levels.example.test",
+        level_bot_api_token="xp-secret",
+    )
+    bot = MinecraftDiscordBot(config)
+    bot._accounts.initialize()
+    account = bot._accounts.create_registration(
+        edition="java",
+        minecraft_name="Steve",
+        server_player_name="Steve",
+        discord_user_id=123,
+        discord_username="hoge",
+        source="self",
+        status="active",
+        created_by=123,
+        player_uuid=PLAYER_UUID,
+    )
+    execute = AsyncMock(side_effect=[RconError("plugin unavailable"), None])
+    bot._execute_checked_rcon = execute  # type: ignore[method-assign]
+
+    async def exercise() -> None:
+        await bot._set_voice_bonus_state(account, active=True, notify=False)
+        assert 123 not in bot._voice_bonus_active_users
+        await bot._set_voice_bonus_state(account, active=True, notify=False)
+
+    asyncio.run(exercise())
+
+    assert execute.await_count == 2
+    assert 123 in bot._voice_bonus_active_users
 
 
 def test_failed_xp_bonus_restores_observation_and_logs_warning(tmp_path, caplog) -> None:
@@ -1350,7 +1558,60 @@ def test_minecraft_join_announces_standard_server_xp_when_voice_bonus_is_inactiv
     assert tailer.acknowledged == [line]
 
 
-def test_sync_pauses_observation_while_api_outbox_is_blocked(tmp_path) -> None:
+def test_minecraft_join_resends_active_voice_bonus_after_paper_state_loss(tmp_path) -> None:
+    config = Config(
+        discord_token="test",
+        accounts_path=tmp_path / "accounts.db",
+        rcon_password="test",
+        minecraft_whitelist_path=tmp_path / "whitelist.json",
+        level_bot_api_url="https://levels.example.test",
+        level_bot_api_token="xp-secret",
+    )
+    (tmp_path / "usercache.json").write_text(
+        '[{"name":"Steve","uuid":"8667ba71-b85a-4004-af54-457a9734eed7"}]',
+        encoding="utf-8",
+    )
+    bot = MinecraftDiscordBot(config)
+    bot._accounts.initialize()
+    bot._accounts.create_registration(
+        edition="java",
+        minecraft_name="Steve",
+        server_player_name="Steve",
+        discord_user_id=123,
+        discord_username="hoge",
+        source="self",
+        status="active",
+        created_by=123,
+        player_uuid=PLAYER_UUID,
+    )
+    bot._settings = RuntimeSettings(guild_id=456)
+    bot._voice_bonus_active_users.add(123)
+    rcon = ExperienceRcon()
+    bot._rcon = rcon  # type: ignore[assignment]
+    line = PendingLine(
+        "[12:34:56] [Server thread/INFO]: Steve joined the game",
+        Cursor("device:inode", 100),
+    )
+    tailer = OneLineTailer(line)
+    bot._tailer = tailer  # type: ignore[assignment]
+    bot.wait_until_ready = AsyncMock()  # type: ignore[method-assign]
+    bot._level_bot_xp.send_voice_heartbeat = AsyncMock(  # type: ignore[method-assign]
+        return_value=MinecraftVoiceHeartbeatResult(0, True)
+    )
+    bot._send = AsyncMock()  # type: ignore[method-assign]
+    guild = MagicMock()
+    guild.name = "うさぽサーバー"
+    guild.get_member.return_value = None
+    bot.get_guild = MagicMock(return_value=guild)  # type: ignore[method-assign]
+
+    asyncio.run(bot._forward_logs())
+
+    assert f"usapo-event-bridge voice-bonus {PLAYER_UUID} on" in rcon.commands
+    assert 123 in bot._voice_bonus_active_users
+    assert tailer.acknowledged == [line]
+
+
+def test_natural_xp_event_stays_in_outbox_while_api_is_blocked(tmp_path) -> None:
     config = Config(
         discord_token="test",
         accounts_path=tmp_path / "accounts.db",
@@ -1369,6 +1630,7 @@ def test_sync_pauses_observation_while_api_outbox_is_blocked(tmp_path) -> None:
         source="self",
         status="active",
         created_by=123,
+        player_uuid=PLAYER_UUID,
     )
     bot._settings = RuntimeSettings(guild_id=456)
     rcon = ExperienceRcon()
@@ -1380,9 +1642,8 @@ def test_sync_pauses_observation_while_api_outbox_is_blocked(tmp_path) -> None:
     )
 
     async def exercise() -> int:
-        await bot._sync_minecraft_xp()
-        rcon.points = 5
-        await bot._sync_minecraft_xp()
+        assert await bot._record_activity_event(activity(ActivityKind.EXPERIENCE, 100, 1, amount=5))
+        await bot._deliver_pending_activity_events()
         commands_after_failure = len(rcon.commands)
         await bot._sync_minecraft_xp()
         return commands_after_failure
@@ -1391,6 +1652,7 @@ def test_sync_pauses_observation_while_api_outbox_is_blocked(tmp_path) -> None:
 
     assert bot._accounts.list_minecraft_xp_outbox()
     assert len(rcon.commands) == commands_after_failure
+    assert not any(command.startswith("experience query ") for command in rcon.commands)
 
 
 def test_sync_announces_level_up_with_guild_name_then_acknowledges(tmp_path) -> None:
@@ -1416,6 +1678,7 @@ def test_sync_announces_level_up_with_guild_name_then_acknowledges(tmp_path) -> 
     bot._settings = RuntimeSettings(guild_id=456)
     rcon = ExperienceRcon()
     bot._rcon = rcon  # type: ignore[assignment]
+    bot._online_player_names = {"steve"}
     event = MinecraftLevelUpEvent(
         id=7,
         guild_id=456,
@@ -1436,10 +1699,9 @@ def test_sync_announces_level_up_with_guild_name_then_acknowledges(tmp_path) -> 
 
     asyncio.run(bot._sync_minecraft_level_up_announcements())
 
-    assert len(rcon.commands) == 2
-    assert rcon.commands[0] == "list"
-    assert rcon.commands[1].startswith("tellraw @a ")
-    assert "うさぽサーバー" in rcon.commands[1]
+    assert len(rcon.commands) == 1
+    assert rcon.commands[0].startswith("tellraw @a ")
+    assert "うさぽサーバー" in rcon.commands[0]
     assert ack.await_args_list[0].args == (7, 456, "minecraft")
     assert ack.await_args_list[1].args == (7, 456, "discord")
     send_log.assert_awaited_once()
@@ -1493,7 +1755,7 @@ def test_sync_skips_minecraft_level_up_for_user_who_is_not_online(tmp_path) -> N
 
     asyncio.run(bot._sync_minecraft_level_up_announcements())
 
-    assert rcon.commands == ["list"]
+    assert rcon.commands == []
     assert ack.await_args_list[0].args == (9, 456, "minecraft")
     assert ack.await_args_list[1].args == (9, 456, "discord")
     send_log.assert_not_awaited()
@@ -1522,6 +1784,7 @@ def test_sync_does_not_repeat_already_delivered_minecraft_message(tmp_path) -> N
     bot._settings = RuntimeSettings(guild_id=456)
     rcon = ExperienceRcon()
     bot._rcon = rcon  # type: ignore[assignment]
+    bot._online_player_names = {"steve"}
     event = MinecraftLevelUpEvent(
         id=8,
         guild_id=456,
@@ -1541,6 +1804,6 @@ def test_sync_does_not_repeat_already_delivered_minecraft_message(tmp_path) -> N
 
     asyncio.run(bot._sync_minecraft_level_up_announcements())
 
-    assert rcon.commands == ["list"]
+    assert rcon.commands == []
     ack.assert_awaited_once_with(8, 456, "discord")
     bot._send.assert_awaited_once()  # type: ignore[attr-defined]

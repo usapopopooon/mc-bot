@@ -301,6 +301,16 @@ class AccountStore:
                     ON minecraft_woodcutting_combo_rewards(reward_delivered, created_at);
                 CREATE INDEX IF NOT EXISTS woodcutting_combo_rewards_audit
                     ON minecraft_woodcutting_combo_rewards(audit_delivered, created_at);
+                CREATE TABLE IF NOT EXISTS minecraft_activity_events (
+                    event_id TEXT PRIMARY KEY,
+                    kind TEXT NOT NULL CHECK (kind IN ('fishing', 'woodcutting', 'experience')),
+                    account_id INTEGER NOT NULL
+                        REFERENCES minecraft_accounts(id) ON DELETE CASCADE,
+                    observed_at TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS minecraft_activity_events_account
+                    ON minecraft_activity_events(account_id, created_at);
                 """
             )
             advancement_columns = {
@@ -1052,6 +1062,63 @@ class AccountStore:
             )
         return event
 
+    def record_minecraft_xp_gain(
+        self,
+        *,
+        event_id: str,
+        account_id: int,
+        discord_user_id: int,
+        guild_id: int,
+        minecraft_xp: int,
+        observed_at: str,
+    ) -> MinecraftXpOutboxEvent | None:
+        """Paperの自然XP獲得を重複排除してlevel-bot outboxへ記録する。"""
+        if minecraft_xp <= 0:
+            raise ValueError("minecraft_xp must be positive")
+        normalized_event_id, _ = _validate_activity_event(
+            event_id=event_id,
+            account_id=account_id,
+            discord_user_id=discord_user_id,
+            guild_id=guild_id,
+            observed_at=observed_at,
+            combo_window_seconds=1,
+        )
+        event = MinecraftXpOutboxEvent(
+            event_id=normalized_event_id,
+            account_id=account_id,
+            discord_user_id=discord_user_id,
+            guild_id=guild_id,
+            minecraft_xp=minecraft_xp,
+            observed_at=observed_at,
+        )
+        with self._connect() as connection:
+            if not _claim_activity_event(
+                connection,
+                event_id=normalized_event_id,
+                kind="experience",
+                account_id=account_id,
+                observed_at=observed_at,
+            ):
+                return None
+            connection.execute(
+                """
+                INSERT INTO minecraft_xp_outbox (
+                    event_id, account_id, discord_user_id, guild_id,
+                    minecraft_xp, observed_at, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    event.event_id,
+                    event.account_id,
+                    event.discord_user_id,
+                    event.guild_id,
+                    event.minecraft_xp,
+                    event.observed_at,
+                    _now(),
+                ),
+            )
+        return event
+
     def set_minecraft_xp_observation(
         self, *, account_id: int, current_xp: int, observed_at: str
     ) -> None:
@@ -1528,6 +1595,15 @@ class AccountStore:
                 "DELETE FROM minecraft_xp_outbox WHERE event_id = ?",
                 (event_id,),
             )
+            # XPイベントは高頻度なので、永続的な重複排除は同じevent_idを保持する
+            # level-botへ委ね、ローカルの受信記録はoutbox完了と同時に解放する。
+            connection.execute(
+                """
+                DELETE FROM minecraft_activity_events
+                WHERE event_id = ? AND kind = 'experience'
+                """,
+                (event_id,),
+            )
 
     def is_advancement_minecraft_reward_delivered(self, event_id: str) -> bool:
         with self._connect() as connection:
@@ -1745,6 +1821,96 @@ class AccountStore:
                 (catch_count, combo_count, observed_at, observed_at, account_id),
             )
         return rewards
+
+    def record_fishing_catch(
+        self,
+        *,
+        event_id: str,
+        account_id: int,
+        discord_user_id: int,
+        guild_id: int,
+        observed_at: str,
+        combo_window_seconds: int,
+    ) -> FishingComboRewardEvent | None:
+        """Paperの釣りイベントを重複排除してコンボ報酬へ変換する。"""
+        from mc_bot.fishing import fishing_reward_xp
+
+        normalized_event_id, observed = _validate_activity_event(
+            event_id=event_id,
+            account_id=account_id,
+            discord_user_id=discord_user_id,
+            guild_id=guild_id,
+            observed_at=observed_at,
+            combo_window_seconds=combo_window_seconds,
+        )
+        with self._connect() as connection:
+            if not _claim_activity_event(
+                connection,
+                event_id=normalized_event_id,
+                kind="fishing",
+                account_id=account_id,
+                observed_at=observed_at,
+            ):
+                return None
+            state = connection.execute(
+                """
+                SELECT catch_count, combo_count, last_catch_at
+                FROM minecraft_fishing_combo_states
+                WHERE account_id = ?
+                """,
+                (account_id,),
+            ).fetchone()
+            catch_count = int(state["catch_count"]) + 1 if state is not None else 1
+            combo_count = int(state["combo_count"]) if state is not None else 0
+            last_catch_text = state["last_catch_at"] if state is not None else None
+            if not _combo_is_active(last_catch_text, observed, combo_window_seconds):
+                combo_count = 0
+            combo_count += 1
+            reward = FishingComboRewardEvent(
+                event_id=normalized_event_id,
+                account_id=account_id,
+                discord_user_id=discord_user_id,
+                guild_id=guild_id,
+                catch_count=catch_count,
+                combo_count=combo_count,
+                reward_xp=fishing_reward_xp(combo_count),
+                observed_at=observed_at,
+                reward_delivered=False,
+                audit_delivered=False,
+            )
+            connection.execute(
+                """
+                INSERT INTO minecraft_fishing_combo_rewards (
+                    event_id, account_id, discord_user_id, guild_id,
+                    catch_count, combo_count, reward_xp, observed_at, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    reward.event_id,
+                    reward.account_id,
+                    reward.discord_user_id,
+                    reward.guild_id,
+                    reward.catch_count,
+                    reward.combo_count,
+                    reward.reward_xp,
+                    reward.observed_at,
+                    _now(),
+                ),
+            )
+            connection.execute(
+                """
+                INSERT INTO minecraft_fishing_combo_states (
+                    account_id, catch_count, combo_count, last_catch_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(account_id) DO UPDATE SET
+                    catch_count = excluded.catch_count,
+                    combo_count = excluded.combo_count,
+                    last_catch_at = excluded.last_catch_at,
+                    updated_at = excluded.updated_at
+                """,
+                (account_id, catch_count, combo_count, observed_at, observed_at),
+            )
+        return reward
 
     def list_pending_fishing_reward_deliveries(
         self, account_id: int | None = None
@@ -1986,6 +2152,102 @@ class AccountStore:
                 (log_count, combo_count, observed_at, observed_at, account_id),
             )
         return rewards
+
+    def record_woodcutting_log(
+        self,
+        *,
+        event_id: str,
+        account_id: int,
+        discord_user_id: int,
+        guild_id: int,
+        observed_at: str,
+        combo_window_seconds: int,
+    ) -> WoodcuttingComboRewardEvent | None:
+        """Paperの伐採イベントを重複排除して節目の報酬へ変換する。"""
+        from mc_bot.woodcutting import woodcutting_reward_xp
+
+        normalized_event_id, observed = _validate_activity_event(
+            event_id=event_id,
+            account_id=account_id,
+            discord_user_id=discord_user_id,
+            guild_id=guild_id,
+            observed_at=observed_at,
+            combo_window_seconds=combo_window_seconds,
+        )
+        with self._connect() as connection:
+            if not _claim_activity_event(
+                connection,
+                event_id=normalized_event_id,
+                kind="woodcutting",
+                account_id=account_id,
+                observed_at=observed_at,
+            ):
+                return None
+            state = connection.execute(
+                """
+                SELECT log_count, combo_count, last_log_at
+                FROM minecraft_woodcutting_combo_states
+                WHERE account_id = ?
+                """,
+                (account_id,),
+            ).fetchone()
+            log_count = int(state["log_count"]) + 1 if state is not None else 1
+            combo_count = int(state["combo_count"]) if state is not None else 0
+            last_log_text = state["last_log_at"] if state is not None else None
+            if not _combo_is_active(last_log_text, observed, combo_window_seconds):
+                combo_count = 0
+            combo_count += 1
+            reward_xp = woodcutting_reward_xp(combo_count)
+            reward = (
+                WoodcuttingComboRewardEvent(
+                    event_id=normalized_event_id,
+                    account_id=account_id,
+                    discord_user_id=discord_user_id,
+                    guild_id=guild_id,
+                    log_count=log_count,
+                    combo_count=combo_count,
+                    reward_xp=reward_xp,
+                    observed_at=observed_at,
+                    reward_delivered=False,
+                    audit_delivered=False,
+                )
+                if reward_xp > 0
+                else None
+            )
+            if reward is not None:
+                connection.execute(
+                    """
+                    INSERT INTO minecraft_woodcutting_combo_rewards (
+                        event_id, account_id, discord_user_id, guild_id,
+                        log_count, combo_count, reward_xp, observed_at, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        reward.event_id,
+                        reward.account_id,
+                        reward.discord_user_id,
+                        reward.guild_id,
+                        reward.log_count,
+                        reward.combo_count,
+                        reward.reward_xp,
+                        reward.observed_at,
+                        _now(),
+                    ),
+                )
+            connection.execute(
+                """
+                INSERT INTO minecraft_woodcutting_combo_states (
+                    account_id, log_count, combo_count, last_log_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(account_id) DO UPDATE SET
+                    log_count = excluded.log_count,
+                    combo_count = excluded.combo_count,
+                    last_log_at = excluded.last_log_at,
+                    updated_at = excluded.updated_at
+                """,
+                (account_id, log_count, combo_count, observed_at, observed_at),
+            )
+        return reward
 
     def list_pending_woodcutting_reward_deliveries(
         self, account_id: int | None = None
@@ -2467,6 +2729,59 @@ def _woodcutting_combo_reward(row: sqlite3.Row) -> WoodcuttingComboRewardEvent:
         minecraft_public_delivered=bool(row["minecraft_public_delivered"]),
         discord_public_delivered=bool(row["discord_public_delivered"]),
     )
+
+
+def _validate_activity_event(
+    *,
+    event_id: str,
+    account_id: int,
+    discord_user_id: int,
+    guild_id: int,
+    observed_at: str,
+    combo_window_seconds: int,
+) -> tuple[str, datetime]:
+    if min(account_id, discord_user_id, guild_id, combo_window_seconds) <= 0:
+        raise ValueError("invalid Minecraft activity event")
+    try:
+        normalized_event_id = str(uuid.UUID(event_id))
+        observed = datetime.fromisoformat(observed_at)
+    except ValueError as error:
+        raise ValueError("invalid Minecraft activity event") from error
+    if observed.tzinfo is None or observed.utcoffset() is None:
+        raise ValueError("observed_at must include a timezone")
+    return normalized_event_id, observed
+
+
+def _claim_activity_event(
+    connection: sqlite3.Connection,
+    *,
+    event_id: str,
+    kind: str,
+    account_id: int,
+    observed_at: str,
+) -> bool:
+    cursor = connection.execute(
+        """
+        INSERT INTO minecraft_activity_events (
+            event_id, kind, account_id, observed_at, created_at
+        ) VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(event_id) DO NOTHING
+        """,
+        (event_id, kind, account_id, observed_at, _now()),
+    )
+    return cursor.rowcount == 1
+
+
+def _combo_is_active(
+    previous_text: object,
+    observed: datetime,
+    combo_window_seconds: int,
+) -> bool:
+    if previous_text is None:
+        return False
+    previous = datetime.fromisoformat(str(previous_text))
+    elapsed = (observed - previous).total_seconds()
+    return 0 <= elapsed <= combo_window_seconds
 
 
 def _now() -> str:

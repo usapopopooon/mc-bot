@@ -21,6 +21,7 @@ from mc_bot.accounts import (
     MinecraftAccount,
     WoodcuttingComboRewardEvent,
 )
+from mc_bot.activity import ActivityKind, MinecraftActivityEvent, parse_activity_event
 from mc_bot.config import Config
 from mc_bot.events import EventType, LogEvent, parse_log_line
 from mc_bot.experience import (
@@ -38,16 +39,14 @@ from mc_bot.experience import (
     server_xp_started_tellraw_command,
     total_experience_points,
     voice_bonus_started_tellraw_command,
+    voice_bonus_state_command,
     xp_exchange_tellraw_command,
 )
 from mc_bot.fishing import (
     FISHING_COMBO_WINDOW_SECONDS,
     fishing_combo_actionbar_command,
     fishing_combo_tellraw_command,
-    fishing_objective_command,
-    fishing_score_query_command,
     is_public_fishing_milestone,
-    parse_fishing_score,
 )
 from mc_bot.formatting import (
     format_advancement_reward,
@@ -117,10 +116,7 @@ from mc_bot.voice import MinecraftVoicePlayer, announcement_speech_text, event_s
 from mc_bot.woodcutting import (
     WOODCUTTING_COMBO_WINDOW_SECONDS,
     is_public_woodcutting_milestone,
-    parse_log_break_count,
     woodcutting_actionbar_command,
-    woodcutting_objective_commands,
-    woodcutting_scores_query_command,
     woodcutting_tellraw_command,
     woodcutting_xp_sound_command,
 )
@@ -196,14 +192,14 @@ class MinecraftDiscordBot(discord.Client):
         self._player_count_name_task: asyncio.Task[None] | None = None
         self._status_panel_task: asyncio.Task[None] | None = None
         self._minecraft_xp_task: asyncio.Task[None] | None = None
-        self._fishing_combo_task: asyncio.Task[None] | None = None
-        self._woodcutting_combo_task: asyncio.Task[None] | None = None
+        self._activity_delivery_task: asyncio.Task[None] | None = None
         self._player_count_update_lock = asyncio.Lock()
         self._status_panel_update_lock = asyncio.Lock()
         self._whitelist_operation_lock = asyncio.Lock()
         self._voice_disconnect_lock = asyncio.Lock()
         self._voice_bonus_lock = asyncio.Lock()
         self._minecraft_xp_observation_lock = asyncio.Lock()
+        self._activity_delivery_lock = asyncio.Lock()
         self._online_player_names: set[str] = set()
         self._voice_bonus_active_users: set[int] = set()
         self._voice_bonus_initialized_users: set[int] = set()
@@ -214,8 +210,6 @@ class MinecraftDiscordBot(discord.Client):
         self._closing = False
         self._health_path = Path("/tmp/mc-bot-healthy")
         self._sync_ticks = 0
-        self._fishing_objective_ready = False
-        self._woodcutting_objectives_ready = False
         self._next_status_panel_refresh_at = time.monotonic() + _STATUS_PANEL_REFRESH_SECONDS
 
     def _register_commands(self) -> None:
@@ -317,9 +311,9 @@ class MinecraftDiscordBot(discord.Client):
         self._schedule_status_panel_refresh(delay=0)
         if self._settings.voice_enabled:
             await self._restore_voice_connection()
+        await self._refresh_online_player_cache()
         self._ensure_minecraft_xp_started()
-        self._ensure_fishing_combo_started()
-        self._ensure_woodcutting_combo_started()
+        self._ensure_activity_delivery_started()
 
         LOGGER.info(
             "Discord connected as %s; loaded %d advancement translations",
@@ -407,14 +401,10 @@ class MinecraftDiscordBot(discord.Client):
             self._minecraft_xp_task.cancel()
             await asyncio.gather(self._minecraft_xp_task, return_exceptions=True)
             self._minecraft_xp_task = None
-        if self._fishing_combo_task is not None:
-            self._fishing_combo_task.cancel()
-            await asyncio.gather(self._fishing_combo_task, return_exceptions=True)
-            self._fishing_combo_task = None
-        if self._woodcutting_combo_task is not None:
-            self._woodcutting_combo_task.cancel()
-            await asyncio.gather(self._woodcutting_combo_task, return_exceptions=True)
-            self._woodcutting_combo_task = None
+        if self._activity_delivery_task is not None:
+            self._activity_delivery_task.cancel()
+            await asyncio.gather(self._activity_delivery_task, return_exceptions=True)
+            self._activity_delivery_task = None
         if self._tailer_task is not None:
             self._tailer_task.cancel()
             await asyncio.gather(self._tailer_task, return_exceptions=True)
@@ -2369,6 +2359,15 @@ class MinecraftDiscordBot(discord.Client):
     async def _online_players(self) -> list[str]:
         return parse_online_players(await self._execute_rcon("list"))
 
+    async def _refresh_online_player_cache(self) -> None:
+        if self._rcon is None:
+            self._online_player_names.clear()
+            return
+        try:
+            self._online_player_names = {name.casefold() for name in await self._online_players()}
+        except (OSError, RconError, RuntimeError, ValueError) as error:
+            LOGGER.warning("Could not initialize Minecraft online-player cache: %s", error)
+
     async def _execute_rcon(self, command: str) -> str:
         return await asyncio.to_thread(self._require_rcon().execute, command)
 
@@ -3001,6 +3000,24 @@ class MinecraftDiscordBot(discord.Client):
 
     async def _forward_logs(self) -> None:
         async for pending_line in self._tailer.lines():
+            try:
+                activity_event = parse_activity_event(pending_line.text)
+            except ValueError as error:
+                LOGGER.warning("Ignored malformed Minecraft activity event: %s", error)
+                await asyncio.to_thread(self._tailer.acknowledge, pending_line)
+                continue
+            if activity_event is not None:
+                recorded = await self._record_activity_event(activity_event)
+                await asyncio.to_thread(self._tailer.acknowledge, pending_line)
+                if recorded:
+                    try:
+                        await self._deliver_pending_activity_events()
+                    except (OSError, RconError, RuntimeError, ValueError) as error:
+                        LOGGER.warning(
+                            "Minecraft activity event was recorded but delivery failed: %s",
+                            error,
+                        )
+                continue
             event = parse_log_line(pending_line.text)
             if event is None:
                 await asyncio.to_thread(self._tailer.acknowledge, pending_line)
@@ -3124,11 +3141,74 @@ class MinecraftDiscordBot(discord.Client):
                     and account.discord_user_id is not None
                     and event.type is EventType.JOIN
                 ):
+                    # Paper再起動でプラグイン内の状態が空になっていても、再参加時に
+                    # VC倍率を必ず再送する。
+                    self._voice_bonus_active_users.discard(account.discord_user_id)
                     await self._sync_voice_bonus_for_account(
                         account,
                         announce_standard_xp=True,
                     )
                 break
+
+    async def _record_activity_event(self, event: MinecraftActivityEvent) -> bool:
+        guild_id = self._settings.guild_id
+        if (
+            guild_id is None
+            or not self._config.level_bot_api_url
+            or not self._config.level_bot_api_token
+        ):
+            LOGGER.warning(
+                "Ignored Minecraft %s event because level-bot integration is not configured",
+                event.kind,
+            )
+            return False
+        account = await asyncio.to_thread(
+            self._accounts.get_by_player_uuid,
+            event.player_uuid,
+        )
+        if (
+            account is None
+            or account.discord_user_id is None
+            or account.status not in {"active", "pending_remove"}
+        ):
+            LOGGER.warning(
+                "Ignored Minecraft %s event for unlinked UUID %s (%s)",
+                event.kind,
+                event.player_uuid,
+                event.player_name,
+            )
+            return False
+        if event.kind is ActivityKind.FISHING:
+            reward = await asyncio.to_thread(
+                self._accounts.record_fishing_catch,
+                event_id=event.event_id,
+                account_id=account.id,
+                discord_user_id=account.discord_user_id,
+                guild_id=guild_id,
+                observed_at=event.occurred_at,
+                combo_window_seconds=FISHING_COMBO_WINDOW_SECONDS,
+            )
+        elif event.kind is ActivityKind.WOODCUTTING:
+            reward = await asyncio.to_thread(
+                self._accounts.record_woodcutting_log,
+                event_id=event.event_id,
+                account_id=account.id,
+                discord_user_id=account.discord_user_id,
+                guild_id=guild_id,
+                observed_at=event.occurred_at,
+                combo_window_seconds=WOODCUTTING_COMBO_WINDOW_SECONDS,
+            )
+        else:
+            reward = await asyncio.to_thread(
+                self._accounts.record_minecraft_xp_gain,
+                event_id=event.event_id,
+                account_id=account.id,
+                discord_user_id=account.discord_user_id,
+                guild_id=guild_id,
+                minecraft_xp=event.amount,
+                observed_at=event.occurred_at,
+            )
+        return reward is not None or event.kind is ActivityKind.WOODCUTTING
 
     def _queue_voice_event(self, event: LogEvent, discord_username: str | None) -> None:
         if not self._settings.voice_enabled or self._settings.guild_id is None:
@@ -3298,8 +3378,7 @@ class MinecraftDiscordBot(discord.Client):
             self._schedule_player_count_refresh(delay=0)
             self._schedule_periodic_status_panel_refresh()
             self._ensure_minecraft_xp_started()
-            self._ensure_fishing_combo_started()
-            self._ensure_woodcutting_combo_started()
+            self._ensure_activity_delivery_started()
             await asyncio.sleep(10)
 
     def _ensure_minecraft_xp_started(self) -> None:
@@ -3315,78 +3394,74 @@ class MinecraftDiscordBot(discord.Client):
             self._minecraft_xp_loop(), name="minecraft-xp-sync"
         )
 
-    def _ensure_fishing_combo_started(self) -> None:
+    def _ensure_activity_delivery_started(self) -> None:
         if (
             not self._config.level_bot_api_url
             or not self._config.level_bot_api_token
             or self._rcon is None
         ):
             return
-        if self._fishing_combo_task is not None and not self._fishing_combo_task.done():
+        if self._activity_delivery_task is not None and not self._activity_delivery_task.done():
             return
-        self._fishing_combo_task = asyncio.create_task(
-            self._fishing_combo_loop(), name="minecraft-fishing-combo"
+        self._activity_delivery_task = asyncio.create_task(
+            self._activity_delivery_loop(), name="minecraft-activity-delivery"
         )
 
-    def _ensure_woodcutting_combo_started(self) -> None:
-        if (
-            not self._config.level_bot_api_url
-            or not self._config.level_bot_api_token
-            or self._rcon is None
-        ):
-            return
-        if self._woodcutting_combo_task is not None and not self._woodcutting_combo_task.done():
-            return
-        self._woodcutting_combo_task = asyncio.create_task(
-            self._woodcutting_combo_loop(), name="minecraft-woodcutting-combo"
-        )
-
-    async def _fishing_combo_loop(self) -> None:
+    async def _activity_delivery_loop(self) -> None:
         while not self.is_closed():
             try:
-                await self._sync_fishing_combos()
+                await self._deliver_pending_activity_events()
             except (OSError, RconError, RuntimeError, ValueError) as error:
-                LOGGER.warning("Minecraft fishing combo synchronization failed: %s", error)
-            await asyncio.sleep(self._config.fishing_combo_poll_seconds)
+                LOGGER.warning("Minecraft activity reward delivery failed: %s", error)
+            await asyncio.sleep(30)
 
-    async def _sync_fishing_combos(self) -> None:
-        guild_id = self._settings.guild_id
-        if guild_id is None:
-            return
-        if not self._fishing_objective_ready:
-            # 既存objectiveの場合もMinecraftは文字列応答するだけなので、未知コマンド等の
-            # 共通エラーだけを弾いて準備済みとする。
-            await self._execute_checked_rcon(fishing_objective_command())
-            self._fishing_objective_ready = True
+    async def _deliver_pending_activity_events(self) -> None:
+        async with self._activity_delivery_lock:
+            await self._deliver_pending_activity_events_locked()
 
-        online = parse_online_players(await self._execute_checked_rcon("list"))
-        linked = await self._linked_accounts_by_online_name(online)
-        observed_at = datetime.now(UTC).replace(microsecond=0).isoformat()
-        for player_name in online:
-            account = linked.get(player_name.casefold())
-            if account is None or account.discord_user_id is None:
+    async def _deliver_pending_activity_events_locked(self) -> None:
+        await self._deliver_minecraft_xp_outbox()
+        fishing = await asyncio.to_thread(self._accounts.list_pending_fishing_reward_deliveries)
+        for reward in fishing:
+            account = await asyncio.to_thread(self._accounts.get, reward.account_id)
+            if account is None:
+                LOGGER.warning(
+                    "Could not deliver fishing reward for missing account event=%s",
+                    reward.event_id,
+                )
                 continue
-            response = await self._execute_rcon(
-                fishing_score_query_command(account.server_player_name)
-            )
-            catch_count = parse_fishing_score(response)
-            await asyncio.to_thread(
-                self._accounts.observe_fishing_catches,
-                account_id=account.id,
-                discord_user_id=account.discord_user_id,
-                guild_id=guild_id,
-                catch_count=catch_count,
-                observed_at=observed_at,
-                combo_window_seconds=FISHING_COMBO_WINDOW_SECONDS,
-            )
-            pending = await asyncio.to_thread(
-                self._accounts.list_pending_fishing_reward_deliveries,
-                account.id,
-            )
-            for reward in pending:
+            try:
                 await self._grant_fishing_combo_reward(account, reward)
+            except (OSError, RconError, RuntimeError, ValueError) as error:
+                LOGGER.warning(
+                    "Could not deliver fishing reward event=%s: %s",
+                    reward.event_id,
+                    error,
+                )
         await self._deliver_fishing_public_announcements()
         await self._deliver_fishing_combo_audits()
+
+        woodcutting = await asyncio.to_thread(
+            self._accounts.list_pending_woodcutting_reward_deliveries
+        )
+        for reward in woodcutting:
+            account = await asyncio.to_thread(self._accounts.get, reward.account_id)
+            if account is None:
+                LOGGER.warning(
+                    "Could not deliver woodcutting reward for missing account event=%s",
+                    reward.event_id,
+                )
+                continue
+            try:
+                await self._grant_woodcutting_combo_reward(account, reward)
+            except (OSError, RconError, RuntimeError, ValueError) as error:
+                LOGGER.warning(
+                    "Could not deliver woodcutting reward event=%s: %s",
+                    reward.event_id,
+                    error,
+                )
+        await self._deliver_woodcutting_public_announcements()
+        await self._deliver_woodcutting_combo_audits()
 
     async def _grant_fishing_combo_reward(
         self,
@@ -3523,51 +3598,6 @@ class MinecraftDiscordBot(discord.Client):
             )
         return True
 
-    async def _woodcutting_combo_loop(self) -> None:
-        while not self.is_closed():
-            try:
-                await self._sync_woodcutting_combos()
-            except (OSError, RconError, RuntimeError, ValueError) as error:
-                LOGGER.warning("Minecraft woodcutting combo synchronization failed: %s", error)
-            await asyncio.sleep(self._config.woodcutting_combo_poll_seconds)
-
-    async def _sync_woodcutting_combos(self) -> None:
-        guild_id = self._settings.guild_id
-        if guild_id is None:
-            return
-        if not self._woodcutting_objectives_ready:
-            for command in woodcutting_objective_commands():
-                await self._execute_checked_rcon(command)
-            self._woodcutting_objectives_ready = True
-        online = parse_online_players(await self._execute_checked_rcon("list"))
-        linked = await self._linked_accounts_by_online_name(online)
-        observed_at = datetime.now(UTC).replace(microsecond=0).isoformat()
-        for player_name in online:
-            account = linked.get(player_name.casefold())
-            if account is None or account.discord_user_id is None:
-                continue
-            response = await self._execute_rcon(
-                woodcutting_scores_query_command(account.server_player_name)
-            )
-            log_count = parse_log_break_count(response)
-            await asyncio.to_thread(
-                self._accounts.observe_woodcutting_logs,
-                account_id=account.id,
-                discord_user_id=account.discord_user_id,
-                guild_id=guild_id,
-                log_count=log_count,
-                observed_at=observed_at,
-                combo_window_seconds=WOODCUTTING_COMBO_WINDOW_SECONDS,
-            )
-            pending = await asyncio.to_thread(
-                self._accounts.list_pending_woodcutting_reward_deliveries,
-                account.id,
-            )
-            for reward in pending:
-                await self._grant_woodcutting_combo_reward(account, reward)
-        await self._deliver_woodcutting_public_announcements()
-        await self._deliver_woodcutting_combo_audits()
-
     async def _grant_woodcutting_combo_reward(
         self,
         account: MinecraftAccount,
@@ -3703,7 +3733,7 @@ class MinecraftDiscordBot(discord.Client):
                 await self._sync_minecraft_xp()
             except (OSError, RconError, RuntimeError, ValueError) as error:
                 LOGGER.warning("Minecraft XP synchronization failed: %s", error)
-            await asyncio.sleep(self._config.minecraft_xp_poll_seconds)
+            await asyncio.sleep(self._config.minecraft_integration_sync_seconds)
 
     async def _sync_minecraft_level_up_announcements(self) -> None:
         guild_id = self._settings.guild_id
@@ -3714,11 +3744,7 @@ class MinecraftDiscordBot(discord.Client):
             return
         online_user_ids: set[int] = set()
         if any(not event.minecraft_delivered or not event.discord_delivered for event in events):
-            response = await asyncio.to_thread(self._require_rcon().execute, "list")
-            online = parse_online_players(response)
-            online_names = {name.casefold() for name in online}
-            self._online_player_names = online_names
-            linked = await self._linked_accounts_by_online_name(online)
+            linked = await self._linked_accounts_by_online_name(list(self._online_player_names))
             online_user_ids = {
                 account.discord_user_id
                 for account in linked.values()
@@ -3751,14 +3777,9 @@ class MinecraftDiscordBot(discord.Client):
         guild_id = self._settings.guild_id
         if guild_id is None:
             return
-        if not await self._deliver_minecraft_xp_outbox():
-            # API障害中は観測を止める。復旧時に前回値との差分をまとめて送ることで、
-            # outboxがポーリング回数に比例して増え続けるのを防ぐ。
-            return
+        await self._deliver_minecraft_xp_outbox()
 
-        response = await asyncio.to_thread(self._require_rcon().execute, "list")
-        online = parse_online_players(response)
-        self._online_player_names = {name.casefold() for name in online}
+        online = list(self._online_player_names)
         linked = await self._linked_accounts_by_online_name(online)
         await self._sync_minecraft_xp_exchanges(
             guild_id=guild_id,
@@ -3771,26 +3792,12 @@ class MinecraftDiscordBot(discord.Client):
             linked_accounts=tuple(linked.values()),
         )
         observed_at = datetime.now(UTC).replace(microsecond=0).isoformat()
-        previously_active_users = set(self._voice_bonus_active_users)
-        active_bonus_users = await self._sync_voice_bonus_heartbeats(
+        await self._sync_voice_bonus_heartbeats(
             online,
             linked=linked,
             guild_id=guild_id,
             observed_at=observed_at,
         )
-        for player_name in online:
-            account = linked.get(player_name.casefold())
-            if account is None or account.discord_user_id is None:
-                continue
-            await self._observe_minecraft_xp_for_account(
-                account,
-                guild_id=guild_id,
-                observed_at=observed_at,
-                double_in_game_xp=(
-                    account.discord_user_id in active_bonus_users
-                    and account.discord_user_id in previously_active_users
-                ),
-            )
         await self._deliver_minecraft_xp_outbox()
 
     async def _sync_minecraft_xp_exchanges(
@@ -4268,15 +4275,7 @@ class MinecraftDiscordBot(discord.Client):
         user_id = account.discord_user_id
         if guild_id is None or user_id is None:
             return
-        was_active = user_id in self._voice_bonus_active_users
         observed_at = datetime.now(UTC).replace(microsecond=0).isoformat()
-        if was_active:
-            await self._observe_minecraft_xp_for_account(
-                account,
-                guild_id=guild_id,
-                observed_at=observed_at,
-                double_in_game_xp=True,
-            )
         result = await self._level_bot_xp.send_voice_heartbeat(
             guild_id=guild_id,
             discord_user_id=user_id,
@@ -4284,13 +4283,6 @@ class MinecraftDiscordBot(discord.Client):
             observed_at=observed_at,
         )
         if result is not None:
-            if result.bonus_active and not was_active:
-                await self._observe_minecraft_xp_for_account(
-                    account,
-                    guild_id=guild_id,
-                    observed_at=observed_at,
-                    double_in_game_xp=False,
-                )
             self._voice_bonus_initialized_users.add(user_id)
             await self._set_voice_bonus_state(account, active=result.bonus_active)
             if announce_standard_xp and not result.bonus_active:
@@ -4416,10 +4408,32 @@ class MinecraftDiscordBot(discord.Client):
             return
         should_notify = False
         async with self._voice_bonus_lock:
-            if not active:
+            was_active = user_id in self._voice_bonus_active_users
+            if was_active is active:
+                return
+            if account.player_uuid is None:
+                if active:
+                    LOGGER.warning(
+                        "Could not activate voice XP bonus without UUID account=%d",
+                        account.id,
+                    )
+                    return
                 self._voice_bonus_active_users.discard(user_id)
                 return
-            if user_id in self._voice_bonus_active_users:
+            try:
+                await self._execute_checked_rcon(
+                    voice_bonus_state_command(account.player_uuid, active=active)
+                )
+            except (OSError, RconError, RuntimeError, ValueError) as error:
+                LOGGER.warning(
+                    "Could not set Paper voice XP bonus account=%d active=%s: %s",
+                    account.id,
+                    active,
+                    error,
+                )
+                return
+            if not active:
+                self._voice_bonus_active_users.discard(user_id)
                 return
             self._voice_bonus_active_users.add(user_id)
             if not notify:

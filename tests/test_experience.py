@@ -18,6 +18,7 @@ from mc_bot.experience import (
     server_xp_started_tellraw_command,
     total_experience_points,
     voice_bonus_started_tellraw_command,
+    voice_bonus_state_command,
     xp_exchange_tellraw_command,
 )
 
@@ -272,6 +273,19 @@ def test_rejects_invalid_experience_add_points_command() -> None:
         experience_add_points_command("@a", 25)
     with pytest.raises(ValueError):
         experience_add_points_command("Steve", 0)
+
+
+def test_builds_uuid_scoped_paper_voice_bonus_command() -> None:
+    player_uuid = "8667ba71-b85a-4004-af54-457a9734eed7"
+
+    assert voice_bonus_state_command(player_uuid, active=True) == (
+        f"usapo-event-bridge voice-bonus {player_uuid} on"
+    )
+    assert voice_bonus_state_command(player_uuid, active=False) == (
+        f"usapo-event-bridge voice-bonus {player_uuid} off"
+    )
+    with pytest.raises(ValueError):
+        voice_bonus_state_command("not-a-uuid", active=True)
     assert experience_to_next_level(30) == 112
 
 
