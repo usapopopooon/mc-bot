@@ -25,6 +25,7 @@ def test_loads_required_and_default_configuration() -> None:
     assert config.level_bot_api_url == ""
     assert config.level_bot_api_token == ""
     assert config.minecraft_integration_sync_seconds == 30
+    assert config.minecraft_bonuses_enabled
 
 
 def test_rejects_missing_token() -> None:
@@ -78,12 +79,14 @@ def test_loads_level_bot_xp_configuration() -> None:
             "LEVEL_BOT_API_URL": "https://levels.example.test/",
             "LEVEL_BOT_API_TOKEN": "xp-secret",
             "MINECRAFT_INTEGRATION_SYNC_SECONDS": "60",
+            "MINECRAFT_BONUSES_ENABLED": "false",
         }
     )
 
     assert config.level_bot_api_url == "https://levels.example.test"
     assert config.level_bot_api_token == "xp-secret"
     assert config.minecraft_integration_sync_seconds == 60
+    assert not config.minecraft_bonuses_enabled
 
 
 @pytest.mark.parametrize(
@@ -98,6 +101,7 @@ def test_loads_level_bot_xp_configuration() -> None:
         {"MINECRAFT_INTEGRATION_SYNC_SECONDS": "9"},
         {"MINECRAFT_INTEGRATION_SYNC_SECONDS": "61"},
         {"MINECRAFT_INTEGRATION_SYNC_SECONDS": "invalid"},
+        {"MINECRAFT_BONUSES_ENABLED": "invalid"},
     ],
 )
 def test_rejects_invalid_level_bot_xp_configuration(

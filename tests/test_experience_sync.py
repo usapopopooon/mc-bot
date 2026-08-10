@@ -1108,6 +1108,61 @@ def test_failed_paper_voice_bonus_activation_remains_retryable(tmp_path) -> None
     assert 123 in bot._voice_bonus_active_users
 
 
+def test_disabled_bonuses_stop_activity_xp_delivery_and_voice_heartbeat(tmp_path) -> None:
+    config = Config(
+        discord_token="test",
+        accounts_path=tmp_path / "accounts.db",
+        rcon_password="test",
+        level_bot_api_url="https://levels.example.test",
+        level_bot_api_token="xp-secret",
+        minecraft_bonuses_enabled=False,
+    )
+    bot = MinecraftDiscordBot(config)
+    bot._accounts.initialize()
+    account = bot._accounts.create_registration(
+        edition="java",
+        minecraft_name="Steve",
+        server_player_name="Steve",
+        discord_user_id=123,
+        discord_username="hoge",
+        source="self",
+        status="active",
+        created_by=123,
+        player_uuid=PLAYER_UUID,
+    )
+    bot._settings = RuntimeSettings(guild_id=456)
+    bot._voice_bonus_active_users.add(123)
+    rcon = ExperienceRcon()
+    bot._rcon = rcon  # type: ignore[assignment]
+    heartbeat = AsyncMock(return_value=MinecraftVoiceHeartbeatResult(30, True))
+    send_xp = AsyncMock(return_value=True)
+    bot._level_bot_xp.send_voice_heartbeat = heartbeat  # type: ignore[method-assign]
+    bot._level_bot_xp.send = send_xp  # type: ignore[method-assign]
+    pending = bot._accounts.record_minecraft_xp_gain(
+        event_id="00000000-0000-0000-0000-000000000200",
+        account_id=account.id,
+        discord_user_id=123,
+        guild_id=456,
+        minecraft_xp=37,
+        observed_at="2026-08-11T00:00:00+00:00",
+    )
+    assert pending is not None
+
+    async def exercise() -> None:
+        assert not await bot._record_activity_event(activity(ActivityKind.FISHING, 201, 1))
+        assert await bot._deliver_minecraft_xp_outbox()
+        await bot._sync_voice_bonus_for_account(account)
+
+    asyncio.run(exercise())
+
+    heartbeat.assert_not_awaited()
+    send_xp.assert_not_awaited()
+    assert bot._accounts.list_minecraft_xp_outbox() == [pending]
+    assert rcon.commands == [f"usapo-event-bridge voice-bonus {PLAYER_UUID} off"]
+    assert 123 not in bot._voice_bonus_active_users
+    assert bot._accounts.list_pending_fishing_reward_deliveries() == []
+
+
 def test_failed_xp_bonus_restores_observation_and_logs_warning(tmp_path, caplog) -> None:
     config = Config(
         discord_token="test",

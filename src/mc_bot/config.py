@@ -27,6 +27,7 @@ class Config:
     level_bot_api_url: str = ""
     level_bot_api_token: str = ""
     minecraft_integration_sync_seconds: int = 30
+    minecraft_bonuses_enabled: bool = True
 
     @classmethod
     def from_environment(cls, environment: Mapping[str, str] | None = None) -> Config:
@@ -69,6 +70,9 @@ class Config:
             raise ValueError("MINECRAFT_INTEGRATION_SYNC_SECONDS must be an integer") from error
         if not 10 <= sync_seconds <= 60:
             raise ValueError("MINECRAFT_INTEGRATION_SYNC_SECONDS must be between 10 and 60")
+        bonuses_text = values.get("MINECRAFT_BONUSES_ENABLED", "true").strip().casefold()
+        if bonuses_text not in {"true", "false"}:
+            raise ValueError("MINECRAFT_BONUSES_ENABLED must be true or false")
         return cls(
             discord_token=token,
             rcon_host=values.get("MINECRAFT_RCON_HOST", "minecraft").strip() or "minecraft",
@@ -82,6 +86,7 @@ class Config:
             level_bot_api_url=level_bot_url,
             level_bot_api_token=level_bot_token,
             minecraft_integration_sync_seconds=sync_seconds,
+            minecraft_bonuses_enabled=bonuses_text == "true",
         )
 
 

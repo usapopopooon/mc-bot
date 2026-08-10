@@ -258,6 +258,7 @@ Minecraftサーバーの再起動は必要ありません。
 | `VOICEVOX_SPEAKER_ID` | いいえ | 話者ID。既定値は小夜/SAYOの `46` |
 | `VOICEVOX_SPEED` | いいえ | 読み上げ速度。既定値は `1.0` |
 | `MINECRAFT_INTEGRATION_SYNC_SECONDS` | いいえ | level-bot交換・VC状態の同期間隔。既定値は30秒。Minecraft XP量は照会しない |
+| `MINECRAFT_BONUSES_ENABLED` | いいえ | Minecraft由来の全ボーナスを有効化する。性能切り分け中の既定値は`false` |
 
 `MINECRAFT_DATA_VOLUME` はBotの動作設定ではなく、コンテナ起動前に外部ボリュームを
 解決するDocker Compose側のインフラ設定です。Coolifyの変数一覧に表示されるよう、

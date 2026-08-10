@@ -16,6 +16,7 @@ services:
       LEVEL_BOT_API_URL: "${LEVEL_BOT_API_URL:-}"
       LEVEL_BOT_API_TOKEN: "${LEVEL_BOT_API_TOKEN:-}"
       MINECRAFT_INTEGRATION_SYNC_SECONDS: "${MINECRAFT_INTEGRATION_SYNC_SECONDS:-30}"
+      MINECRAFT_BONUSES_ENABLED: "${MINECRAFT_BONUSES_ENABLED:-false}"
     volumes:
       - minecraft-data:/minecraft
       - mc-bot-data:/data

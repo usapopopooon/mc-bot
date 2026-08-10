@@ -3041,6 +3041,7 @@ class MinecraftDiscordBot(discord.Client):
             guild_id = self._settings.guild_id
             if (
                 event.type is EventType.ADVANCEMENT
+                and self._config.minecraft_bonuses_enabled
                 and account is not None
                 and discord_user_id is not None
                 and guild_id is not None
@@ -3151,6 +3152,8 @@ class MinecraftDiscordBot(discord.Client):
                 break
 
     async def _record_activity_event(self, event: MinecraftActivityEvent) -> bool:
+        if not self._config.minecraft_bonuses_enabled:
+            return False
         guild_id = self._settings.guild_id
         if (
             guild_id is None
@@ -3396,7 +3399,8 @@ class MinecraftDiscordBot(discord.Client):
 
     def _ensure_activity_delivery_started(self) -> None:
         if (
-            not self._config.level_bot_api_url
+            not self._config.minecraft_bonuses_enabled
+            or not self._config.level_bot_api_url
             or not self._config.level_bot_api_token
             or self._rcon is None
         ):
@@ -4229,6 +4233,12 @@ class MinecraftDiscordBot(discord.Client):
             if account is not None and account.discord_user_id is not None:
                 by_user.setdefault(account.discord_user_id, account)
 
+        if not self._config.minecraft_bonuses_enabled:
+            for account in by_user.values():
+                await self._set_voice_bonus_state(account, active=False, notify=False)
+            self._voice_bonus_active_users.clear()
+            return set()
+
         for user_id in self._voice_bonus_active_users - set(by_user):
             self._voice_bonus_active_users.discard(user_id)
         active_users: set[int] = set()
@@ -4275,6 +4285,9 @@ class MinecraftDiscordBot(discord.Client):
         user_id = account.discord_user_id
         if guild_id is None or user_id is None:
             return
+        if not self._config.minecraft_bonuses_enabled:
+            await self._set_voice_bonus_state(account, active=False, notify=False)
+            return
         observed_at = datetime.now(UTC).replace(microsecond=0).isoformat()
         result = await self._level_bot_xp.send_voice_heartbeat(
             guild_id=guild_id,
@@ -4291,7 +4304,7 @@ class MinecraftDiscordBot(discord.Client):
     async def _send_voice_bonus_final_heartbeat(self, account: MinecraftAccount) -> None:
         guild_id = self._settings.guild_id
         user_id = account.discord_user_id
-        if guild_id is not None and user_id is not None:
+        if self._config.minecraft_bonuses_enabled and guild_id is not None and user_id is not None:
             await self._level_bot_xp.send_voice_heartbeat(
                 guild_id=guild_id,
                 discord_user_id=user_id,
@@ -4511,6 +4524,8 @@ class MinecraftDiscordBot(discord.Client):
         return total_experience_points(levels, points)
 
     async def _deliver_minecraft_xp_outbox(self) -> bool:
+        if not self._config.minecraft_bonuses_enabled:
+            return True
         while events := await asyncio.to_thread(self._accounts.list_minecraft_xp_outbox):
             for event in events:
                 if not await self._level_bot_xp.send(event):
