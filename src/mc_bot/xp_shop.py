@@ -11,6 +11,18 @@ from mc_bot.experience import MinecraftXpPack, MinecraftXpShop, MinecraftXpWalle
 if TYPE_CHECKING:
     from mc_bot.bot import MinecraftDiscordBot
 
+MINECRAFT_NEAR_LEVEL_50_XP = 5_000
+
+
+def minecraft_xp_pack_note(pack: MinecraftXpPack) -> str:
+    if pack.reward_xp == MINECRAFT_NEAR_LEVEL_50_XP:
+        return " (Lv.0からLv.50近く)"
+    return ""
+
+
+def minecraft_xp_pack_text(pack: MinecraftXpPack) -> str:
+    return f"Minecraft {pack.reward_xp:,} XP{minecraft_xp_pack_note(pack)}"
+
 
 def minecraft_xp_shop_embed(packs: tuple[MinecraftXpPack, ...]) -> discord.Embed:
     embed = discord.Embed(
@@ -24,7 +36,7 @@ def minecraft_xp_shop_embed(packs: tuple[MinecraftXpPack, ...]) -> discord.Embed
     embed.add_field(
         name="交換内容",
         value="\n".join(
-            f"`サーバーXP {pack.cost_xp:,}` → `Minecraft {pack.reward_xp:,} XP`" for pack in packs
+            f"`サーバーXP {pack.cost_xp:,}` → `{minecraft_xp_pack_text(pack)}`" for pack in packs
         ),
         inline=False,
     )
@@ -100,7 +112,7 @@ class MinecraftXpPackSelect(discord.ui.Select):
             max_values=1,
             options=[
                 discord.SelectOption(
-                    label=(f"サーバーXP {pack.cost_xp:,} → Minecraft {pack.reward_xp:,} XP"),
+                    label=(f"サーバーXP {pack.cost_xp:,} → {minecraft_xp_pack_text(pack)}"),
                     value=str(pack.cost_xp),
                 )
                 for pack in shop.packs
@@ -129,7 +141,8 @@ class MinecraftXpPackSelect(discord.ui.Select):
             title="交換内容の確認",
             description=(
                 f"サーバーXP **{pack.cost_xp:,}** を使い、Minecraft内の "
-                f"**{pack.reward_xp:,} XP**を獲得します。\n"
+                f"**{pack.reward_xp:,} XP**を獲得します。"
+                f"{minecraft_xp_pack_note(pack)}\n"
                 f"現在の交換可能XP: **{self.shop.wallet.available_xp:,} XP**"
             ),
             color=discord.Color.green(),

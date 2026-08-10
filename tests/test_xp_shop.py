@@ -26,6 +26,7 @@ def test_minecraft_xp_shop_panel_lists_api_packs() -> None:
             MinecraftXpPack(10, 50),
             MinecraftXpPack(50, 250),
             MinecraftXpPack(100, 500),
+            MinecraftXpPack(1_000, 5_000),
         )
     )
 
@@ -33,7 +34,8 @@ def test_minecraft_xp_shop_panel_lists_api_packs() -> None:
     assert embed.fields[0].value == (
         "`サーバーXP 10` → `Minecraft 50 XP`\n"
         "`サーバーXP 50` → `Minecraft 250 XP`\n"
-        "`サーバーXP 100` → `Minecraft 500 XP`"
+        "`サーバーXP 100` → `Minecraft 500 XP`\n"
+        "`サーバーXP 1,000` → `Minecraft 5,000 XP (Lv.0からLv.50近く)`"
     )
     assert embed.fields[1].name == "⚠️ 交換前にご確認ください"
     assert "参加していない状態ではMinecraft XPは加算されません" in str(embed.fields[1].value)
@@ -62,8 +64,12 @@ def test_shop_selection_and_confirmation_use_owner_wallet() -> None:
     async def build_views() -> tuple[MinecraftXpPackSelectView, MinecraftXpConfirmView]:
         bot = MinecraftDiscordBot(Config(discord_token="secret"))
         shop = MinecraftXpShop(
-            wallet=MinecraftXpWallet(total_xp=100, spent_xp=25, available_xp=75),
-            packs=(MinecraftXpPack(10, 50), MinecraftXpPack(100, 500)),
+            wallet=MinecraftXpWallet(total_xp=2_000, spent_xp=25, available_xp=1_975),
+            packs=(
+                MinecraftXpPack(10, 50),
+                MinecraftXpPack(100, 500),
+                MinecraftXpPack(1_000, 5_000),
+            ),
         )
         return (
             MinecraftXpPackSelectView(bot, owner_id=123, shop=shop),
@@ -80,7 +86,8 @@ def test_shop_selection_and_confirmation_use_owner_wallet() -> None:
     select_view, confirm_view = asyncio.run(build_views())
 
     select = select_view.children[0]
-    assert [option.value for option in select.options] == ["10", "100"]
+    assert [option.value for option in select.options] == ["10", "100", "1000"]
+    assert select.options[-1].label == ("サーバーXP 1,000 → Minecraft 5,000 XP (Lv.0からLv.50近く)")
     assert confirm_view.confirm.disabled
 
 
