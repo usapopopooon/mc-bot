@@ -25,9 +25,6 @@ from mc_bot.ui import (
     access_panel_embed,
 )
 
-CORRECT_JAVA_UUID = "ec561538-f3fd-461d-aff5-086b22154bce"
-CORRECT_BEDROCK_UUID = "00000000-0000-0000-0009-01fb7be05000"
-
 
 def test_access_panel_explains_edition_specific_names() -> None:
     description = access_panel_embed("automatic").description
@@ -169,24 +166,6 @@ def test_user_can_select_exhausted_whitelist_removal_for_manual_retry() -> None:
     asyncio.run(exercise())
 
 
-def test_unlinked_account_selection_stops_when_uuid_import_fails() -> None:
-    async def exercise() -> None:
-        bot = MinecraftDiscordBot(Config(discord_token="secret"))
-        bot._accounts = Mock()
-        bot._import_whitelist = AsyncMock(return_value=False)  # type: ignore[method-assign]
-        interaction = Mock(spec=discord.Interaction)
-        interaction.response.send_message = AsyncMock()
-
-        await bot.show_unlinked_accounts(interaction)
-
-        bot._accounts.list_unlinked.assert_not_called()
-        response = interaction.response.send_message.await_args
-        assert "紐付け操作を停止" in response.args[0]
-        assert response.kwargs["ephemeral"] is True
-
-    asyncio.run(exercise())
-
-
 def test_account_owner_can_manually_retry_exhausted_whitelist_removal() -> None:
     async def exercise() -> None:
         bot = MinecraftDiscordBot(Config(discord_token="secret"))
@@ -317,12 +296,6 @@ def test_registration_commit_stores_only_normalized_bedrock_name(source: str) ->
         )
         bot._accounts = Mock()
         bot._accounts.create_registration.return_value = account
-        bot._resolve_player_profile = AsyncMock(  # type: ignore[method-assign]
-            return_value=(
-                ".yuki19911261",
-                "00000000-0000-0000-0009-01fb7be05000",
-            )
-        )
         bot._add_to_whitelist = AsyncMock()  # type: ignore[method-assign]
         target = Mock(spec=discord.Member)
         target.id = 123
@@ -342,44 +315,11 @@ def test_registration_commit_stores_only_normalized_bedrock_name(source: str) ->
         create_args = bot._accounts.create_registration.call_args.kwargs
         assert create_args["minecraft_name"] == "yuki19911261"
         assert create_args["server_player_name"] == ".yuki19911261"
-        assert create_args["player_uuid"] == "00000000-0000-0000-0009-01fb7be05000"
         bot._add_to_whitelist.assert_awaited_once_with(account)
         content = interaction.followup.send.await_args.args[0]
         assert "yuki19911261" in content
         assert "#" not in content
         assert "\uff03" not in content
-
-    asyncio.run(exercise())
-
-
-def test_registration_does_not_store_name_when_uuid_cannot_be_resolved() -> None:
-    async def exercise() -> None:
-        bot = MinecraftDiscordBot(Config(discord_token="secret"))
-        bot._accounts = Mock()
-        bot._resolve_player_profile = AsyncMock(  # type: ignore[method-assign]
-            side_effect=ValueError("Bedrock版アカウント Missing が存在しません")
-        )
-        bot._add_to_whitelist = AsyncMock()  # type: ignore[method-assign]
-        target = Mock(spec=discord.Member)
-        target.id = 123
-        target.display_name = "user"
-        interaction = Mock(spec=discord.Interaction)
-        interaction.user.id = 123
-        interaction.followup.send = AsyncMock()
-
-        await bot.register_account(
-            interaction,
-            edition="bedrock",
-            minecraft_name="Missing",
-            target=target,
-            source="self",
-        )
-
-        bot._accounts.create_registration.assert_not_called()
-        bot._add_to_whitelist.assert_not_awaited()
-        message = interaction.followup.send.await_args.args[0]
-        assert "確認できないため登録しませんでした" in message
-        assert "存在しません" in message
 
     asyncio.run(exercise())
 
@@ -901,44 +841,6 @@ def test_confirm_account_relink_explains_pending_removal_recovery() -> None:
     asyncio.run(exercise())
 
 
-def test_confirm_account_relink_allows_explicit_missing_owner_recovery() -> None:
-    async def exercise() -> None:
-        bot = MinecraftDiscordBot(Config(discord_token="secret"))
-        bot._require_server_manager = AsyncMock(return_value=True)  # type: ignore[method-assign]
-        account = MinecraftAccount(
-            id=1,
-            edition="java",
-            minecraft_name="Steve",
-            server_player_name="Steve",
-            player_uuid=CORRECT_JAVA_UUID,
-            discord_user_id=123,
-            discord_username="old-user",
-            managed=True,
-            source="admin",
-            status="missing",
-            created_by=999,
-            approval_message_id=None,
-        )
-        bot._accounts = Mock()
-        bot._accounts.get.return_value = account
-        target = Mock(spec=discord.Member)
-        target.id = 456
-        target.mention = "<@456>"
-        interaction = Mock(spec=discord.Interaction)
-        interaction.user.id = 999
-        interaction.response.edit_message = AsyncMock()
-
-        await bot.confirm_account_relink(interaction, 1, target)
-
-        response = interaction.response.edit_message.await_args.kwargs
-        assert "削除済み" in response["content"]
-        assert "Whitelistへ再追加" in response["content"]
-        assert isinstance(response["view"], ConfirmRelinkView)
-        assert response["view"].recover_pending_remove is True
-
-    asyncio.run(exercise())
-
-
 def test_reassign_account_link_recovers_pending_removal() -> None:
     async def exercise() -> None:
         bot = MinecraftDiscordBot(Config(discord_token="secret"))
@@ -1181,9 +1083,6 @@ def test_correct_minecraft_id_creates_new_registration_without_restoring_wrong_i
         bot = MinecraftDiscordBot(Config(discord_token="secret", accounts_path=accounts_path))
         bot._require_server_manager = AsyncMock(return_value=True)  # type: ignore[method-assign]
         bot._audit_server_action = Mock()  # type: ignore[method-assign]
-        bot._resolve_player_profile = AsyncMock(  # type: ignore[method-assign]
-            return_value=("CorrectName", CORRECT_JAVA_UUID)
-        )
 
         async def mark_added(account: MinecraftAccount) -> None:
             store.update_status(account.id, "active")
@@ -1246,9 +1145,6 @@ def test_correct_minecraft_id_commit_stores_normalized_bedrock_name(tmp_path) ->
         bot = MinecraftDiscordBot(Config(discord_token="secret", accounts_path=accounts_path))
         bot._require_server_manager = AsyncMock(return_value=True)  # type: ignore[method-assign]
         bot._audit_server_action = Mock()  # type: ignore[method-assign]
-        bot._resolve_player_profile = AsyncMock(  # type: ignore[method-assign]
-            return_value=(".yuki19911261", CORRECT_BEDROCK_UUID)
-        )
 
         async def mark_added(account: MinecraftAccount) -> None:
             store.update_status(account.id, "active")
@@ -1285,111 +1181,6 @@ def test_correct_minecraft_id_commit_stores_normalized_bedrock_name(tmp_path) ->
     asyncio.run(exercise())
 
 
-def test_correct_minecraft_id_updates_name_in_place_when_uuid_is_unchanged(tmp_path) -> None:
-    async def exercise() -> None:
-        accounts_path = tmp_path / "accounts.db"
-        store = AccountStore(accounts_path)
-        store.initialize()
-        old_account = store.create_registration(
-            edition="bedrock",
-            minecraft_name="BuckedAtol84031",
-            server_player_name=".BuckedAtol84031",
-            player_uuid=CORRECT_BEDROCK_UUID,
-            discord_user_id=123,
-            discord_username="user",
-            source="admin",
-            status="active",
-            created_by=999,
-        )
-        store.update_status(old_account.id, "pending_remove")
-        bot = MinecraftDiscordBot(Config(discord_token="secret", accounts_path=accounts_path))
-        bot._require_server_manager = AsyncMock(return_value=True)  # type: ignore[method-assign]
-        bot._audit_server_action = Mock()  # type: ignore[method-assign]
-        bot._resolve_player_profile = AsyncMock(  # type: ignore[method-assign]
-            return_value=(".yuki19911261", CORRECT_BEDROCK_UUID)
-        )
-
-        async def mark_added(account: MinecraftAccount) -> None:
-            store.update_status(account.id, "active")
-
-        bot._add_to_whitelist = AsyncMock(side_effect=mark_added)  # type: ignore[method-assign]
-        interaction = Mock(spec=discord.Interaction)
-        interaction.user.id = 999
-        interaction.guild = None
-        interaction.response.edit_message = AsyncMock()
-        interaction.edit_original_response = AsyncMock()
-
-        await bot.correct_pending_removal_minecraft_id(
-            interaction,
-            old_account_id=old_account.id,
-            expected_discord_user_id=123,
-            edition="bedrock",
-            minecraft_name="yuki1991#1261",
-        )
-
-        changed = store.get(old_account.id)
-        assert changed is not None
-        assert changed.status == "active"
-        assert changed.minecraft_name == "yuki19911261"
-        assert changed.server_player_name == ".yuki19911261"
-        assert changed.player_uuid == CORRECT_BEDROCK_UUID
-        assert len(store.list_whitelist_registrations()) == 1
-        bot._add_to_whitelist.assert_awaited_once()
-        assert "UUIDが同一" in interaction.edit_original_response.await_args.kwargs["content"]
-
-    asyncio.run(exercise())
-
-
-def test_same_uuid_correction_failure_says_removal_was_cancelled(tmp_path) -> None:
-    async def exercise() -> None:
-        accounts_path = tmp_path / "accounts.db"
-        store = AccountStore(accounts_path)
-        store.initialize()
-        old_account = store.create_registration(
-            edition="bedrock",
-            minecraft_name="OldName",
-            server_player_name=".OldName",
-            player_uuid=CORRECT_BEDROCK_UUID,
-            discord_user_id=123,
-            discord_username="user",
-            source="admin",
-            status="active",
-            created_by=999,
-        )
-        store.update_status(old_account.id, "pending_remove")
-        bot = MinecraftDiscordBot(Config(discord_token="secret", accounts_path=accounts_path))
-        bot._require_server_manager = AsyncMock(return_value=True)  # type: ignore[method-assign]
-        bot._audit_server_action = Mock()  # type: ignore[method-assign]
-        bot._resolve_player_profile = AsyncMock(  # type: ignore[method-assign]
-            return_value=(".CurrentName", CORRECT_BEDROCK_UUID)
-        )
-        bot._add_to_whitelist = AsyncMock(  # type: ignore[method-assign]
-            side_effect=RuntimeError("temporary failure")
-        )
-        interaction = Mock(spec=discord.Interaction)
-        interaction.user.id = 999
-        interaction.guild = None
-        interaction.response.edit_message = AsyncMock()
-        interaction.edit_original_response = AsyncMock()
-
-        await bot.correct_pending_removal_minecraft_id(
-            interaction,
-            old_account_id=old_account.id,
-            expected_discord_user_id=123,
-            edition="bedrock",
-            minecraft_name="CurrentName",
-        )
-
-        changed = store.get(old_account.id)
-        assert changed is not None
-        assert changed.status == "pending_add"
-        content = interaction.edit_original_response.await_args.kwargs["content"]
-        assert "削除待ちは取り消し" in content
-        assert "削除はそのまま継続" not in content
-
-    asyncio.run(exercise())
-
-
 def test_correct_minecraft_id_keeps_both_actions_pending_when_add_fails(tmp_path) -> None:
     async def exercise() -> None:
         accounts_path = tmp_path / "accounts.db"
@@ -1409,9 +1200,6 @@ def test_correct_minecraft_id_keeps_both_actions_pending_when_add_fails(tmp_path
         bot = MinecraftDiscordBot(Config(discord_token="secret", accounts_path=accounts_path))
         bot._require_server_manager = AsyncMock(return_value=True)  # type: ignore[method-assign]
         bot._audit_server_action = Mock()  # type: ignore[method-assign]
-        bot._resolve_player_profile = AsyncMock(  # type: ignore[method-assign]
-            return_value=("CorrectName", CORRECT_JAVA_UUID)
-        )
 
         async def reject_missing_id(_: MinecraftAccount) -> None:
             interaction.response.edit_message.assert_awaited_once_with(
@@ -1452,7 +1240,7 @@ def test_correct_minecraft_id_keeps_both_actions_pending_when_add_fails(tmp_path
 def test_correct_minecraft_id_links_existing_unlinked_whitelist(tmp_path) -> None:
     async def exercise() -> None:
         whitelist_path = tmp_path / "whitelist.json"
-        whitelist_path.write_text(f'[{{"uuid":"{CORRECT_JAVA_UUID}","name":"CorrectName"}}]')
+        whitelist_path.write_text('[{"uuid":"uuid-2","name":"CorrectName"}]')
         accounts_path = tmp_path / "accounts.db"
         store = AccountStore(accounts_path)
         store.initialize()
@@ -1471,9 +1259,6 @@ def test_correct_minecraft_id_links_existing_unlinked_whitelist(tmp_path) -> Non
         bot = MinecraftDiscordBot(Config(discord_token="secret", accounts_path=accounts_path))
         bot._require_server_manager = AsyncMock(return_value=True)  # type: ignore[method-assign]
         bot._audit_server_action = Mock()  # type: ignore[method-assign]
-        bot._resolve_player_profile = AsyncMock(  # type: ignore[method-assign]
-            return_value=("CorrectName", CORRECT_JAVA_UUID)
-        )
         bot._add_to_whitelist = AsyncMock()  # type: ignore[method-assign]
         interaction = Mock(spec=discord.Interaction)
         interaction.user.id = 999

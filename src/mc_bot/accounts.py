@@ -144,8 +144,6 @@ class AccountStore:
                     ON minecraft_accounts(discord_user_id);
                 CREATE INDEX IF NOT EXISTS accounts_status
                     ON minecraft_accounts(status);
-                CREATE INDEX IF NOT EXISTS accounts_player_uuid
-                    ON minecraft_accounts(player_uuid COLLATE NOCASE);
                 CREATE TABLE IF NOT EXISTS minecraft_xp_observations (
                     account_id INTEGER PRIMARY KEY
                         REFERENCES minecraft_accounts(id) ON DELETE CASCADE,
@@ -402,7 +400,6 @@ class AccountStore:
         imported = 0
         now = _now()
         with self._connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
             for entry in data:
                 if not isinstance(entry, dict):
                     continue
@@ -418,187 +415,24 @@ class AccountStore:
                 minecraft_name = (
                     name.removeprefix(bedrock_prefix) if is_bedrock and bedrock_prefix else name
                 )
-                normalized_uuid = _normalize_player_uuid(player_uuid)
-                uuid_matches = (
-                    connection.execute(
-                        """
-                        SELECT * FROM minecraft_accounts
-                        WHERE player_uuid = ? COLLATE NOCASE
-                        ORDER BY id
-                        """,
-                        (normalized_uuid,),
-                    ).fetchall()
-                    if normalized_uuid is not None
-                    else []
-                )
-                name_match = connection.execute(
+                cursor = connection.execute(
                     """
-                    SELECT * FROM minecraft_accounts
-                    WHERE server_player_name = ? COLLATE NOCASE
+                    INSERT INTO minecraft_accounts (
+                        edition, minecraft_name, server_player_name, player_uuid,
+                        managed, source, status, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, 0, 'legacy', 'active', ?, ?)
+                    ON CONFLICT(server_player_name) DO UPDATE SET
+                        player_uuid = COALESCE(excluded.player_uuid, player_uuid),
+                        status = CASE
+                            WHEN status = 'missing' AND managed = 0 THEN 'active'
+                            ELSE status
+                        END,
+                        updated_at = excluded.updated_at
                     """,
-                    (name,),
-                ).fetchone()
-                name_match_uuid = (
-                    _normalize_player_uuid(name_match["player_uuid"])
-                    if name_match is not None
-                    else None
+                    (edition, minecraft_name, name, player_uuid, now, now),
                 )
-                if (
-                    normalized_uuid is not None
-                    and name_match_uuid is not None
-                    and name_match_uuid.casefold() != normalized_uuid.casefold()
-                ):
-                    raise ValueError(
-                        f"Whitelistのプレイヤー名が別のUUIDの登録に一致しています: {name}"
-                    )
-                uuid_match_ids = {row["id"] for row in uuid_matches}
-                if len(uuid_matches) > 1 or (
-                    uuid_matches
-                    and name_match is not None
-                    and name_match["id"] not in uuid_match_ids
-                ):
-                    if normalized_uuid is None:
-                        raise ValueError(f"WhitelistのUUIDが正しくありません: {name}")
-                    target_id = self._consolidate_same_owner_uuid_rows(
-                        connection,
-                        uuid_matches=uuid_matches,
-                        name_match=name_match,
-                        edition=edition,
-                        minecraft_name=minecraft_name,
-                        server_player_name=name,
-                        player_uuid=normalized_uuid,
-                        now=now,
-                    )
-                    existing = connection.execute(
-                        "SELECT * FROM minecraft_accounts WHERE id = ?", (target_id,)
-                    ).fetchone()
-                else:
-                    existing = (uuid_matches[0] if uuid_matches else None) or name_match
-                if existing is None:
-                    connection.execute(
-                        """
-                        INSERT INTO minecraft_accounts (
-                            edition, minecraft_name, server_player_name, player_uuid,
-                            managed, source, status, created_at, updated_at
-                        ) VALUES (?, ?, ?, ?, 0, 'legacy', 'active', ?, ?)
-                        """,
-                        (edition, minecraft_name, name, normalized_uuid, now, now),
-                    )
-                else:
-                    refresh_name = existing["discord_user_id"] is None
-                    connection.execute(
-                        """
-                        UPDATE minecraft_accounts
-                        SET edition = ?,
-                            minecraft_name = CASE WHEN ? THEN ? ELSE minecraft_name END,
-                            server_player_name = CASE WHEN ? THEN ? ELSE server_player_name END,
-                            player_uuid = COALESCE(?, player_uuid),
-                            status = CASE
-                                WHEN status = 'missing' AND managed = 0 THEN 'active'
-                                ELSE status
-                            END,
-                            updated_at = ?
-                        WHERE id = ?
-                        """,
-                        (
-                            edition,
-                            int(refresh_name),
-                            minecraft_name,
-                            int(refresh_name),
-                            name,
-                            normalized_uuid,
-                            now,
-                            existing["id"],
-                        ),
-                    )
-                imported += 1
+                imported += cursor.rowcount
         return imported
-
-    @staticmethod
-    def _consolidate_same_owner_uuid_rows(
-        connection: sqlite3.Connection,
-        *,
-        uuid_matches: list[sqlite3.Row],
-        name_match: sqlite3.Row | None,
-        edition: str,
-        minecraft_name: str,
-        server_player_name: str,
-        player_uuid: str,
-        now: str,
-    ) -> int:
-        rows_by_id = {row["id"]: row for row in uuid_matches}
-        if name_match is not None:
-            name_uuid = _normalize_player_uuid(name_match["player_uuid"])
-            if name_uuid is not None and name_uuid.casefold() != player_uuid.casefold():
-                raise ValueError(
-                    f"Whitelistのプレイヤー名が別のUUIDの登録に一致しています: {server_player_name}"
-                )
-            rows_by_id[name_match["id"]] = name_match
-        owners = {
-            int(row["discord_user_id"])
-            for row in rows_by_id.values()
-            if row["discord_user_id"] is not None
-        }
-        if len(owners) > 1:
-            raise ValueError(
-                "同じMinecraft UUIDが複数のDiscordユーザーに紐付いています。"
-                "安全のため自動統合しません。"
-            )
-        target = next(
-            (row for row in uuid_matches if row["discord_user_id"] is not None),
-            name_match if name_match is not None else uuid_matches[0],
-        )
-        linked = next(
-            (row for row in rows_by_id.values() if row["discord_user_id"] is not None),
-            target,
-        )
-        statuses = {row["status"] for row in rows_by_id.values()}
-        if "pending_add" in statuses:
-            status = "pending_add"
-        elif "active" in statuses:
-            status = "active"
-        elif "pending_remove" in statuses:
-            status = "pending_remove"
-        else:
-            status = "active"
-        target_id = int(target["id"])
-        archived_ids = [row_id for row_id in rows_by_id if row_id != target_id]
-        for archived_id in archived_ids:
-            connection.execute(
-                """
-                UPDATE minecraft_accounts
-                SET server_player_name = ?, player_uuid = NULL, status = 'missing',
-                    whitelist_retry_count = 0, whitelist_last_error = NULL,
-                    updated_at = ?
-                WHERE id = ?
-                """,
-                (f"#archived:{archived_id}", now, archived_id),
-            )
-        connection.execute(
-            """
-            UPDATE minecraft_accounts
-            SET edition = ?, minecraft_name = ?, server_player_name = ?, player_uuid = ?,
-                discord_user_id = ?, discord_username = ?, managed = ?, source = ?,
-                status = ?, created_by = COALESCE(created_by, ?),
-                whitelist_retry_count = 0, whitelist_last_error = NULL, updated_at = ?
-            WHERE id = ?
-            """,
-            (
-                edition,
-                minecraft_name,
-                server_player_name,
-                player_uuid,
-                linked["discord_user_id"],
-                linked["discord_username"],
-                max(int(row["managed"]) for row in rows_by_id.values()),
-                linked["source"],
-                status,
-                linked["created_by"],
-                now,
-                target_id,
-            ),
-        )
-        return target_id
 
     def create_registration(
         self,
@@ -614,89 +448,21 @@ class AccountStore:
         player_uuid: str | None = None,
     ) -> MinecraftAccount:
         now = _now()
-        normalized_uuid = _normalize_player_uuid(player_uuid)
-        if player_uuid is not None and normalized_uuid is None:
-            raise ValueError("Minecraft UUIDが正しくありません。")
         with self._connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            uuid_existing = (
-                connection.execute(
-                    """
-                    SELECT id, status, player_uuid, discord_user_id
-                    FROM minecraft_accounts
-                    WHERE player_uuid = ? COLLATE NOCASE
-                    """,
-                    (normalized_uuid,),
-                ).fetchone()
-                if normalized_uuid is not None
-                else None
-            )
-            name_existing = connection.execute(
+            existing = connection.execute(
                 """
-                SELECT id, status, player_uuid, discord_user_id
-                FROM minecraft_accounts
+                SELECT id, status FROM minecraft_accounts
                 WHERE server_player_name = ? COLLATE NOCASE
                 """,
                 (server_player_name,),
             ).fetchone()
-            if (
-                uuid_existing is not None
-                and name_existing is not None
-                and uuid_existing["id"] != name_existing["id"]
-            ):
-                raise ValueError(
-                    "Minecraft UUIDとプレイヤー名が別々の登録に一致しています。"
-                    "管理者が登録状態を確認してください。"
-                )
-            name_existing_uuid = (
-                _normalize_player_uuid(name_existing["player_uuid"])
-                if name_existing is not None
-                else None
-            )
-            if (
-                normalized_uuid is not None
-                and name_existing_uuid is not None
-                and name_existing_uuid.casefold() != normalized_uuid.casefold()
-            ):
-                raise ValueError(
-                    "同じプレイヤー名が別のMinecraft UUIDで登録されています。"
-                    "管理者が登録状態を確認してください。"
-                )
-            if (
-                normalized_uuid is not None
-                and uuid_existing is None
-                and name_existing is not None
-                and name_existing_uuid is None
-                and name_existing["status"] == "missing"
-            ):
-                # UUID不明の履歴を、同名という理由だけで新しい本人へ引き継がない。
-                # 行は削除せず退避し、外部キーで結び付いた履歴も監査用に残す。
-                connection.execute(
-                    """
-                    UPDATE minecraft_accounts
-                    SET server_player_name = ?, updated_at = ?
-                    WHERE id = ?
-                    """,
-                    (f"#archived:{name_existing['id']}", now, name_existing["id"]),
-                )
-                name_existing = None
-            existing = uuid_existing or name_existing
             if existing is not None:
                 if existing["status"] != "missing":
                     raise ValueError("このMinecraftアカウントはすでに登録されています。")
-                if normalized_uuid is not None and existing["discord_user_id"] not in {
-                    None,
-                    discord_user_id,
-                }:
-                    raise ValueError(
-                        "このMinecraftアカウントは別のDiscordユーザーの履歴に"
-                        "紐付いています。管理者が紐付け先修正を行ってください。"
-                    )
                 connection.execute(
                     """
-                    UPDATE minecraft_accounts SET
-                        edition = ?, minecraft_name = ?, server_player_name = ?,
-                        player_uuid = COALESCE(?, player_uuid), discord_user_id = ?,
+                    UPDATE minecraft_accounts
+                    SET edition = ?, minecraft_name = ?, discord_user_id = ?,
                         discord_username = ?, managed = 1, source = ?, status = ?,
                         created_by = ?, approval_message_id = NULL,
                         whitelist_retry_count = 0, whitelist_last_error = NULL,
@@ -706,8 +472,6 @@ class AccountStore:
                     (
                         edition,
                         minecraft_name,
-                        server_player_name,
-                        normalized_uuid,
                         discord_user_id,
                         discord_username,
                         source,
@@ -722,8 +486,8 @@ class AccountStore:
                 cursor = connection.execute(
                     """
                     INSERT INTO minecraft_accounts (
-                        edition, minecraft_name, server_player_name, player_uuid,
-                        discord_user_id, discord_username, managed, source, status, created_by,
+                        edition, minecraft_name, server_player_name, player_uuid, discord_user_id,
+                        discord_username, managed, source, status, created_by,
                         created_at, updated_at
                     ) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?)
                     """,
@@ -731,7 +495,7 @@ class AccountStore:
                         edition,
                         minecraft_name,
                         server_player_name,
-                        normalized_uuid,
+                        player_uuid,
                         discord_user_id,
                         discord_username,
                         source,
@@ -777,26 +541,6 @@ class AccountStore:
             ).fetchone()
         return _account(row) if row is not None else None
 
-    def get_by_player_uuid(self, player_uuid: str) -> MinecraftAccount | None:
-        normalized_uuid = _normalize_player_uuid(player_uuid)
-        if normalized_uuid is None:
-            return None
-        with self._connect() as connection:
-            rows = connection.execute(
-                """
-                SELECT * FROM minecraft_accounts
-                WHERE player_uuid = ? COLLATE NOCASE
-                ORDER BY id
-                LIMIT 2
-                """,
-                (normalized_uuid,),
-            ).fetchall()
-        if len(rows) > 1:
-            raise ValueError(
-                "同じMinecraft UUIDの登録が複数あります。管理者が登録状態を確認してください。"
-            )
-        return _account(rows[0]) if rows else None
-
     def list_for_discord_user(self, discord_user_id: int) -> list[MinecraftAccount]:
         with self._connect() as connection:
             rows = connection.execute(
@@ -829,8 +573,7 @@ class AccountStore:
                 """
                 SELECT * FROM minecraft_accounts
                 WHERE discord_user_id IS NOT NULL
-                  AND status IN ('active', 'pending_add', 'pending_remove', 'missing')
-                  AND server_player_name NOT LIKE '#archived:%'
+                  AND status IN ('active', 'pending_add', 'pending_remove')
                 ORDER BY edition, minecraft_name COLLATE NOCASE
                 LIMIT ?
                 """,
@@ -917,37 +660,22 @@ class AccountStore:
             ).fetchall()
         return [_account(row) for row in rows]
 
-    def reconcile_whitelist(
-        self, player_profiles: list[str | tuple[str, str]]
-    ) -> tuple[int, int, int]:
-        names_and_uuids = [
-            (profile, None) if isinstance(profile, str) else profile for profile in player_profiles
-        ]
-        present_names = {name.casefold() for name, _ in names_and_uuids}
-        present_uuids = {
-            normalized
-            for _, player_uuid in names_and_uuids
-            if (normalized := _normalize_player_uuid(player_uuid)) is not None
-        }
+    def reconcile_whitelist(self, player_names: list[str]) -> tuple[int, int, int]:
+        present = {name.casefold() for name in player_names}
         queued_adds = 0
         completed_adds = 0
         completed_removals = 0
         with self._connect() as connection:
             rows = connection.execute(
                 """
-                SELECT id, server_player_name, player_uuid, managed, status
+                SELECT id, server_player_name, managed, status
                 FROM minecraft_accounts
                 WHERE status IN ('active', 'pending_add', 'pending_remove')
                 """
             ).fetchall()
             now = _now()
             for row in rows:
-                player_uuid = _normalize_player_uuid(row["player_uuid"])
-                is_present = (
-                    player_uuid in present_uuids
-                    if player_uuid is not None
-                    else row["server_player_name"].casefold() in present_names
-                )
+                is_present = row["server_player_name"].casefold() in present
                 new_status: str | None = None
                 if row["status"] == "active" and not is_present and row["managed"]:
                     new_status = "pending_add"
@@ -2499,99 +2227,15 @@ class AccountStore:
             )
 
     def update_player_uuid(self, account_id: int, player_uuid: str) -> None:
-        normalized_uuid = _normalize_player_uuid(player_uuid)
-        if normalized_uuid is None:
-            raise ValueError("Minecraft UUIDが正しくありません。")
         with self._connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            conflict = connection.execute(
-                """
-                SELECT id FROM minecraft_accounts
-                WHERE player_uuid = ? COLLATE NOCASE AND id != ?
-                LIMIT 1
-                """,
-                (normalized_uuid, account_id),
-            ).fetchone()
-            if conflict is not None:
-                raise ValueError("このMinecraft UUIDはすでに登録されています。")
             connection.execute(
                 """
                 UPDATE minecraft_accounts
                 SET player_uuid = ?, updated_at = ?
                 WHERE id = ?
                 """,
-                (normalized_uuid, _now(), account_id),
+                (player_uuid, _now(), account_id),
             )
-
-    def update_player_profile(
-        self,
-        account_id: int,
-        *,
-        minecraft_name: str,
-        server_player_name: str,
-        player_uuid: str,
-        status: str | None = None,
-    ) -> MinecraftAccount:
-        normalized_uuid = _normalize_player_uuid(player_uuid)
-        if normalized_uuid is None:
-            raise ValueError("Minecraft UUIDが正しくありません。")
-        with self._connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            uuid_conflict = connection.execute(
-                """
-                SELECT id FROM minecraft_accounts
-                WHERE player_uuid = ? COLLATE NOCASE AND id != ?
-                LIMIT 1
-                """,
-                (normalized_uuid, account_id),
-            ).fetchone()
-            name_conflict = connection.execute(
-                """
-                SELECT id FROM minecraft_accounts
-                WHERE server_player_name = ? COLLATE NOCASE AND id != ?
-                LIMIT 1
-                """,
-                (server_player_name, account_id),
-            ).fetchone()
-            if uuid_conflict is not None or name_conflict is not None:
-                raise ValueError(
-                    "UUIDまたはプレイヤー名が別の登録で使用されています。"
-                    "管理者が登録状態を確認してください。"
-                )
-            if status is None:
-                cursor = connection.execute(
-                    """
-                    UPDATE minecraft_accounts
-                    SET minecraft_name = ?, server_player_name = ?, player_uuid = ?,
-                        updated_at = ?
-                    WHERE id = ?
-                    """,
-                    (minecraft_name, server_player_name, normalized_uuid, _now(), account_id),
-                )
-            else:
-                cursor = connection.execute(
-                    """
-                    UPDATE minecraft_accounts
-                    SET minecraft_name = ?, server_player_name = ?, player_uuid = ?,
-                        status = ?, whitelist_retry_count = 0,
-                        whitelist_last_error = NULL, updated_at = ?
-                    WHERE id = ?
-                    """,
-                    (
-                        minecraft_name,
-                        server_player_name,
-                        normalized_uuid,
-                        status,
-                        _now(),
-                        account_id,
-                    ),
-                )
-            if cursor.rowcount != 1:
-                raise ValueError("Minecraftアカウントが見つかりません。")
-        account = self.get(account_id)
-        if account is None:
-            raise RuntimeError("Updated Minecraft account disappeared")
-        return account
 
     def unlink_protected(self, account_id: int) -> None:
         with self._connect() as connection:
@@ -2786,12 +2430,3 @@ def _combo_is_active(
 
 def _now() -> str:
     return datetime.now(UTC).isoformat()
-
-
-def _normalize_player_uuid(player_uuid: object) -> str | None:
-    if not isinstance(player_uuid, str) or not player_uuid.strip():
-        return None
-    try:
-        return str(uuid.UUID(player_uuid.strip()))
-    except ValueError:
-        return None
