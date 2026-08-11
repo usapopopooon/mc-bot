@@ -348,7 +348,13 @@ class AccountSelect(discord.ui.Select):
             description = edition
             if purpose == "relink":
                 current = account.discord_username or f"Discord ID: {account.discord_user_id}"
-                state = " / 削除反映待ち" if account.status == "pending_remove" else ""
+                state = (
+                    " / 削除反映待ち"
+                    if account.status == "pending_remove"
+                    else " / 削除済み"
+                    if account.status == "missing"
+                    else ""
+                )
                 description = f"{edition} / 現在: {current}{state}"[:100]
             elif purpose == "correct_id":
                 current = account.discord_username or f"Discord ID: {account.discord_user_id}"

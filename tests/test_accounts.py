@@ -3,6 +3,8 @@ import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from threading import Barrier
 
+import pytest
+
 from mc_bot.accounts import WHITELIST_RETRY_LIMIT, AccountStore
 
 
@@ -226,6 +228,416 @@ def test_imports_existing_whitelist_as_protected_and_unlinked(tmp_path) -> None:
     assert all(account.status == "active" for account in accounts)
 
 
+def test_repeated_whitelist_import_does_not_rewrite_unchanged_account(tmp_path) -> None:
+    database = tmp_path / "accounts.db"
+    whitelist = tmp_path / "whitelist.json"
+    whitelist.write_text(
+        json.dumps(
+            [
+                {
+                    "uuid": "8667ba71-b85a-4004-af54-457a9734eed7",
+                    "name": "Steve",
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    store = AccountStore(database)
+    store.initialize()
+    store.import_whitelist(whitelist)
+    account = store.list_unlinked()[0]
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "UPDATE minecraft_accounts SET updated_at = 'unchanged' WHERE id = ?",
+            (account.id,),
+        )
+
+    store.import_whitelist(whitelist)
+
+    with sqlite3.connect(database) as connection:
+        updated_at = connection.execute(
+            "SELECT updated_at FROM minecraft_accounts WHERE id = ?",
+            (account.id,),
+        ).fetchone()
+    assert updated_at == ("unchanged",)
+
+
+def test_whitelist_import_does_not_duplicate_linked_player_with_same_uuid(tmp_path) -> None:
+    player_uuid = "00000000-0000-0000-0009-01fb7be05000"
+    whitelist = tmp_path / "whitelist.json"
+    whitelist.write_text(
+        json.dumps([{"uuid": player_uuid, "name": ".BuckedAtol84031"}]),
+        encoding="utf-8",
+    )
+    store = AccountStore(tmp_path / "accounts.db")
+    store.initialize()
+    store.import_whitelist(whitelist)
+    original = store.list_unlinked()[0]
+    store.link_existing(
+        original.id,
+        discord_user_id=123,
+        discord_username="user",
+        managed=True,
+        created_by=999,
+    )
+
+    whitelist.write_text(
+        json.dumps([{"uuid": player_uuid, "name": ".yuki19911261"}]),
+        encoding="utf-8",
+    )
+    store.import_whitelist(whitelist)
+
+    changed = store.get(original.id)
+    assert changed is not None
+    assert changed.server_player_name == ".BuckedAtol84031"
+    assert changed.minecraft_name == "BuckedAtol84031"
+    assert changed.player_uuid == player_uuid
+    assert changed.discord_user_id == 123
+    assert changed.managed
+    assert len(store.list_whitelist_registrations()) == 1
+
+
+def test_registration_rejects_duplicate_uuid_under_another_name(tmp_path) -> None:
+    player_uuid = "00000000-0000-0000-0009-01fb7be05000"
+    store = AccountStore(tmp_path / "accounts.db")
+    store.initialize()
+    store.create_registration(
+        edition="bedrock",
+        minecraft_name="BuckedAtol84031",
+        server_player_name=".BuckedAtol84031",
+        player_uuid=player_uuid,
+        discord_user_id=123,
+        discord_username="user",
+        source="self",
+        status="active",
+        created_by=123,
+    )
+
+    with pytest.raises(ValueError, match="すでに登録"):
+        store.create_registration(
+            edition="bedrock",
+            minecraft_name="yuki19911261",
+            server_player_name=".yuki19911261",
+            player_uuid=player_uuid,
+            discord_user_id=456,
+            discord_username="other",
+            source="self",
+            status="pending_add",
+            created_by=456,
+        )
+
+
+def test_registration_does_not_reuse_missing_name_with_different_uuid(tmp_path) -> None:
+    store = AccountStore(tmp_path / "accounts.db")
+    store.initialize()
+    old = store.create_registration(
+        edition="bedrock",
+        minecraft_name="SameName",
+        server_player_name=".SameName",
+        player_uuid="00000000-0000-0000-0009-01fb7be05000",
+        discord_user_id=123,
+        discord_username="old",
+        source="self",
+        status="active",
+        created_by=123,
+    )
+    store.update_status(old.id, "missing")
+
+    with pytest.raises(ValueError, match="別のMinecraft UUID"):
+        store.create_registration(
+            edition="bedrock",
+            minecraft_name="SameName",
+            server_player_name=".SameName",
+            player_uuid="00000000-0000-0000-0009-01fb7be05001",
+            discord_user_id=456,
+            discord_username="new",
+            source="self",
+            status="pending_add",
+            created_by=456,
+        )
+
+    unchanged = store.get(old.id)
+    assert unchanged is not None
+    assert unchanged.player_uuid == "00000000-0000-0000-0009-01fb7be05000"
+    assert unchanged.discord_user_id == 123
+
+
+def test_registration_archives_uuid_unknown_missing_name_instead_of_reusing_history(
+    tmp_path,
+) -> None:
+    store = AccountStore(tmp_path / "accounts.db")
+    store.initialize()
+    old = store.create_registration(
+        edition="bedrock",
+        minecraft_name="SameName",
+        server_player_name=".SameName",
+        discord_user_id=123,
+        discord_username="old",
+        source="self",
+        status="active",
+        created_by=123,
+    )
+    store.update_status(old.id, "missing")
+
+    current = store.create_registration(
+        edition="bedrock",
+        minecraft_name="SameName",
+        server_player_name=".SameName",
+        player_uuid="00000000-0000-0000-0009-01fb7be05000",
+        discord_user_id=456,
+        discord_username="current",
+        source="self",
+        status="pending_add",
+        created_by=456,
+    )
+
+    archived = store.get(old.id)
+    assert archived is not None
+    assert archived.status == "missing"
+    assert archived.server_player_name == f"#archived:{old.id}"
+    assert archived.discord_user_id == 123
+    assert current.id != old.id
+    assert current.server_player_name == ".SameName"
+    assert current.discord_user_id == 456
+
+
+def test_reconcile_uses_uuid_when_whitelist_name_changed(tmp_path) -> None:
+    player_uuid = "00000000-0000-0000-0009-01fb7be05000"
+    store = AccountStore(tmp_path / "accounts.db")
+    store.initialize()
+    account = store.create_registration(
+        edition="bedrock",
+        minecraft_name="BuckedAtol84031",
+        server_player_name=".BuckedAtol84031",
+        player_uuid=player_uuid,
+        discord_user_id=123,
+        discord_username="user",
+        source="self",
+        status="active",
+        created_by=123,
+    )
+
+    assert store.reconcile_whitelist([(".yuki19911261", player_uuid)]) == (0, 0, 0)
+    assert store.get(account.id).status == "active"  # type: ignore[union-attr]
+
+
+def test_whitelist_import_archives_same_owner_duplicate_uuid_rows(tmp_path) -> None:
+    player_uuid = "00000000-0000-0000-0009-01fb7be05000"
+    database = tmp_path / "accounts.db"
+    store = AccountStore(database)
+    store.initialize()
+    old = store.create_registration(
+        edition="bedrock",
+        minecraft_name="BuckedAtol84031",
+        server_player_name=".BuckedAtol84031",
+        player_uuid=player_uuid,
+        discord_user_id=123,
+        discord_username="user",
+        source="admin",
+        status="active",
+        created_by=999,
+    )
+    store.update_status(old.id, "pending_remove")
+    current = store.create_registration(
+        edition="bedrock",
+        minecraft_name="yuki19911261",
+        server_player_name=".yuki19911261",
+        discord_user_id=123,
+        discord_username="user",
+        source="admin",
+        status="pending_add",
+        created_by=999,
+    )
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "UPDATE minecraft_accounts SET player_uuid = ? WHERE id = ?",
+            (player_uuid, current.id),
+        )
+    whitelist = tmp_path / "whitelist.json"
+    whitelist.write_text(
+        json.dumps([{"uuid": player_uuid, "name": ".yuki19911261"}]),
+        encoding="utf-8",
+    )
+
+    store.import_whitelist(whitelist)
+    store.reconcile_whitelist([(".yuki19911261", player_uuid)])
+
+    retained = store.get(old.id)
+    archived = store.get(current.id)
+    assert retained is not None
+    assert retained.status == "active"
+    assert retained.player_uuid == player_uuid
+    assert retained.server_player_name == ".yuki19911261"
+    assert retained.discord_user_id == 123
+    assert retained.managed
+    assert archived is not None
+    assert archived.status == "missing"
+    assert archived.player_uuid is None
+    assert archived.server_player_name == f"#archived:{current.id}"
+    assert [account.id for account in store.list_relinkable()] == [retained.id]
+
+
+def test_whitelist_import_keeps_access_when_same_uuid_is_active_and_pending_remove(
+    tmp_path,
+) -> None:
+    player_uuid = "00000000-0000-0000-0009-01fb7be05000"
+    database = tmp_path / "accounts.db"
+    store = AccountStore(database)
+    store.initialize()
+    removing = store.create_registration(
+        edition="bedrock",
+        minecraft_name="OldName",
+        server_player_name=".OldName",
+        player_uuid=player_uuid,
+        discord_user_id=123,
+        discord_username="user",
+        source="admin",
+        status="active",
+        created_by=999,
+    )
+    store.update_status(removing.id, "pending_remove")
+    active = store.create_registration(
+        edition="bedrock",
+        minecraft_name="CurrentName",
+        server_player_name=".CurrentName",
+        discord_user_id=123,
+        discord_username="user",
+        source="admin",
+        status="active",
+        created_by=999,
+    )
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "UPDATE minecraft_accounts SET player_uuid = ? WHERE id = ?",
+            (player_uuid, active.id),
+        )
+    whitelist = tmp_path / "whitelist.json"
+    whitelist.write_text(
+        json.dumps([{"uuid": player_uuid, "name": ".CurrentName"}]),
+        encoding="utf-8",
+    )
+
+    store.import_whitelist(whitelist)
+
+    retained = store.get(removing.id)
+    archived = store.get(active.id)
+    assert retained is not None
+    assert retained.status == "active"
+    assert retained.server_player_name == ".CurrentName"
+    assert archived is not None
+    assert archived.status == "missing"
+
+
+def test_whitelist_import_refuses_duplicate_uuid_with_different_owners(tmp_path) -> None:
+    player_uuid = "00000000-0000-0000-0009-01fb7be05000"
+    database = tmp_path / "accounts.db"
+    store = AccountStore(database)
+    store.initialize()
+    first = store.create_registration(
+        edition="bedrock",
+        minecraft_name="FirstName",
+        server_player_name=".FirstName",
+        player_uuid=player_uuid,
+        discord_user_id=123,
+        discord_username="first",
+        source="admin",
+        status="active",
+        created_by=999,
+    )
+    second = store.create_registration(
+        edition="bedrock",
+        minecraft_name="SecondName",
+        server_player_name=".SecondName",
+        discord_user_id=456,
+        discord_username="second",
+        source="admin",
+        status="pending_add",
+        created_by=999,
+    )
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "UPDATE minecraft_accounts SET player_uuid = ? WHERE id = ?",
+            (player_uuid, second.id),
+        )
+    whitelist = tmp_path / "whitelist.json"
+    whitelist.write_text(
+        json.dumps([{"uuid": player_uuid, "name": ".SecondName"}]),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="複数のDiscordユーザー"):
+        store.import_whitelist(whitelist)
+
+    assert store.get(first.id).status == "active"  # type: ignore[union-attr]
+    assert store.get(second.id).status == "pending_add"  # type: ignore[union-attr]
+
+
+def test_whitelist_import_does_not_reassign_recycled_name_to_another_uuid(tmp_path) -> None:
+    old_uuid = "00000000-0000-0000-0009-01fb7be05000"
+    new_uuid = "00000000-0000-0000-0009-01fb7be05001"
+    store = AccountStore(tmp_path / "accounts.db")
+    store.initialize()
+    account = store.create_registration(
+        edition="bedrock",
+        minecraft_name="SameName",
+        server_player_name=".SameName",
+        player_uuid=old_uuid,
+        discord_user_id=123,
+        discord_username="user",
+        source="admin",
+        status="active",
+        created_by=999,
+    )
+    whitelist = tmp_path / "whitelist.json"
+    whitelist.write_text(json.dumps([{"uuid": new_uuid, "name": ".SameName"}]), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="別のUUID"):
+        store.import_whitelist(whitelist)
+
+    unchanged = store.get(account.id)
+    assert unchanged is not None
+    assert unchanged.player_uuid == old_uuid
+    assert unchanged.discord_user_id == 123
+
+
+def test_unchanged_player_profile_does_not_write_database(tmp_path) -> None:
+    database = tmp_path / "accounts.db"
+    store = AccountStore(database)
+    store.initialize()
+    player_uuid = "8667ba71-b85a-4004-af54-457a9734eed7"
+    account = store.create_registration(
+        edition="java",
+        minecraft_name="Steve",
+        server_player_name="Steve",
+        player_uuid=player_uuid,
+        discord_user_id=123,
+        discord_username="hoge",
+        source="self",
+        status="active",
+        created_by=123,
+    )
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "UPDATE minecraft_accounts SET updated_at = 'unchanged' WHERE id = ?",
+            (account.id,),
+        )
+
+    unchanged = store.update_player_profile(
+        account.id,
+        minecraft_name="Steve",
+        server_player_name="Steve",
+        player_uuid=player_uuid,
+    )
+
+    assert unchanged == store.get(account.id)
+    with sqlite3.connect(database) as connection:
+        updated_at = connection.execute(
+            "SELECT updated_at FROM minecraft_accounts WHERE id = ?",
+            (account.id,),
+        ).fetchone()
+    assert updated_at == ("unchanged",)
+
+
 def test_links_multiple_accounts_to_one_discord_user(tmp_path) -> None:
     whitelist = tmp_path / "whitelist.json"
     whitelist.write_text(
@@ -420,6 +832,8 @@ def test_reassign_recovers_when_pending_removal_completed_during_confirmation(tm
     store.update_status(account.id, "pending_remove")
     store.update_status(account.id, "missing")
 
+    assert [item.id for item in store.list_relinkable()] == [account.id]
+
     changed = store.reassign_discord_user(
         account.id,
         expected_discord_user_id=123,
@@ -530,6 +944,77 @@ def test_allows_removed_managed_account_to_be_registered_again(tmp_path) -> None
     assert restored.id == account.id
     assert restored.discord_user_id == 456
     assert restored.discord_username == "new-user"
+    assert restored.status == "pending_add"
+
+
+def test_rejects_reassigning_missing_uuid_registration_to_another_discord_user(
+    tmp_path,
+) -> None:
+    store = AccountStore(tmp_path / "accounts.db")
+    store.initialize()
+    account = store.create_registration(
+        edition="java",
+        minecraft_name="Steve",
+        server_player_name="Steve",
+        player_uuid="8667ba71-b85a-4004-af54-457a9734eed7",
+        discord_user_id=123,
+        discord_username="old-user",
+        source="self",
+        status="pending_add",
+        created_by=123,
+    )
+    store.update_status(account.id, "missing")
+
+    with pytest.raises(ValueError, match="別のDiscordユーザーの履歴"):
+        store.create_registration(
+            edition="java",
+            minecraft_name="Steve",
+            server_player_name="Steve",
+            player_uuid="8667ba71-b85a-4004-af54-457a9734eed7",
+            discord_user_id=456,
+            discord_username="new-user",
+            source="self",
+            status="pending_add",
+            created_by=456,
+        )
+
+    unchanged = store.get(account.id)
+    assert unchanged is not None
+    assert unchanged.discord_user_id == 123
+    assert unchanged.status == "missing"
+
+
+def test_allows_same_discord_user_to_restore_missing_uuid_registration(tmp_path) -> None:
+    store = AccountStore(tmp_path / "accounts.db")
+    store.initialize()
+    account = store.create_registration(
+        edition="java",
+        minecraft_name="Steve",
+        server_player_name="Steve",
+        player_uuid="8667ba71-b85a-4004-af54-457a9734eed7",
+        discord_user_id=123,
+        discord_username="old-name",
+        source="self",
+        status="pending_add",
+        created_by=123,
+    )
+    store.update_status(account.id, "missing")
+
+    restored = store.create_registration(
+        edition="java",
+        minecraft_name="Steve",
+        server_player_name="Steve",
+        player_uuid="8667ba71-b85a-4004-af54-457a9734eed7",
+        discord_user_id=123,
+        discord_username="current-name",
+        source="self",
+        status="pending_add",
+        created_by=123,
+    )
+
+    assert restored.id == account.id
+    assert restored.discord_user_id == 123
+    assert restored.discord_username == "current-name"
     assert restored.status == "pending_add"
 
 

@@ -81,8 +81,10 @@ from mc_bot.server_admin import (
     kick_command,
     parse_online_players,
     read_cached_player_profile,
+    read_cached_player_profile_by_uuid,
     read_whitelist_enabled,
-    read_whitelisted_players,
+    read_whitelisted_profiles,
+    remove_whitelisted_player,
     upsert_whitelisted_player,
     validate_rcon_response,
 )
@@ -135,6 +137,7 @@ _FULLWIDTH_DIGITS = str.maketrans(
 _VOICE_CONNECTED_SPEECH = "せつぞくしました"
 _VOICE_CHECK_SPEECH = "マインクラフトの読み上げは正常に動作しています"
 _MOJANG_PROFILE_URL = "https://api.mojang.com/users/profiles/minecraft/"
+_MOJANG_SESSION_PROFILE_URL = "https://sessionserver.mojang.com/session/minecraft/profile/"
 _GEYSER_XUID_URL = "https://api.geysermc.org/v2/xbox/xuid/"
 _PLAYERDB_XBOX_URL = "https://playerdb.co/api/player/xbox/"
 _STATUS_PANEL_REFRESH_SECONDS = 5 * 60
@@ -1127,6 +1130,23 @@ class MinecraftDiscordBot(discord.Client):
         except ValueError as error:
             await interaction.followup.send(str(error), ephemeral=True)
             return
+        try:
+            server_name, player_uuid = await self._resolve_player_profile(
+                edition=edition,
+                minecraft_name=normalized_name,
+                server_player_name=server_name,
+            )
+        except (OSError, RuntimeError, ValueError) as error:
+            await interaction.followup.send(
+                f"Minecraftアカウントを確認できないため登録しませんでした: {error}",
+                ephemeral=True,
+            )
+            return
+        normalized_name = (
+            server_name.removeprefix(self._config.floodgate_username_prefix)
+            if edition == "bedrock"
+            else server_name
+        )
         automatic = self._settings.approval_mode == "automatic" or source == "admin"
         status = "pending_add" if automatic else "pending_approval"
         try:
@@ -1140,6 +1160,7 @@ class MinecraftDiscordBot(discord.Client):
                 source=source,
                 status=status,
                 created_by=interaction.user.id,
+                player_uuid=player_uuid,
             )
         except ValueError as error:
             await interaction.followup.send(str(error), ephemeral=True)
@@ -1206,7 +1227,13 @@ class MinecraftDiscordBot(discord.Client):
         )
 
     async def show_unlinked_accounts(self, interaction: discord.Interaction) -> None:
-        await self._import_whitelist()
+        if not await self._import_whitelist():
+            await interaction.response.send_message(
+                "WhitelistのUUID情報を安全に取り込めなかったため、紐付け操作を停止しました。"
+                "管理者がBotのログと登録状態を確認してください。",
+                ephemeral=True,
+            )
+            return
         accounts = await asyncio.to_thread(self._accounts.list_unlinked)
         if not accounts:
             await interaction.response.send_message(
@@ -1232,7 +1259,7 @@ class MinecraftDiscordBot(discord.Client):
             return
         await interaction.response.send_message(
             "Discordの紐付け先を修正するMinecraftアカウントを選択してください。"
-            "\n通常はWhitelistを変更しません。削除反映待ちは削除を取り消して復旧します。",
+            "\n通常はWhitelistを変更しません。削除反映待ち・削除済みは再追加して復旧します。",
             view=AccountSelectView(self, accounts, "relink"),
             ephemeral=True,
         )
@@ -1386,14 +1413,63 @@ class MinecraftDiscordBot(discord.Client):
                 view=None,
             )
             return
-        existing = await asyncio.to_thread(self._accounts.get_by_server_player_name, server_name)
+        try:
+            server_name, player_uuid = await self._resolve_player_profile(
+                edition=edition,
+                minecraft_name=normalized_name,
+                server_player_name=server_name,
+            )
+            normalized_name = (
+                server_name.removeprefix(self._config.floodgate_username_prefix)
+                if edition == "bedrock"
+                else server_name
+            )
+            existing_by_uuid = await asyncio.to_thread(
+                self._accounts.get_by_player_uuid, player_uuid
+            )
+            existing_by_name = await asyncio.to_thread(
+                self._accounts.get_by_server_player_name, server_name
+            )
+        except (OSError, RuntimeError, ValueError) as error:
+            await interaction.edit_original_response(
+                content=f"Minecraftアカウントを確認できないため修正しませんでした: {error}",
+                view=None,
+            )
+            return
+        if (
+            existing_by_uuid is not None
+            and existing_by_name is not None
+            and existing_by_uuid.id != existing_by_name.id
+        ):
+            await interaction.edit_original_response(
+                content=(
+                    "UUIDとプレイヤー名が別々の登録に一致しました。"
+                    "安全のため変更していません。管理者が登録状態を確認してください。"
+                ),
+                view=None,
+            )
+            return
+        existing = existing_by_uuid or existing_by_name
         discord_username = old_account.discord_username or str(expected_discord_user_id)
         if interaction.guild is not None:
             target = interaction.guild.get_member(expected_discord_user_id)
             if target is not None:
                 discord_username = target.display_name
         try:
-            if existing is None or existing.status == "missing":
+            same_identity = (
+                old_account.player_uuid is not None
+                and old_account.player_uuid.casefold() == player_uuid.casefold()
+            )
+            if same_identity:
+                corrected = await asyncio.to_thread(
+                    self._accounts.update_player_profile,
+                    old_account.id,
+                    minecraft_name=normalized_name,
+                    server_player_name=server_name,
+                    player_uuid=player_uuid,
+                    status="pending_add",
+                )
+            elif existing is None or existing.status == "missing":
                 corrected = await asyncio.to_thread(
                     self._accounts.create_registration,
                     edition=edition,
@@ -1404,8 +1480,16 @@ class MinecraftDiscordBot(discord.Client):
                     source="admin",
                     status="pending_add",
                     created_by=interaction.user.id,
+                    player_uuid=player_uuid,
                 )
             elif existing.status == "active" and existing.discord_user_id is None:
+                existing = await asyncio.to_thread(
+                    self._accounts.update_player_profile,
+                    existing.id,
+                    minecraft_name=normalized_name,
+                    server_player_name=server_name,
+                    player_uuid=player_uuid,
+                )
                 corrected = await asyncio.to_thread(
                     self._accounts.link_existing,
                     existing.id,
@@ -1418,7 +1502,13 @@ class MinecraftDiscordBot(discord.Client):
                 "active",
                 "pending_add",
             }:
-                corrected = existing
+                corrected = await asyncio.to_thread(
+                    self._accounts.update_player_profile,
+                    existing.id,
+                    minecraft_name=normalized_name,
+                    server_player_name=server_name,
+                    player_uuid=player_uuid,
+                )
             else:
                 raise ValueError(
                     "正しいMinecraft IDは別の登録で使用されています。状態を確認してください。"
@@ -1441,22 +1531,29 @@ class MinecraftDiscordBot(discord.Client):
             f"discord_user_id={expected_discord_user_id}",
         )
         if add_error is not None:
+            retry_state = (
+                "UUIDが同一のため削除待ちは取り消し、正しい表示名での追加を再試行します。"
+                if same_identity
+                else "誤登録の削除はそのまま継続し、正しいIDの追加を再試行します。"
+            )
             await interaction.edit_original_response(
                 content=(
                     f"⚠️ 正しいMinecraft ID "
                     f"**{discord.utils.escape_markdown(normalized_name)}** を保存しましたが、"
                     f"Whitelistへの追加は反映待ちです: {add_error}\n"
-                    "誤登録の削除はそのまま継続し、正しいIDの追加は"
-                    f"Botが最大{WHITELIST_RETRY_LIMIT}回まで自動再試行します。"
+                    f"{retry_state}Botが最大{WHITELIST_RETRY_LIMIT}回まで自動再試行します。"
                 ),
                 view=None,
             )
             return
-        deletion_state = (
-            "誤登録は削除済みです。"
-            if old_account.status == "missing"
-            else "誤登録の削除反映待ちはそのまま継続します。"
-        )
+        if same_identity:
+            deletion_state = "UUIDが同一のため、別登録を作らず表示名だけを更新しました。"
+        else:
+            deletion_state = (
+                "誤登録は削除済みです。"
+                if old_account.status == "missing"
+                else "誤登録の削除反映待ちはそのまま継続します。"
+            )
         await interaction.edit_original_response(
             content=(
                 f"✅ <@{expected_discord_user_id}> に正しいMinecraft ID "
@@ -1511,7 +1608,7 @@ class MinecraftDiscordBot(discord.Client):
         if (
             account is None
             or account.discord_user_id is None
-            or account.status not in {"active", "pending_add", "pending_remove"}
+            or account.status not in {"active", "pending_add", "pending_remove", "missing"}
         ):
             await interaction.response.edit_message(
                 content="このMinecraftアカウントの紐付け先は修正できません。",
@@ -1525,12 +1622,16 @@ class MinecraftDiscordBot(discord.Client):
                 allowed_mentions=discord.AllowedMentions.none(),
             )
             return
-        recovering_removal = account.status == "pending_remove"
-        recovery_text = (
-            "⚠️ 削除反映待ちを取り消し、Whitelistに残っているか確認して、削除済みなら再追加します。"
-            if recovering_removal
-            else "WhitelistとMinecraft側の登録状態は変更しません。"
-        )
+        recovering_removal = account.status in {"pending_remove", "missing"}
+        if account.status == "missing":
+            recovery_text = "⚠️ 削除済みのため、紐付け先を変更してWhitelistへ再追加します。"
+        elif account.status == "pending_remove":
+            recovery_text = (
+                "⚠️ 削除反映待ちを取り消し、Whitelistに残っているか確認して、"
+                "削除済みなら再追加します。"
+            )
+        else:
+            recovery_text = "WhitelistとMinecraft側の登録状態は変更しません。"
         await interaction.response.edit_message(
             content=(
                 "次の内容でDiscordの紐付け先だけを変更します。\n\n"
@@ -1739,17 +1840,24 @@ class MinecraftDiscordBot(discord.Client):
         registered, unlinked, pending = await asyncio.to_thread(self._accounts.count_summary)
         registrations = await asyncio.to_thread(self._accounts.list_whitelist_registrations)
         try:
-            player_names = await asyncio.to_thread(
-                read_whitelisted_players,
+            player_profiles = await asyncio.to_thread(
+                read_whitelisted_profiles,
                 self._config.minecraft_whitelist_path,
             )
-            present = {name.casefold() for name in player_names}
+            present_names = {player.name.casefold() for player in player_profiles}
+            present_uuids = {player.player_uuid.casefold() for player in player_profiles}
             unreflected = sum(
                 account.status in {"active", "pending_add"}
-                and account.server_player_name.casefold() not in present
+                and (
+                    account.player_uuid.casefold() not in present_uuids
+                    if account.player_uuid is not None
+                    else account.server_player_name.casefold() not in present_names
+                )
                 for account in registrations
             )
-            actual_line = f"実Whitelist: **{len(player_names)}件**\n未反映: **{unreflected}件**\n"
+            actual_line = (
+                f"実Whitelist: **{len(player_profiles)}件**\n未反映: **{unreflected}件**\n"
+            )
         except ValueError:
             actual_line = "実Whitelist: **取得失敗**\n"
         await interaction.response.send_message(
@@ -1763,8 +1871,8 @@ class MinecraftDiscordBot(discord.Client):
     async def show_whitelist_entries(self, interaction: discord.Interaction) -> None:
         await interaction.response.defer(ephemeral=True)
         try:
-            player_names = await asyncio.to_thread(
-                read_whitelisted_players,
+            player_profiles = await asyncio.to_thread(
+                read_whitelisted_profiles,
                 self._config.minecraft_whitelist_path,
             )
         except ValueError as error:
@@ -1775,21 +1883,39 @@ class MinecraftDiscordBot(discord.Client):
             return
 
         registrations = await asyncio.to_thread(self._accounts.list_whitelist_registrations)
-        actual_names = {name.casefold(): name for name in player_names}
         registrations_by_name = {
             account.server_player_name.casefold(): account for account in registrations
         }
+        registrations_by_uuid: dict[str, list[MinecraftAccount]] = {}
+        for account in registrations:
+            if account.player_uuid is not None:
+                registrations_by_uuid.setdefault(account.player_uuid.casefold(), []).append(account)
+        entries: list[tuple[str, MinecraftAccount | None, bool]] = []
+        included_account_ids: set[int] = set()
+        for profile in player_profiles:
+            uuid_matches = registrations_by_uuid.get(profile.player_uuid.casefold(), [])
+            account = (
+                uuid_matches[0]
+                if len(uuid_matches) == 1
+                else registrations_by_name.get(profile.name.casefold())
+            )
+            if account is not None:
+                included_account_ids.add(account.id)
+            entries.append((profile.name, account, True))
+        actual_uuids = {profile.player_uuid.casefold() for profile in player_profiles}
+        actual_names = {profile.name.casefold() for profile in player_profiles}
+        for account in registrations:
+            if account.id in included_account_ids:
+                continue
+            is_present = (
+                account.player_uuid.casefold() in actual_uuids
+                if account.player_uuid is not None
+                else account.server_player_name.casefold() in actual_names
+            )
+            entries.append((account.server_player_name, account, is_present))
+        entries.sort(key=lambda entry: entry[0].casefold())
 
-        def display_name(key: str) -> str:
-            account = registrations_by_name.get(key)
-            return actual_names.get(key) or (account.server_player_name if account else key)
-
-        all_names = sorted(
-            actual_names.keys() | registrations_by_name.keys(),
-            key=lambda key: display_name(key).casefold(),
-        )
-
-        if not all_names:
+        if not entries:
             await interaction.followup.send(
                 embed=discord.Embed(
                     title="🛡️ Whitelist一覧",
@@ -1801,10 +1927,7 @@ class MinecraftDiscordBot(discord.Client):
             return
 
         lines: list[str] = []
-        for normalized_name in all_names:
-            account = registrations_by_name.get(normalized_name)
-            player_name = display_name(normalized_name)
-            is_present = normalized_name in actual_names
+        for player_name, account, is_present in entries:
             edition = (
                 account.edition
                 if account is not None
@@ -1842,7 +1965,7 @@ class MinecraftDiscordBot(discord.Client):
 
         embeds: list[discord.Embed] = []
         total = len(lines)
-        actual_count = len(player_names)
+        actual_count = len(player_profiles)
         registered_count = len(registrations)
         for offset in range(0, total, 20):
             page = discord.Embed(
@@ -2375,12 +2498,19 @@ class MinecraftDiscordBot(discord.Client):
             await self._add_to_whitelist_locked(account)
 
     async def _add_to_whitelist_locked(self, account: MinecraftAccount) -> None:
+        player_name, player_uuid = await self._resolve_whitelist_profile(account)
         command = (
-            f"whitelist add {account.minecraft_name}"
+            f"whitelist add {player_name}"
             if account.edition == "java"
-            else f'fwhitelist add "{account.minecraft_name}"'
+            else f"fwhitelist add {player_uuid}"
         )
-        await self._ensure_player_whitelist_state_locked(account, expected=True, command=command)
+        await self._ensure_player_whitelist_state_locked(
+            account,
+            player_name=player_name,
+            player_uuid=player_uuid,
+            expected=True,
+            command=command,
+        )
         await asyncio.to_thread(self._accounts.update_status, account.id, "active")
 
     async def _remove_from_whitelist(self, account: MinecraftAccount) -> None:
@@ -2393,33 +2523,53 @@ class MinecraftDiscordBot(discord.Client):
 
     async def _remove_from_whitelist_locked(self, account: MinecraftAccount) -> None:
         rcon = self._require_rcon()
+        player_name, player_uuid = await self._resolve_whitelist_profile(account)
         command = (
-            f"whitelist remove {account.minecraft_name}"
+            f"whitelist remove {player_name}"
             if account.edition == "java"
-            else f'fwhitelist remove "{account.minecraft_name}"'
+            else f"fwhitelist remove {player_uuid}"
         )
-        await self._ensure_player_whitelist_state_locked(account, expected=False, command=command)
-        try:
-            await asyncio.to_thread(
-                rcon.execute,
-                f'kick "{account.server_player_name}" Discordの参加登録が解除されました',
+        await self._ensure_player_whitelist_state_locked(
+            account,
+            player_name=player_name,
+            player_uuid=player_uuid,
+            expected=False,
+            command=command,
+        )
+        kick_name = (
+            player_name
+            if account.edition == "java"
+            else await self._cached_player_name_by_uuid(player_uuid)
+        )
+        if kick_name is not None:
+            try:
+                await asyncio.to_thread(
+                    rcon.execute,
+                    f'kick "{kick_name}" Discordの参加登録が解除されました',
+                )
+            except OSError, RconError:
+                LOGGER.debug("Could not kick %s; player may be offline", kick_name)
+        else:
+            LOGGER.info(
+                "Skipped kick because the current player name could not be verified for UUID %s",
+                player_uuid,
             )
-        except OSError, RconError:
-            LOGGER.debug("Could not kick %s; player may be offline", account.server_player_name)
         await asyncio.to_thread(self._accounts.update_status, account.id, "missing")
 
     async def _ensure_player_whitelist_state_locked(
         self,
         account: MinecraftAccount,
         *,
+        player_name: str,
+        player_uuid: str,
         expected: bool,
         command: str,
     ) -> None:
-        if await self._player_is_whitelisted(account.server_player_name) is expected:
+        if await self._player_is_whitelisted(player_name, player_uuid) is expected:
             return
         response = await self._execute_checked_rcon(command)
         for attempt in range(20):
-            if await self._player_is_whitelisted(account.server_player_name) is expected:
+            if await self._player_is_whitelisted(player_name, player_uuid) is expected:
                 return
             if attempt < 19:
                 await asyncio.sleep(0.25)
@@ -2430,13 +2580,20 @@ class MinecraftDiscordBot(discord.Client):
                 account.minecraft_name,
                 response,
             )
-            await self._add_to_whitelist_file(account)
+            await self._add_to_whitelist_file(account, player_name, player_uuid)
             return
-        state = "追加" if expected else "削除"
-        raise RuntimeError(f"{account.server_player_name}のWhitelist{state}を確認できませんでした")
+        LOGGER.warning(
+            "RCON whitelist remove was not reflected for %s; using direct JSON fallback "
+            "response=%r",
+            account.minecraft_name,
+            response,
+        )
+        await self._remove_from_whitelist_file(player_name, player_uuid)
+        return
 
-    async def _add_to_whitelist_file(self, account: MinecraftAccount) -> None:
-        player_name, player_uuid = await self._resolve_whitelist_profile(account)
+    async def _add_to_whitelist_file(
+        self, account: MinecraftAccount, player_name: str, player_uuid: str
+    ) -> None:
         await asyncio.to_thread(
             upsert_whitelisted_player,
             self._config.minecraft_whitelist_path,
@@ -2444,40 +2601,110 @@ class MinecraftDiscordBot(discord.Client):
             player_uuid,
         )
         await self._execute_checked_rcon("whitelist reload")
-        if not await self._player_is_whitelisted(account.server_player_name):
-            raise RuntimeError(
-                f"{account.server_player_name}のWhitelist直接追加を確認できませんでした"
-            )
+        if not await self._player_is_whitelisted(player_name, player_uuid):
+            raise RuntimeError(f"{player_name}のWhitelist直接追加を確認できませんでした")
+
+    async def _remove_from_whitelist_file(self, player_name: str, player_uuid: str) -> None:
+        await asyncio.to_thread(
+            remove_whitelisted_player,
+            self._config.minecraft_whitelist_path,
+            player_uuid,
+        )
+        await self._execute_checked_rcon("whitelist reload")
+        if await self._player_is_whitelisted(player_name, player_uuid):
+            raise RuntimeError(f"{player_name}のWhitelist直接削除を確認できませんでした")
 
     async def _resolve_whitelist_profile(self, account: MinecraftAccount) -> tuple[str, str]:
-        if account.player_uuid:
-            try:
-                return account.server_player_name, str(uuid.UUID(account.player_uuid))
-            except ValueError:
-                LOGGER.warning(
-                    "Ignoring invalid stored UUID for Minecraft account %s",
-                    account.minecraft_name,
-                )
+        player_name, player_uuid = await self._resolve_player_profile(
+            edition=account.edition,
+            minecraft_name=account.minecraft_name,
+            server_player_name=account.server_player_name,
+            stored_uuid=account.player_uuid,
+        )
+        if (
+            player_name.casefold() != account.server_player_name.casefold()
+            or player_uuid.casefold() != (account.player_uuid or "").casefold()
+        ):
+            minecraft_name = (
+                player_name.removeprefix(self._config.floodgate_username_prefix)
+                if account.edition == "bedrock"
+                else player_name
+            )
+            await asyncio.to_thread(
+                self._accounts.update_player_profile,
+                account.id,
+                minecraft_name=minecraft_name,
+                server_player_name=player_name,
+                player_uuid=player_uuid,
+            )
+        return player_name, player_uuid
 
+    async def _resolve_player_profile(
+        self,
+        *,
+        edition: str,
+        minecraft_name: str,
+        server_player_name: str,
+        stored_uuid: str | None = None,
+    ) -> tuple[str, str]:
+        normalized_stored_uuid: str | None = None
+        if stored_uuid:
+            try:
+                normalized_stored_uuid = str(uuid.UUID(stored_uuid))
+            except ValueError:
+                LOGGER.warning("Ignoring invalid stored Minecraft UUID for %s", minecraft_name)
+
+        try:
+            whitelist_profiles = await asyncio.to_thread(
+                read_whitelisted_profiles,
+                self._config.minecraft_whitelist_path,
+            )
+        except ValueError:
+            whitelist_profiles = []
+        if normalized_stored_uuid is not None:
+            if edition == "java":
+                return await self._resolve_java_profile_by_uuid(normalized_stored_uuid)
+            cached_name = await self._cached_player_name_by_uuid(normalized_stored_uuid)
+            if cached_name is not None:
+                return cached_name, normalized_stored_uuid
+            uuid_matches = []
+            for profile in whitelist_profiles:
+                try:
+                    profile_uuid = str(uuid.UUID(profile.player_uuid))
+                except ValueError:
+                    continue
+                if profile_uuid.casefold() == normalized_stored_uuid.casefold():
+                    uuid_matches.append(profile.name)
+            if len({name.casefold() for name in uuid_matches}) > 1:
+                raise ValueError(
+                    f"Whitelistで同じUUIDが複数のプレイヤー名に一致しています: "
+                    f"{normalized_stored_uuid}"
+                )
+            return (uuid_matches[0] if uuid_matches else server_player_name), normalized_stored_uuid
+        normalized_server_name = server_player_name.casefold()
+        for profile in whitelist_profiles:
+            if profile.name.casefold() == normalized_server_name:
+                try:
+                    return profile.name, str(uuid.UUID(profile.player_uuid))
+                except ValueError:
+                    break
         cached_profile = await asyncio.to_thread(
             read_cached_player_profile,
             self._config.minecraft_whitelist_path.with_name("usercache.json"),
-            account.server_player_name,
+            server_player_name,
         )
         if cached_profile is not None:
-            player_name, player_uuid = cached_profile
-            await asyncio.to_thread(self._accounts.update_player_uuid, account.id, player_uuid)
-            return player_name, player_uuid
+            return cached_profile
 
         timeout = aiohttp.ClientTimeout(total=10)
         try:
             async with aiohttp.ClientSession(timeout=timeout) as session:
-                if account.edition == "java":
-                    url = _MOJANG_PROFILE_URL + quote(account.minecraft_name, safe="")
+                if edition == "java":
+                    url = _MOJANG_PROFILE_URL + quote(minecraft_name, safe="")
                     async with session.get(url) as response:
                         if response.status in {204, 404}:
                             raise ValueError(
-                                f"Java版アカウント {account.minecraft_name} が存在しません。"
+                                f"Java版アカウント {minecraft_name} が存在しません。"
                                 "エディションと名前を確認してください"
                             )
                         if response.status != 200:
@@ -2493,7 +2720,7 @@ class MinecraftDiscordBot(discord.Client):
                         raise RuntimeError("Mojang UUID APIのUUIDが正しくありません") from error
                     player_name = canonical_name
                 else:
-                    url = _GEYSER_XUID_URL + quote(account.minecraft_name, safe="")
+                    url = _GEYSER_XUID_URL + quote(minecraft_name, safe="")
                     async with session.get(url) as response:
                         payload = (
                             await response.json(content_type=None) if response.status == 200 else {}
@@ -2501,11 +2728,11 @@ class MinecraftDiscordBot(discord.Client):
                     raw_xuid = payload.get("xuid") if isinstance(payload, dict) else None
                     canonical_name: str | None = None
                     if not isinstance(raw_xuid, str):
-                        url = _PLAYERDB_XBOX_URL + quote(account.minecraft_name, safe="")
+                        url = _PLAYERDB_XBOX_URL + quote(minecraft_name, safe="")
                         async with session.get(url) as response:
                             if response.status != 200:
                                 raise ValueError(
-                                    f"Bedrock版アカウント {account.minecraft_name} "
+                                    f"Bedrock版アカウント {minecraft_name} "
                                     "が存在しません。ゲーマータグを確認してください"
                                 )
                             payload = await response.json(content_type=None)
@@ -2522,7 +2749,7 @@ class MinecraftDiscordBot(discord.Client):
                         xuid = int(raw_xuid)
                     except (TypeError, ValueError) as error:
                         raise ValueError(
-                            f"Bedrock版アカウント {account.minecraft_name} が存在しません。"
+                            f"Bedrock版アカウント {minecraft_name} が存在しません。"
                             "ゲーマータグを確認してください"
                         ) from error
                     if not 0 <= xuid < 2**64:
@@ -2532,20 +2759,62 @@ class MinecraftDiscordBot(discord.Client):
                         normalized_name = canonical_name.replace(" ", "_")
                         player_name = f"{self._config.floodgate_username_prefix}{normalized_name}"
                     else:
-                        player_name = account.server_player_name
+                        player_name = server_player_name
         except (TimeoutError, aiohttp.ClientError) as error:
             raise RuntimeError(f"MinecraftアカウントUUID APIへ接続できません: {error}") from error
 
-        await asyncio.to_thread(self._accounts.update_player_uuid, account.id, player_uuid)
         return player_name, player_uuid
 
-    async def _player_is_whitelisted(self, player_name: str) -> bool:
-        player_names = await asyncio.to_thread(
-            read_whitelisted_players,
+    async def _resolve_java_profile_by_uuid(self, player_uuid: str) -> tuple[str, str]:
+        url = _MOJANG_SESSION_PROFILE_URL + player_uuid.replace("-", "")
+        timeout = aiohttp.ClientTimeout(total=10)
+        try:
+            async with (
+                aiohttp.ClientSession(timeout=timeout) as session,
+                session.get(url) as response,
+            ):
+                if response.status in {204, 404}:
+                    raise ValueError(
+                        f"Java版UUID {player_uuid} のアカウントが存在しません。"
+                        "管理者が登録状態を確認してください"
+                    )
+                if response.status != 200:
+                    raise RuntimeError(f"Mojang Session API error {response.status}")
+                payload = await response.json(content_type=None)
+        except (TimeoutError, aiohttp.ClientError) as error:
+            raise RuntimeError(f"Mojang Session APIへ接続できません: {error}") from error
+        raw_uuid = payload.get("id") if isinstance(payload, dict) else None
+        canonical_name = payload.get("name") if isinstance(payload, dict) else None
+        try:
+            response_uuid = str(uuid.UUID(raw_uuid))
+        except (AttributeError, TypeError, ValueError) as error:
+            raise RuntimeError("Mojang Session APIのUUIDが正しくありません") from error
+        if response_uuid.casefold() != player_uuid.casefold():
+            raise RuntimeError("Mojang Session APIのUUIDが要求したUUIDと一致しません")
+        if not isinstance(canonical_name, str) or not _JAVA_NAME.fullmatch(canonical_name):
+            raise RuntimeError("Mojang Session APIのプレイヤー名が正しくありません")
+        return canonical_name, response_uuid
+
+    async def _cached_player_name_by_uuid(self, player_uuid: str) -> str | None:
+        profile = await asyncio.to_thread(
+            read_cached_player_profile_by_uuid,
+            self._config.minecraft_whitelist_path.with_name("usercache.json"),
+            player_uuid,
+        )
+        return profile[0] if profile is not None else None
+
+    async def _player_is_whitelisted(
+        self, player_name: str, player_uuid: str | None = None
+    ) -> bool:
+        profiles = await asyncio.to_thread(
+            read_whitelisted_profiles,
             self._config.minecraft_whitelist_path,
         )
+        if player_uuid is not None:
+            normalized_uuid = str(uuid.UUID(player_uuid)).casefold()
+            return any(profile.player_uuid.casefold() == normalized_uuid for profile in profiles)
         normalized_name = player_name.casefold()
-        return any(name.casefold() == normalized_name for name in player_names)
+        return any(profile.name.casefold() == normalized_name for profile in profiles)
 
     def _require_rcon(self) -> RconClient:
         if self._rcon is None:
@@ -2585,7 +2854,7 @@ class MinecraftDiscordBot(discord.Client):
         except discord.DiscordException:
             LOGGER.info("Could not DM registration result to Discord user %d", target.id)
 
-    async def _import_whitelist(self) -> None:
+    async def _import_whitelist(self) -> bool:
         try:
             await asyncio.to_thread(
                 self._accounts.import_whitelist,
@@ -2594,18 +2863,24 @@ class MinecraftDiscordBot(discord.Client):
             )
         except (OSError, ValueError) as error:
             LOGGER.warning("Could not import Minecraft whitelist: %s", error)
+            return False
+        return True
 
     async def _sync_whitelist_accounts(self) -> None:
-        await self._import_whitelist()
+        if not await self._import_whitelist():
+            return
         try:
-            player_names = await asyncio.to_thread(
-                read_whitelisted_players,
+            player_profiles = await asyncio.to_thread(
+                read_whitelisted_profiles,
                 self._config.minecraft_whitelist_path,
             )
         except ValueError as error:
             LOGGER.warning("Could not reconcile Minecraft whitelist registrations: %s", error)
             return
-        changes = await asyncio.to_thread(self._accounts.reconcile_whitelist, player_names)
+        changes = await asyncio.to_thread(
+            self._accounts.reconcile_whitelist,
+            [(player.name, player.player_uuid) for player in player_profiles],
+        )
         if any(changes):
             LOGGER.info(
                 "Reconciled Minecraft whitelist registrations queued_adds=%d "
@@ -2751,7 +3026,7 @@ class MinecraftDiscordBot(discord.Client):
                 self._online_player_names.add(event.player_name.casefold())
             elif event.type is EventType.LEAVE:
                 self._online_player_names.discard(event.player_name.casefold())
-            account = await asyncio.to_thread(self._accounts.find_by_player_name, event.player_name)
+            account = await self._find_account_for_player_name(event.player_name)
             discord_user_id, discord_username = await self._discord_identity(account)
             if (
                 event.type is EventType.LEAVE
@@ -2891,8 +3166,8 @@ class MinecraftDiscordBot(discord.Client):
             )
             return False
         account = await asyncio.to_thread(
-            self._accounts.find_by_player_name,
-            event.player_name,
+            self._accounts.get_by_player_uuid,
+            event.player_uuid,
         )
         if (
             account is None
@@ -2900,10 +3175,10 @@ class MinecraftDiscordBot(discord.Client):
             or account.status not in {"active", "pending_remove"}
         ):
             LOGGER.warning(
-                "Ignored Minecraft %s event for unlinked player %s (event UUID %s)",
+                "Ignored Minecraft %s event for unlinked UUID %s (%s)",
                 event.kind,
-                event.player_name,
                 event.player_uuid,
+                event.player_name,
             )
             return False
         if event.kind is ActivityKind.FISHING:
@@ -2948,6 +3223,70 @@ class MinecraftDiscordBot(discord.Client):
             discord_username,
         )
         self._voice_player.enqueue(self._settings.guild_id, text)
+
+    async def _find_account_for_player_name(self, player_name: str) -> MinecraftAccount | None:
+        try:
+            cached_profile = await asyncio.to_thread(
+                read_cached_player_profile,
+                self._config.minecraft_whitelist_path.with_name("usercache.json"),
+                player_name,
+            )
+            if cached_profile is None:
+                legacy_account = await asyncio.to_thread(
+                    self._accounts.find_by_player_name, player_name
+                )
+                return (
+                    legacy_account
+                    if legacy_account is not None and legacy_account.player_uuid is None
+                    else None
+                )
+            cached_name, player_uuid = cached_profile
+            account = await asyncio.to_thread(self._accounts.get_by_player_uuid, player_uuid)
+            if account is None:
+                legacy_account = await asyncio.to_thread(
+                    self._accounts.find_by_player_name, player_name
+                )
+                if legacy_account is None or legacy_account.player_uuid is not None:
+                    return None
+                account = legacy_account
+            if account is None or account.status not in {"active", "pending_remove"}:
+                return None
+            minecraft_name = (
+                cached_name.removeprefix(self._config.floodgate_username_prefix)
+                if account.edition == "bedrock"
+                else cached_name
+            )
+            if (
+                account.minecraft_name == minecraft_name
+                and account.server_player_name == cached_name
+                and account.player_uuid is not None
+                and account.player_uuid.casefold() == player_uuid.casefold()
+            ):
+                return account
+            return await asyncio.to_thread(
+                self._accounts.update_player_profile,
+                account.id,
+                minecraft_name=minecraft_name,
+                server_player_name=cached_name,
+                player_uuid=player_uuid,
+            )
+        except ValueError as error:
+            LOGGER.warning("Could not match Minecraft player %s by UUID: %s", player_name, error)
+            return None
+
+    async def _linked_accounts_by_online_name(
+        self, player_names: list[str]
+    ) -> dict[str, MinecraftAccount]:
+        linked: dict[str, MinecraftAccount] = {}
+        for player_name in player_names:
+            account = await self._find_account_for_player_name(player_name)
+            if (
+                account is not None
+                and account.status == "active"
+                and account.discord_user_id is not None
+            ):
+                linked[player_name.casefold()] = account
+        return linked
 
     async def _discord_identity(
         self, account: MinecraftAccount | None
@@ -3416,12 +3755,11 @@ class MinecraftDiscordBot(discord.Client):
             return
         online_user_ids: set[int] = set()
         if any(not event.minecraft_delivered or not event.discord_delivered for event in events):
-            online_names = self._online_player_names
+            linked = await self._linked_accounts_by_online_name(list(self._online_player_names))
             online_user_ids = {
                 account.discord_user_id
-                for account in await asyncio.to_thread(self._accounts.list_linked_active)
+                for account in linked.values()
                 if account.discord_user_id is not None
-                and account.server_player_name.casefold() in online_names
             }
         for event in events:
             if event.guild_id != guild_id:
@@ -3453,10 +3791,7 @@ class MinecraftDiscordBot(discord.Client):
         await self._deliver_minecraft_xp_outbox()
 
         online = list(self._online_player_names)
-        linked = {
-            account.server_player_name.casefold(): account
-            for account in await asyncio.to_thread(self._accounts.list_linked_active)
-        }
+        linked = await self._linked_accounts_by_online_name(online)
         await self._sync_minecraft_xp_exchanges(
             guild_id=guild_id,
             online_names=self._online_player_names,
@@ -3937,14 +4272,9 @@ class MinecraftDiscordBot(discord.Client):
         return active_users
 
     async def _sync_voice_bonus_for_discord_user(self, user_id: int) -> None:
-        accounts = await asyncio.to_thread(self._accounts.list_linked_active)
+        linked = await self._linked_accounts_by_online_name(list(self._online_player_names))
         account = next(
-            (
-                candidate
-                for candidate in accounts
-                if candidate.discord_user_id == user_id
-                and candidate.server_player_name.casefold() in self._online_player_names
-            ),
+            (candidate for candidate in linked.values() if candidate.discord_user_id == user_id),
             None,
         )
         if account is None:
@@ -4332,10 +4662,7 @@ class MinecraftDiscordBot(discord.Client):
                 checked_at=checked_at,
             )
 
-        linked = {
-            account.server_player_name.casefold(): account
-            for account in await asyncio.to_thread(self._accounts.list_linked_active)
-        }
+        linked = await self._linked_accounts_by_online_name(player_names)
         players = tuple(
             StatusPlayer(
                 minecraft_name=player_name,

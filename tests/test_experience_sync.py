@@ -391,9 +391,7 @@ class OneLineTailer:
         self.acknowledged.append(line)
 
 
-def test_structured_fishing_log_wires_player_name_to_reward_without_scoreboard_poll(
-    tmp_path,
-) -> None:
+def test_structured_fishing_log_wires_uuid_to_reward_without_scoreboard_poll(tmp_path) -> None:
     config = Config(
         discord_token="test",
         accounts_path=tmp_path / "accounts.db",
@@ -429,7 +427,7 @@ def test_structured_fishing_log_wires_player_name_to_reward_without_scoreboard_p
         text=(
             "[00:00:01] [Server thread/INFO]: [UsapoEventBridge] USAPO_ACTIVITY|1|"
             "00000000-0000-0000-0000-000000000001|fishing|"
-            "99999999-9999-4999-8999-999999999999|U3RldmU|1|1786406401000"
+            f"{PLAYER_UUID}|TmV3TmFtZQ|1|1786406401000"
         ),
         cursor=Cursor("log-1", 123),
     )
@@ -446,9 +444,7 @@ def test_structured_fishing_log_wires_player_name_to_reward_without_scoreboard_p
     )
 
 
-def test_structured_experience_log_wires_player_name_and_amount_without_xp_poll(
-    tmp_path,
-) -> None:
+def test_structured_experience_log_wires_uuid_and_amount_without_xp_poll(tmp_path) -> None:
     config = Config(
         discord_token="test",
         accounts_path=tmp_path / "accounts.db",
@@ -476,7 +472,7 @@ def test_structured_experience_log_wires_player_name_and_amount_without_xp_poll(
         text=(
             "[00:00:01] [Server thread/INFO]: [UsapoEventBridge] USAPO_ACTIVITY|1|"
             "00000000-0000-0000-0000-000000000099|experience|"
-            "99999999-9999-4999-8999-999999999999|U3RldmU|37|1786406401000"
+            f"{PLAYER_UUID}|TmV3TmFtZQ|37|1786406401000"
         ),
         cursor=Cursor("log-1", 456),
     )
@@ -865,7 +861,7 @@ def test_sync_announces_voice_bonus_start_once_with_cooldown(tmp_path) -> None:
     )
     bot = MinecraftDiscordBot(config)
     bot._accounts.initialize()
-    bot._accounts.create_registration(
+    account = bot._accounts.create_registration(
         edition="java",
         minecraft_name="Steve",
         server_player_name="Steve",
@@ -880,6 +876,9 @@ def test_sync_announces_voice_bonus_start_once_with_cooldown(tmp_path) -> None:
     rcon = ExperienceRcon()
     bot._rcon = rcon  # type: ignore[assignment]
     bot._online_player_names = {"steve"}
+    bot._linked_accounts_by_online_name = AsyncMock(  # type: ignore[method-assign]
+        return_value={"steve": account}
+    )
     bot._level_bot_xp.fetch_xp_exchanges = AsyncMock(  # type: ignore[method-assign]
         return_value=[]
     )
@@ -935,7 +934,7 @@ def test_sync_doubles_in_game_xp_once_while_voice_bonus_is_active(tmp_path) -> N
     )
     bot = MinecraftDiscordBot(config)
     bot._accounts.initialize()
-    bot._accounts.create_registration(
+    account = bot._accounts.create_registration(
         edition="java",
         minecraft_name="Steve",
         server_player_name="Steve",
@@ -951,6 +950,9 @@ def test_sync_doubles_in_game_xp_once_while_voice_bonus_is_active(tmp_path) -> N
     rcon.level = 0
     bot._rcon = rcon  # type: ignore[assignment]
     bot._online_player_names = {"steve"}
+    bot._linked_accounts_by_online_name = AsyncMock(  # type: ignore[method-assign]
+        return_value={"steve": account}
+    )
     bot._level_bot_xp.fetch_xp_exchanges = AsyncMock(  # type: ignore[method-assign]
         return_value=[]
     )
