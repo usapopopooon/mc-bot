@@ -7,10 +7,13 @@ import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-_EVENT_PREFIX = "[UsapoEventBridge] USAPO_EMERALD_EXCHANGE|1|"
-_RESULT_PREFIX = "USAPO_EMERALD_EXCHANGE_RESULT|1|"
+_EVENT_PREFIXES = {
+    1: "[UsapoEventBridge] USAPO_EMERALD_EXCHANGE|1|",
+    2: "[UsapoEventBridge] USAPO_EMERALD_EXCHANGE|2|",
+}
+_RESULT_PREFIX = "USAPO_EMERALD_EXCHANGE_RESULT|2|"
 _PLAYER_NAME = re.compile(r"\.?[A-Za-z0-9_]{1,32}")
-_ALLOWED_EMERALD_COUNTS = frozenset({16, 32, 64})
+_ALLOWED_EMERALD_COUNTS = frozenset({32, 64})
 _RESULT_STATUSES = frozenset(
     {"completed", "insufficient_emeralds", "inventory_full", "player_offline"}
 )
@@ -39,9 +42,9 @@ def emerald_diamond_exchange_command(player_uuid: str, emerald_count: int, reque
     normalized_player_uuid = str(uuid.UUID(player_uuid))
     normalized_request_id = str(uuid.UUID(request_id))
     if emerald_count not in _ALLOWED_EMERALD_COUNTS:
-        raise ValueError("emerald_count must be 16, 32, or 64")
+        raise ValueError("emerald_count must be 32 or 64")
     return (
-        "usapo-event-bridge emerald-diamond "
+        "usapo-event-bridge emerald-diamond-v2 "
         f"{normalized_player_uuid} {emerald_count} {normalized_request_id}"
     )
 
@@ -68,7 +71,7 @@ def parse_emerald_diamond_exchange_result(
         or status not in _RESULT_STATUSES
         or emerald_count not in _ALLOWED_EMERALD_COUNTS
         or emerald_count != expected_emerald_count
-        or diamond_count != emerald_count // 16
+        or diamond_count != emerald_count // 32
         or disposition not in {"new", "duplicate"}
         or (status != "completed" and disposition == "duplicate")
     ):
@@ -86,9 +89,15 @@ def parse_emerald_diamond_exchange_event(
     line: str,
 ) -> EmeraldDiamondExchangeEvent | None:
     _, separator, message = line.partition("]: ")
-    if not separator or not message.startswith(_EVENT_PREFIX):
+    if not separator:
         return None
-    fields = message.removeprefix(_EVENT_PREFIX).split("|")
+    version = next(
+        (version for version, prefix in _EVENT_PREFIXES.items() if message.startswith(prefix)),
+        None,
+    )
+    if version is None:
+        return None
+    fields = message.removeprefix(_EVENT_PREFIXES[version]).split("|")
     if len(fields) != 6:
         raise ValueError("Minecraft emerald exchange event has an invalid field count")
     request_id_text, player_uuid_text, encoded_name, emeralds_text, diamonds_text, millis_text = (
@@ -117,8 +126,16 @@ def parse_emerald_diamond_exchange_event(
         raise ValueError("Minecraft emerald exchange event contains an invalid value") from error
     if (
         _PLAYER_NAME.fullmatch(player_name) is None
-        or emerald_count not in _ALLOWED_EMERALD_COUNTS
-        or diamond_count != emerald_count // 16
+        or (
+            version == 1
+            and (emerald_count not in {16, 32, 64} or diamond_count != emerald_count // 16)
+        )
+        or (
+            version == 2
+            and (
+                emerald_count not in _ALLOWED_EMERALD_COUNTS or diamond_count != emerald_count // 32
+            )
+        )
         or milliseconds < 0
     ):
         raise ValueError("Minecraft emerald exchange event contains an invalid value")

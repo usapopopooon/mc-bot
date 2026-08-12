@@ -1137,7 +1137,7 @@ class MinecraftDiscordBot(discord.Client):
                     request_id=str(uuid.UUID(request_id)),
                     status=reason or "player_offline",
                     emerald_count=emerald_count,
-                    diamond_count=emerald_count // 16,
+                    diamond_count=emerald_count // 32,
                     duplicate=False,
                 )
             if account.player_uuid is None:

@@ -21,41 +21,44 @@ PLAYER_UUID = "22222222-2222-4222-8222-222222222222"
 def test_command_and_result_preserve_uuid_count_and_request_mapping() -> None:
     command = emerald_diamond_exchange_command(PLAYER_UUID, 32, REQUEST_ID)
     result = parse_emerald_diamond_exchange_result(
-        f"USAPO_EMERALD_EXCHANGE_RESULT|1|{REQUEST_ID}|completed|32|2|new",
+        f"USAPO_EMERALD_EXCHANGE_RESULT|2|{REQUEST_ID}|completed|32|1|new",
         expected_request_id=REQUEST_ID,
         expected_emerald_count=32,
     )
 
-    assert command == (f"usapo-event-bridge emerald-diamond {PLAYER_UUID} 32 {REQUEST_ID}")
+    assert command == (f"usapo-event-bridge emerald-diamond-v2 {PLAYER_UUID} 32 {REQUEST_ID}")
     assert result.status == "completed"
     assert result.emerald_count == 32
-    assert result.diamond_count == 2
+    assert result.diamond_count == 1
     assert not result.duplicate
+
+    with pytest.raises(ValueError, match="32 or 64"):
+        emerald_diamond_exchange_command(PLAYER_UUID, 16, REQUEST_ID)
 
 
 def test_result_rejects_wrong_request_rate_and_duplicate_failure() -> None:
     with pytest.raises(ValueError):
         parse_emerald_diamond_exchange_result(
-            "USAPO_EMERALD_EXCHANGE_RESULT|1|"
-            "33333333-3333-4333-8333-333333333333|completed|32|2|new",
+            "USAPO_EMERALD_EXCHANGE_RESULT|2|"
+            "33333333-3333-4333-8333-333333333333|completed|32|1|new",
             expected_request_id=REQUEST_ID,
             expected_emerald_count=32,
         )
     with pytest.raises(ValueError):
         parse_emerald_diamond_exchange_result(
-            f"USAPO_EMERALD_EXCHANGE_RESULT|1|{REQUEST_ID}|completed|32|3|new",
+            f"USAPO_EMERALD_EXCHANGE_RESULT|2|{REQUEST_ID}|completed|32|2|new",
             expected_request_id=REQUEST_ID,
             expected_emerald_count=32,
         )
     with pytest.raises(ValueError):
         parse_emerald_diamond_exchange_result(
-            f"USAPO_EMERALD_EXCHANGE_RESULT|1|{REQUEST_ID}|completed|16|1|new",
+            f"USAPO_EMERALD_EXCHANGE_RESULT|2|{REQUEST_ID}|completed|64|1|new",
             expected_request_id=REQUEST_ID,
             expected_emerald_count=32,
         )
     with pytest.raises(ValueError):
         parse_emerald_diamond_exchange_result(
-            f"USAPO_EMERALD_EXCHANGE_RESULT|1|{REQUEST_ID}|insufficient_emeralds|32|2|duplicate",
+            f"USAPO_EMERALD_EXCHANGE_RESULT|2|{REQUEST_ID}|insufficient_emeralds|32|1|duplicate",
             expected_request_id=REQUEST_ID,
             expected_emerald_count=32,
         )
@@ -64,8 +67,8 @@ def test_result_rejects_wrong_request_rate_and_duplicate_failure() -> None:
 def test_parses_exchange_audit_event() -> None:
     event = parse_emerald_diamond_exchange_event(
         "[12:34:56] [Server thread/INFO]: [UsapoEventBridge] "
-        f"USAPO_EMERALD_EXCHANGE|1|{REQUEST_ID}|{PLAYER_UUID}"
-        "|Lll1a2kxOTkx|64|4|1786406400000"
+        f"USAPO_EMERALD_EXCHANGE|2|{REQUEST_ID}|{PLAYER_UUID}"
+        "|Lll1a2kxOTkx|64|2|1786406400000"
     )
 
     assert event is not None
@@ -73,8 +76,20 @@ def test_parses_exchange_audit_event() -> None:
     assert event.player_uuid == PLAYER_UUID
     assert event.player_name == ".Yuki1991"
     assert event.emerald_count == 64
-    assert event.diamond_count == 4
+    assert event.diamond_count == 2
     assert event.occurred_at == "2026-08-11T00:00:00+00:00"
+
+
+def test_parses_legacy_exchange_audit_event_for_delivery_retries() -> None:
+    event = parse_emerald_diamond_exchange_event(
+        "[12:34:56] [Server thread/INFO]: [UsapoEventBridge] "
+        f"USAPO_EMERALD_EXCHANGE|1|{REQUEST_ID}|{PLAYER_UUID}"
+        "|Lll1a2kxOTkx|16|1|1786406400000"
+    )
+
+    assert event is not None
+    assert event.emerald_count == 16
+    assert event.diamond_count == 1
 
 
 def test_bot_executes_atomic_plugin_command_for_linked_uuid(tmp_path) -> None:
@@ -84,7 +99,7 @@ def test_bot_executes_atomic_plugin_command_for_linked_uuid(tmp_path) -> None:
         return_value=(account, None)
     )
     bot._execute_rcon = AsyncMock(  # type: ignore[method-assign]
-        return_value=(f"USAPO_EMERALD_EXCHANGE_RESULT|1|{REQUEST_ID}|completed|16|1|new")
+        return_value=(f"USAPO_EMERALD_EXCHANGE_RESULT|2|{REQUEST_ID}|completed|32|1|new")
     )
     interaction = SimpleNamespace(user=SimpleNamespace(id=123))
 
@@ -92,7 +107,7 @@ def test_bot_executes_atomic_plugin_command_for_linked_uuid(tmp_path) -> None:
         bot.confirm_emerald_diamond_exchange(  # type: ignore[arg-type]
             interaction,
             request_id=REQUEST_ID,
-            emerald_count=16,
+            emerald_count=32,
         )
     )
 
@@ -100,7 +115,7 @@ def test_bot_executes_atomic_plugin_command_for_linked_uuid(tmp_path) -> None:
     assert result.status == "completed"
     bot._online_exchange_account.assert_awaited_once_with(123)  # type: ignore[attr-defined]
     bot._execute_rcon.assert_awaited_once_with(  # type: ignore[attr-defined]
-        f"usapo-event-bridge emerald-diamond {PLAYER_UUID} 16 {REQUEST_ID}"
+        f"usapo-event-bridge emerald-diamond-v2 {PLAYER_UUID} 32 {REQUEST_ID}"
     )
 
 
@@ -133,8 +148,8 @@ def test_structured_exchange_log_wires_uuid_to_discord_audit(tmp_path) -> None:
     line = PendingLine(
         text=(
             "[12:34:56] [Server thread/INFO]: [UsapoEventBridge] "
-            f"USAPO_EMERALD_EXCHANGE|1|{REQUEST_ID}|{PLAYER_UUID}"
-            "|U3RldmU|32|2|1786406400000"
+            f"USAPO_EMERALD_EXCHANGE|2|{REQUEST_ID}|{PLAYER_UUID}"
+            "|U3RldmU|32|1|1786406400000"
         ),
         cursor=Cursor("log-1", 123),
     )
@@ -153,4 +168,4 @@ def test_structured_exchange_log_wires_uuid_to_discord_audit(tmp_path) -> None:
     embed = bot._send.await_args.args[0]  # type: ignore[attr-defined]
     assert "Steve (<@123>)" in str(embed.description)
     assert "エメラルド x32" in str(embed.description)
-    assert "ダイヤモンド x2" in str(embed.description)
+    assert "ダイヤモンド x1" in str(embed.description)

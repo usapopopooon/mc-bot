@@ -19,7 +19,7 @@ _RESOURCE_NAMES = {
     "minecraft:emerald": "エメラルド",
 }
 _SAFE_PLAYER_NAME = re.compile(r"\.?[A-Za-z0-9_]{1,32}")
-EMERALD_DIAMOND_PACKS = ((16, 1), (32, 2), (64, 4))
+EMERALD_DIAMOND_PACKS = ((32, 1), (64, 2))
 
 
 def resource_give_command(player_name: str, item_id: str, item_count: int) -> str:
@@ -84,7 +84,7 @@ def minecraft_resource_shop_embed(
         title="Minecraft 資源交換所",
         description=(
             "活動で貯めたサーバーXPをMinecraft内の資源へ交換できます。\n"
-            "手持ちのエメラルドは **16個 → ダイヤモンド1個** で交換できます。\n"
+            "手持ちのエメラルドもダイヤモンドへ交換できます。\n"
             "連携したMinecraftアカウントでサーバーに参加中のみ交換できます。\n"
             "数量は小口から最大 **64個・1スタック** まで選べます。"
         ),
@@ -92,9 +92,17 @@ def minecraft_resource_shop_embed(
     )
     embed.add_field(
         name="交換内容",
-        value="\n".join(
-            f"`サーバーXP {pack.cost_xp:,}` → `{pack.item_name} x{pack.item_count:,}`"
-            for pack in packs
+        value=(
+            "**サーバーXP → 資源**\n"
+            + "\n".join(
+                f"`サーバーXP {pack.cost_xp:,}` → `{pack.item_name} x{pack.item_count:,}`"
+                for pack in packs
+            )
+            + "\n\n**手持ち資源 → 資源**\n"
+            + "\n".join(
+                f"`エメラルド x{emeralds}` → `ダイヤモンド x{diamonds}`"
+                for emeralds, diamonds in EMERALD_DIAMOND_PACKS
+            )
         ),
         inline=False,
     )

@@ -116,9 +116,13 @@ def test_resource_panel_lists_server_rates_and_is_persistent() -> None:
 
     assert embed.title == "Minecraft 資源交換所"
     assert "最大 **64個・1スタック**" in str(embed.description)
-    assert "エメラルドは **16個 → ダイヤモンド1個**" in str(embed.description)
+    assert "手持ちのエメラルドもダイヤモンドへ交換" in str(embed.description)
+    assert "**サーバーXP → 資源**" in str(embed.fields[0].value)
     assert "`サーバーXP 100` → `エメラルド x4`" in str(embed.fields[0].value)
     assert "`サーバーXP 360` → `エメラルド x16`" in str(embed.fields[0].value)
+    assert "**手持ち資源 → 資源**" in str(embed.fields[0].value)
+    assert "`エメラルド x32` → `ダイヤモンド x1`" in str(embed.fields[0].value)
+    assert "`エメラルド x64` → `ダイヤモンド x2`" in str(embed.fields[0].value)
     assert "足元へドロップ" in str(embed.fields[1].value)
     assert embed.fields[2].name == "📢 交換完了時の通知"
     assert "**Discordのログチャンネル**" in str(embed.fields[2].value)
@@ -141,11 +145,10 @@ def test_emerald_diamond_menu_exposes_only_fixed_safe_rates() -> None:
 
     view = asyncio.run(build())
 
-    assert [option.value for option in view.children[0].options] == ["16", "32", "64"]
+    assert [option.value for option in view.children[0].options] == ["32", "64"]
     assert [option.label for option in view.children[0].options] == [
-        "エメラルド x16 → ダイヤモンド x1",
-        "エメラルド x32 → ダイヤモンド x2",
-        "エメラルド x64 → ダイヤモンド x4",
+        "エメラルド x32 → ダイヤモンド x1",
+        "エメラルド x64 → ダイヤモンド x2",
     ]
 
 
@@ -153,7 +156,7 @@ def test_emerald_confirmation_preserves_request_and_emerald_count() -> None:
     async def exercise() -> None:
         bot = MinecraftDiscordBot(Config(discord_token="secret"))
         bot.confirm_emerald_diamond_exchange = AsyncMock(  # type: ignore[method-assign]
-            return_value=SimpleNamespace(status="completed", emerald_count=32, diamond_count=2)
+            return_value=SimpleNamespace(status="completed", emerald_count=32, diamond_count=1)
         )
         view = EmeraldDiamondConfirmView(
             bot,
@@ -175,7 +178,7 @@ def test_emerald_confirmation_preserves_request_and_emerald_count() -> None:
             emerald_count=32,
         )
         interaction.followup.send.assert_awaited_once_with(
-            "交換しました: エメラルド x32 → ダイヤモンド x2", ephemeral=True
+            "交換しました: エメラルド x32 → ダイヤモンド x1", ephemeral=True
         )
 
     asyncio.run(exercise())
@@ -244,7 +247,7 @@ def test_confirmation_preserves_item_count_and_cost_mapping() -> None:
         bot.confirm_minecraft_resource_exchange = AsyncMock(  # type: ignore[method-assign]
             return_value=None
         )
-        pack = MinecraftResourcePack("minecraft:diamond", "ダイヤモンド", 3, 550)
+        pack = MinecraftResourcePack("minecraft:diamond", "ダイヤモンド", 3, 2_160)
         view = MinecraftResourceConfirmView(
             bot,
             owner_id=123,
@@ -261,7 +264,7 @@ def test_confirmation_preserves_item_count_and_cost_mapping() -> None:
             request_id="00000000-0000-4000-8000-000000000020",
             item_id="minecraft:diamond",
             item_count=3,
-            expected_cost_xp=550,
+            expected_cost_xp=2_160,
         )
 
     asyncio.run(exercise())
@@ -273,7 +276,7 @@ def test_confirmation_preserves_one_stack_item_count_and_cost_mapping() -> None:
         bot.confirm_minecraft_resource_exchange = AsyncMock(  # type: ignore[method-assign]
             return_value=None
         )
-        pack = MinecraftResourcePack("minecraft:diamond", "ダイヤモンド", 64, 11_200)
+        pack = MinecraftResourcePack("minecraft:diamond", "ダイヤモンド", 64, 46_080)
         view = MinecraftResourceConfirmView(
             bot,
             owner_id=123,
@@ -290,7 +293,7 @@ def test_confirmation_preserves_one_stack_item_count_and_cost_mapping() -> None:
             request_id="00000000-0000-4000-8000-000000000064",
             item_id="minecraft:diamond",
             item_count=64,
-            expected_cost_xp=11_200,
+            expected_cost_xp=46_080,
         )
 
     asyncio.run(exercise())
