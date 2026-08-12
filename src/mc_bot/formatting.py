@@ -172,6 +172,30 @@ def format_resource_exchange(
     )
 
 
+def format_emerald_diamond_exchange(
+    *,
+    server_name: str,
+    player_name: str,
+    discord_user_id: int | None,
+    emerald_count: int,
+    diamond_count: int,
+) -> discord.Embed:
+    """Minecraft内のエメラルドからダイヤモンドへの交換成功ログ。"""
+    server_name = _escape_markdown(server_name)
+    player_name = _escape_markdown(player_name)
+    identity = player_name
+    if discord_user_id is not None:
+        identity += f" (<@{discord_user_id}>)"
+    return discord.Embed(
+        description=(
+            f"💎 **[{server_name}] {identity} さん** がMinecraft内の "
+            f"**エメラルド x{emerald_count:,}**を交換し、"
+            f"**ダイヤモンド x{diamond_count:,}**を獲得しました!"
+        ),
+        color=discord.Color.green(),
+    )
+
+
 def format_fishing_combo_milestone(
     *, player_name: str, discord_user_id: int, combo_count: int, reward_xp: int
 ) -> discord.Embed:

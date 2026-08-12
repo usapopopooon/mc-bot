@@ -23,6 +23,12 @@ from mc_bot.accounts import (
 )
 from mc_bot.activity import ActivityKind, MinecraftActivityEvent, parse_activity_event
 from mc_bot.config import Config
+from mc_bot.emerald_exchange import (
+    EmeraldDiamondExchangeResult,
+    emerald_diamond_exchange_command,
+    parse_emerald_diamond_exchange_event,
+    parse_emerald_diamond_exchange_result,
+)
 from mc_bot.events import EventType, LogEvent, parse_log_line
 from mc_bot.experience import (
     ADVANCEMENT_REWARD_IN_GAME_XP,
@@ -50,6 +56,7 @@ from mc_bot.fishing import (
 )
 from mc_bot.formatting import (
     format_advancement_reward,
+    format_emerald_diamond_exchange,
     format_event,
     format_fishing_combo_milestone,
     format_level_up_event,
@@ -68,6 +75,7 @@ from mc_bot.player_count import (
 )
 from mc_bot.rcon import RconClient, RconError
 from mc_bot.resource_shop import (
+    EmeraldDiamondPackSelectView,
     MinecraftResourcePackSelectView,
     MinecraftResourceShopPanelView,
     minecraft_resource_shop_embed,
@@ -1062,6 +1070,39 @@ class MinecraftDiscordBot(discord.Client):
             return
         await interaction.followup.send(wallet_text(shop.wallet), ephemeral=True)
 
+    async def show_emerald_diamond_exchange(self, interaction: discord.Interaction) -> None:
+        if interaction.guild_id is None:
+            await interaction.response.send_message(
+                "Discordサーバー内で利用してください。", ephemeral=True
+            )
+            return
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        try:
+            account, reason = await self._online_exchange_account(interaction.user.id)
+        except (OSError, RconError, RuntimeError, ValueError) as error:
+            LOGGER.warning("Could not verify player for emerald exchange: %s", error)
+            await interaction.followup.send(
+                "Minecraftサーバーへの参加状況を確認できませんでした。"
+                "少し待ってから再度お試しください。",
+                ephemeral=True,
+            )
+            return
+        if account is None:
+            message = (
+                "連携したMinecraftアカウントが複数同時にオンラインです。"
+                "交換に使う1アカウントだけで参加してから再度お試しください。"
+                if reason == "account_ambiguous"
+                else "連携したMinecraftアカウントでサーバーに参加してからご利用ください。"
+            )
+            await interaction.followup.send(message, ephemeral=True)
+            return
+        await interaction.followup.send(
+            "手持ちのエメラルドと交換する数量を選んでください。\n"
+            "交換完了はMinecraft内チャットとDiscordログへ通知されます。",
+            view=EmeraldDiamondPackSelectView(self, owner_id=interaction.user.id),
+            ephemeral=True,
+        )
+
     async def confirm_minecraft_resource_exchange(
         self,
         interaction: discord.Interaction,
@@ -1081,6 +1122,58 @@ class MinecraftDiscordBot(discord.Client):
             item_count,
             expected_cost_xp,
         )
+
+    async def confirm_emerald_diamond_exchange(
+        self,
+        interaction: discord.Interaction,
+        *,
+        request_id: str,
+        emerald_count: int,
+    ) -> EmeraldDiamondExchangeResult | None:
+        try:
+            account, reason = await self._online_exchange_account(interaction.user.id)
+            if account is None:
+                return EmeraldDiamondExchangeResult(
+                    request_id=str(uuid.UUID(request_id)),
+                    status=reason or "player_offline",
+                    emerald_count=emerald_count,
+                    diamond_count=emerald_count // 16,
+                    duplicate=False,
+                )
+            if account.player_uuid is None:
+                raise ValueError("linked Minecraft account has no UUID")
+            command = emerald_diamond_exchange_command(
+                account.player_uuid,
+                emerald_count,
+                request_id,
+            )
+            response = await self._execute_rcon(command)
+            return parse_emerald_diamond_exchange_result(
+                response,
+                expected_request_id=request_id,
+                expected_emerald_count=emerald_count,
+            )
+        except (OSError, RconError, RuntimeError, ValueError) as error:
+            LOGGER.warning("Could not complete emerald-diamond exchange: %s", error)
+            return None
+
+    async def _online_exchange_account(
+        self, discord_user_id: int
+    ) -> tuple[MinecraftAccount | None, str | None]:
+        online_names = await self._online_players()
+        linked = await self._linked_accounts_by_online_name(online_names)
+        matches = {
+            account.id: account
+            for account in linked.values()
+            if account.discord_user_id == discord_user_id
+            and account.status == "active"
+            and account.player_uuid is not None
+        }
+        if not matches:
+            return None, "player_offline"
+        if len(matches) > 1:
+            return None, "account_ambiguous"
+        return next(iter(matches.values())), None
 
     async def confirm_registration(
         self,
@@ -3000,6 +3093,57 @@ class MinecraftDiscordBot(discord.Client):
 
     async def _forward_logs(self) -> None:
         async for pending_line in self._tailer.lines():
+            try:
+                emerald_exchange = parse_emerald_diamond_exchange_event(pending_line.text)
+            except ValueError as error:
+                LOGGER.warning("Ignored malformed Minecraft emerald exchange event: %s", error)
+                await asyncio.to_thread(self._tailer.acknowledge, pending_line)
+                continue
+            if emerald_exchange is not None:
+                try:
+                    account = await asyncio.to_thread(
+                        self._accounts.get_by_player_uuid,
+                        emerald_exchange.player_uuid,
+                    )
+                except ValueError as error:
+                    LOGGER.warning(
+                        "Could not identify emerald exchange account by UUID %s: %s",
+                        emerald_exchange.player_uuid,
+                        error,
+                    )
+                    account = None
+                guild = self.get_guild(self._settings.guild_id or 0)
+                server_name = guild.name if guild is not None else "サーバー"
+                embed = format_emerald_diamond_exchange(
+                    server_name=server_name,
+                    player_name=emerald_exchange.player_name,
+                    discord_user_id=(
+                        account.discord_user_id
+                        if account is not None and account.status == "active"
+                        else None
+                    ),
+                    emerald_count=emerald_exchange.emerald_count,
+                    diamond_count=emerald_exchange.diamond_count,
+                )
+                retry_delay = 1
+                while not self.is_closed():
+                    await self.wait_until_ready()
+                    try:
+                        await self._send(embed)
+                    except (RuntimeError, discord.DiscordException) as error:
+                        self._delivery_healthy = False
+                        LOGGER.warning(
+                            "Discord emerald exchange log failed; retrying in %ds: %s",
+                            retry_delay,
+                            error,
+                        )
+                        await asyncio.sleep(retry_delay)
+                        retry_delay = min(retry_delay * 2, 30)
+                        continue
+                    await asyncio.to_thread(self._tailer.acknowledge, pending_line)
+                    self._delivery_healthy = True
+                    break
+                continue
             try:
                 activity_event = parse_activity_event(pending_line.text)
             except ValueError as error:

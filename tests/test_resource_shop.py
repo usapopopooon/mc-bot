@@ -16,6 +16,8 @@ from mc_bot.experience import (
     MinecraftXpWallet,
 )
 from mc_bot.resource_shop import (
+    EmeraldDiamondConfirmView,
+    EmeraldDiamondPackSelectView,
     MinecraftResourceConfirmView,
     MinecraftResourcePackSelectView,
     MinecraftResourceShopPanelView,
@@ -114,6 +116,7 @@ def test_resource_panel_lists_server_rates_and_is_persistent() -> None:
 
     assert embed.title == "Minecraft 資源交換所"
     assert "最大 **64個・1スタック**" in str(embed.description)
+    assert "エメラルドは **16個 → ダイヤモンド1個**" in str(embed.description)
     assert "`サーバーXP 100` → `エメラルド x4`" in str(embed.fields[0].value)
     assert "`サーバーXP 360` → `エメラルド x16`" in str(embed.fields[0].value)
     assert "足元へドロップ" in str(embed.fields[1].value)
@@ -124,9 +127,58 @@ def test_resource_panel_lists_server_rates_and_is_persistent() -> None:
     assert panel.timeout is None
     assert [child.custom_id for child in panel.children] == [
         "mc-resource-shop:open",
+        "mc-resource-shop:emerald-diamond",
         "mc-resource-shop:balance",
     ]
     assert [option.value for option in select.children[0].options] == ["0", "1", "2"]
+
+
+def test_emerald_diamond_menu_exposes_only_fixed_safe_rates() -> None:
+    async def build() -> EmeraldDiamondPackSelectView:
+        return EmeraldDiamondPackSelectView(
+            MinecraftDiscordBot(Config(discord_token="secret")), owner_id=123
+        )
+
+    view = asyncio.run(build())
+
+    assert [option.value for option in view.children[0].options] == ["16", "32", "64"]
+    assert [option.label for option in view.children[0].options] == [
+        "エメラルド x16 → ダイヤモンド x1",
+        "エメラルド x32 → ダイヤモンド x2",
+        "エメラルド x64 → ダイヤモンド x4",
+    ]
+
+
+def test_emerald_confirmation_preserves_request_and_emerald_count() -> None:
+    async def exercise() -> None:
+        bot = MinecraftDiscordBot(Config(discord_token="secret"))
+        bot.confirm_emerald_diamond_exchange = AsyncMock(  # type: ignore[method-assign]
+            return_value=SimpleNamespace(status="completed", emerald_count=32, diamond_count=2)
+        )
+        view = EmeraldDiamondConfirmView(
+            bot,
+            owner_id=123,
+            request_id="00000000-0000-4000-8000-000000000032",
+            emerald_count=32,
+        )
+        interaction = SimpleNamespace(
+            response=SimpleNamespace(edit_message=AsyncMock()),
+            edit_original_response=AsyncMock(),
+            followup=SimpleNamespace(send=AsyncMock()),
+        )
+
+        await view.confirm.callback(interaction)  # type: ignore[arg-type]
+
+        bot.confirm_emerald_diamond_exchange.assert_awaited_once_with(  # type: ignore[attr-defined]
+            interaction,
+            request_id="00000000-0000-4000-8000-000000000032",
+            emerald_count=32,
+        )
+        interaction.followup.send.assert_awaited_once_with(
+            "交換しました: エメラルド x32 → ダイヤモンド x2", ephemeral=True
+        )
+
+    asyncio.run(exercise())
 
 
 def test_open_resource_shop_refreshes_public_panel_and_private_menu_from_same_rates(

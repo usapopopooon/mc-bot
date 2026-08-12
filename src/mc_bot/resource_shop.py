@@ -19,6 +19,7 @@ _RESOURCE_NAMES = {
     "minecraft:emerald": "エメラルド",
 }
 _SAFE_PLAYER_NAME = re.compile(r"\.?[A-Za-z0-9_]{1,32}")
+EMERALD_DIAMOND_PACKS = ((16, 1), (32, 2), (64, 4))
 
 
 def resource_give_command(player_name: str, item_id: str, item_count: int) -> str:
@@ -83,6 +84,7 @@ def minecraft_resource_shop_embed(
         title="Minecraft 資源交換所",
         description=(
             "活動で貯めたサーバーXPをMinecraft内の資源へ交換できます。\n"
+            "手持ちのエメラルドは **16個 → ダイヤモンド1個** で交換できます。\n"
             "連携したMinecraftアカウントでサーバーに参加中のみ交換できます。\n"
             "数量は小口から最大 **64個・1スタック** まで選べます。"
         ),
@@ -130,6 +132,16 @@ class MinecraftResourceShopPanelView(discord.ui.View):
     async def open_shop(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if await self.bot.validate_resource_shop_panel(interaction):
             await self.bot.show_minecraft_resource_shop(interaction)
+
+    @discord.ui.button(
+        label="エメラルドを交換",
+        emoji="🔄",
+        style=discord.ButtonStyle.success,
+        custom_id="mc-resource-shop:emerald-diamond",
+    )
+    async def emerald_diamond(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if await self.bot.validate_resource_shop_panel(interaction):
+            await self.bot.show_emerald_diamond_exchange(interaction)
 
     @discord.ui.button(
         label="自分のXP",
@@ -304,7 +316,171 @@ class MinecraftResourceConfirmView(discord.ui.View):
         )
 
 
+class EmeraldDiamondPackSelect(discord.ui.Select):
+    def __init__(self, bot: MinecraftDiscordBot, *, owner_id: int) -> None:
+        self.bot = bot
+        self.owner_id = owner_id
+        super().__init__(
+            placeholder="交換する数量を選択",
+            min_values=1,
+            max_values=1,
+            options=[
+                discord.SelectOption(
+                    label=f"エメラルド x{emeralds} → ダイヤモンド x{diamonds}",
+                    value=str(emeralds),
+                )
+                for emeralds, diamonds in EMERALD_DIAMOND_PACKS
+            ],
+        )
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message(
+                "この交換メニューを使えるのは開いた本人だけです。", ephemeral=True
+            )
+            return
+        try:
+            emerald_count = int(self.values[0])
+            diamond_count = dict(EMERALD_DIAMOND_PACKS)[emerald_count]
+        except KeyError, ValueError:
+            await interaction.response.send_message(
+                "この交換内容は利用できません。", ephemeral=True
+            )
+            return
+        embed = discord.Embed(
+            title="交換内容の確認",
+            description=(
+                f"手持ちの **エメラルド x{emerald_count}** を使い、"
+                f"**ダイヤモンド x{diamond_count}** を獲得します。\n"
+                "サーバーXPは使用しません。"
+            ),
+            color=discord.Color.teal(),
+        )
+        embed.add_field(
+            name="交換前にご確認ください",
+            value=(
+                "Minecraftサーバーに参加した状態で交換してください。\n"
+                "ダイヤモンドを受け取る空きがない場合、交換は行われません。"
+            ),
+            inline=False,
+        )
+        await interaction.response.send_message(
+            embed=embed,
+            view=EmeraldDiamondConfirmView(
+                self.bot,
+                owner_id=self.owner_id,
+                request_id=str(uuid4()),
+                emerald_count=emerald_count,
+            ),
+            ephemeral=True,
+        )
+
+
+class EmeraldDiamondPackSelectView(discord.ui.View):
+    def __init__(self, bot: MinecraftDiscordBot, *, owner_id: int) -> None:
+        super().__init__(timeout=180)
+        self.add_item(EmeraldDiamondPackSelect(bot, owner_id=owner_id))
+
+
+class EmeraldDiamondConfirmView(discord.ui.View):
+    def __init__(
+        self,
+        bot: MinecraftDiscordBot,
+        *,
+        owner_id: int,
+        request_id: str,
+        emerald_count: int,
+    ) -> None:
+        super().__init__(timeout=180)
+        self.bot = bot
+        self.owner_id = owner_id
+        self.request_id = request_id
+        self.emerald_count = emerald_count
+        self._operation_lock = asyncio.Lock()
+        self._completed = False
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id == self.owner_id:
+            return True
+        await interaction.response.send_message(
+            "この交換を操作できるのは本人だけです。", ephemeral=True
+        )
+        return False
+
+    @discord.ui.button(label="交換する", style=discord.ButtonStyle.primary)
+    async def confirm(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if self._operation_lock.locked() or self._completed:
+            await interaction.response.send_message(
+                "この交換は処理中または処理済みです。", ephemeral=True
+            )
+            return
+        async with self._operation_lock:
+            for child in self.children:
+                child.disabled = True
+            await interaction.response.edit_message(view=self)
+            result = await self.bot.confirm_emerald_diamond_exchange(
+                interaction,
+                request_id=self.request_id,
+                emerald_count=self.emerald_count,
+            )
+            if result is None:
+                self._enable_retry()
+                await interaction.edit_original_response(view=self)
+                await interaction.followup.send(
+                    "交換結果を確認できませんでした。"
+                    "同じ確認画面から再試行しても二重交換にはなりません。",
+                    ephemeral=True,
+                )
+                return
+            if result.status == "completed":
+                self._completed = True
+                message = (
+                    f"交換しました: エメラルド x{result.emerald_count} → "
+                    f"ダイヤモンド x{result.diamond_count}"
+                )
+            else:
+                self._enable_retry()
+                await interaction.edit_original_response(view=self)
+                message = {
+                    "insufficient_emeralds": (
+                        f"手持ちのエメラルドが{result.emerald_count}個未満のため"
+                        "交換できませんでした。"
+                    ),
+                    "inventory_full": (
+                        "ダイヤモンドを受け取る空きがないため交換できませんでした。"
+                        "インベントリを空けて再試行してください。"
+                    ),
+                    "player_offline": (
+                        "連携したMinecraftアカウントがオンラインではありません。"
+                        "サーバーに参加してから再試行してください。"
+                    ),
+                    "account_ambiguous": (
+                        "連携したMinecraftアカウントが複数同時にオンラインです。"
+                        "交換に使う1アカウントだけで参加してから再試行してください。"
+                    ),
+                }[result.status]
+            await interaction.followup.send(message, ephemeral=True)
+
+    def _enable_retry(self) -> None:
+        self.confirm.disabled = False
+        self.cancel.disabled = False
+
+    @discord.ui.button(label="キャンセル", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if self._operation_lock.locked():
+            await interaction.response.send_message(
+                "交換処理中のためキャンセルできません。", ephemeral=True
+            )
+            return
+        await interaction.response.edit_message(
+            content="交換をキャンセルしました。", embed=None, view=None
+        )
+
+
 __all__ = [
+    "EMERALD_DIAMOND_PACKS",
+    "EmeraldDiamondConfirmView",
+    "EmeraldDiamondPackSelectView",
     "MinecraftResourceConfirmView",
     "MinecraftResourcePackSelectView",
     "MinecraftResourceShopPanelView",
