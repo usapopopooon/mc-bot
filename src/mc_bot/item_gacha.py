@@ -4,7 +4,7 @@ import json
 import re
 import secrets
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import TYPE_CHECKING
 from zoneinfo import ZoneInfo
 
@@ -14,7 +14,6 @@ if TYPE_CHECKING:
     from mc_bot.bot import MinecraftDiscordBot
 
 _JST = ZoneInfo("Asia/Tokyo")
-_RESET_HOUR = 5
 _SAFE_PLAYER_NAME = re.compile(r"\.?[A-Za-z0-9_]{1,32}")
 
 
@@ -169,8 +168,7 @@ if _TOTAL_WEIGHT != 800 or len(_REWARDS_BY_KEY) != len(ITEM_GACHA_REWARDS):
 def item_gacha_day(now: datetime) -> str:
     if now.tzinfo is None:
         raise ValueError("now must be timezone-aware")
-    shifted = now.astimezone(_JST) - timedelta(hours=_RESET_HOUR)
-    return shifted.date().isoformat()
+    return now.astimezone(_JST).date().isoformat()
 
 
 def draw_item_gacha_reward(roll: int | None = None) -> ItemGachaReward:
@@ -265,7 +263,7 @@ def item_gacha_panel_embed() -> discord.Embed:
     embed.add_field(
         name="更新と通知",
         value=(
-            "毎日 **日本時間5:00** に更新します。\n"
+            "毎日 **日本時間0:00** に更新します。\n"
             "Nを含むすべての結果をMinecraft内チャットとDiscordログへ通知します。\n"
             "インベントリに入らない分は足元へドロップします。"
         ),

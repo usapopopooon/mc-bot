@@ -154,7 +154,7 @@ def test_panel_publishes_only_tier_rates_and_keeps_rewards_secret() -> None:
 
     assert "N 35%" in rendered
     assert "幻 0.5%" in rendered
-    assert "日本時間5:00" in rendered
+    assert "日本時間0:00" in rendered
     for reward in ITEM_GACHA_REWARDS:
         assert reward.item_name not in rendered
         assert reward.item_spec not in rendered
@@ -167,9 +167,9 @@ def test_panel_publishes_only_tier_rates_and_keeps_rewards_secret() -> None:
     assert [child.custom_id for child in view.children] == ["mc-item-gacha:draw"]
 
 
-def test_gacha_day_resets_at_five_in_japan() -> None:
-    assert item_gacha_day(datetime(2026, 8, 13, 19, 59, 59, tzinfo=UTC)) == "2026-08-13"
-    assert item_gacha_day(datetime(2026, 8, 13, 20, 0, 0, tzinfo=UTC)) == "2026-08-14"
+def test_gacha_day_resets_at_midnight_in_japan() -> None:
+    assert item_gacha_day(datetime(2026, 8, 13, 14, 59, 59, tzinfo=UTC)) == "2026-08-13"
+    assert item_gacha_day(datetime(2026, 8, 13, 15, 0, 0, tzinfo=UTC)) == "2026-08-14"
     with pytest.raises(ValueError):
         item_gacha_day(datetime(2026, 8, 14, 5, 0, 0))
 
