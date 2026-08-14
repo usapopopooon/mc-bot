@@ -27,31 +27,82 @@ class ItemGachaReward:
     weight: int
 
 
+def _enchanted_book(
+    key: str,
+    tier: str,
+    enchantment: str,
+    level: int,
+    item_name: str,
+    weight: int,
+) -> ItemGachaReward:
+    return ItemGachaReward(
+        key,
+        tier,
+        f"minecraft:enchanted_book[stored_enchantments={{{enchantment}:{level}}}]",
+        item_name,
+        1,
+        weight,
+    )
+
+
 # 800口で、N 35% / R 35% / SR 19% / SSR 7.5% / UR 3% / 幻 0.5%。
-# Minecraft Java 26.2 の公式 recipe / loot_table を基準に入手経路を確認する。
+# Minecraft Java 26.2 の公式 recipe / loot_table / enchantment を基準に確認する。
 # パネルにはランク確率だけを出し、景品内容と個別確率は抽選まで公開しない。
 ITEM_GACHA_REWARDS = (
-    ItemGachaReward("n_iron", "N", "minecraft:iron_ingot", "鉄インゴット", 24, 28),
-    ItemGachaReward("n_gold", "N", "minecraft:gold_ingot", "金インゴット", 16, 28),
-    ItemGachaReward("n_rocket", "N", "minecraft:firework_rocket", "ロケット花火", 48, 28),
-    ItemGachaReward("n_xp_bottle", "N", "minecraft:experience_bottle", "エンチャントの瓶", 24, 28),
-    ItemGachaReward("n_golden_carrot", "N", "minecraft:golden_carrot", "金のニンジン", 32, 28),
-    ItemGachaReward("n_sea_lantern", "N", "minecraft:sea_lantern", "シーランタン", 16, 28),
-    ItemGachaReward("n_slime", "N", "minecraft:slime_ball", "スライムボール", 16, 28),
-    ItemGachaReward("n_quartz", "N", "minecraft:quartz", "ネザークォーツ", 48, 28),
-    ItemGachaReward("n_redstone", "N", "minecraft:redstone", "レッドストーンダスト", 64, 28),
-    ItemGachaReward("n_ender_pearl", "N", "minecraft:ender_pearl", "エンダーパール", 12, 28),
-    ItemGachaReward("r_diamond", "R", "minecraft:diamond", "ダイヤモンド", 3, 35),
-    ItemGachaReward("r_golden_apple", "R", "minecraft:golden_apple", "金のリンゴ", 3, 35),
-    ItemGachaReward("r_shulker_shell", "R", "minecraft:shulker_shell", "シュルカーの殻", 2, 35),
-    ItemGachaReward("r_breeze_rod", "R", "minecraft:breeze_rod", "ブリーズロッド", 8, 35),
+    ItemGachaReward("n_iron", "N", "minecraft:iron_ingot", "鉄インゴット", 24, 12),
+    ItemGachaReward("n_gold", "N", "minecraft:gold_ingot", "金インゴット", 16, 12),
+    ItemGachaReward("n_rocket", "N", "minecraft:firework_rocket", "ロケット花火", 48, 12),
+    ItemGachaReward("n_xp_bottle", "N", "minecraft:experience_bottle", "エンチャントの瓶", 24, 12),
+    ItemGachaReward("n_golden_carrot", "N", "minecraft:golden_carrot", "金のニンジン", 32, 12),
+    ItemGachaReward("n_sea_lantern", "N", "minecraft:sea_lantern", "シーランタン", 16, 12),
+    ItemGachaReward("n_slime", "N", "minecraft:slime_ball", "スライムボール", 16, 12),
+    ItemGachaReward("n_quartz", "N", "minecraft:quartz", "ネザークォーツ", 48, 12),
+    ItemGachaReward("n_redstone", "N", "minecraft:redstone", "レッドストーンダスト", 64, 12),
+    ItemGachaReward("n_ender_pearl", "N", "minecraft:ender_pearl", "エンダーパール", 12, 12),
+    _enchanted_book("n_bane", "N", "bane_of_arthropods", 5, "虫特効Vのエンチャント本", 10),
+    _enchanted_book(
+        "n_blast_protection", "N", "blast_protection", 4, "爆発耐性IVのエンチャント本", 11
+    ),
+    _enchanted_book("n_channeling", "N", "channeling", 1, "召雷のエンチャント本", 11),
+    _enchanted_book(
+        "n_fire_protection", "N", "fire_protection", 4, "火炎耐性IVのエンチャント本", 11
+    ),
+    _enchanted_book("n_flame", "N", "flame", 1, "フレイムのエンチャント本", 11),
+    _enchanted_book("n_frost_walker", "N", "frost_walker", 2, "氷渡りIIのエンチャント本", 11),
+    _enchanted_book("n_impaling", "N", "impaling", 5, "水生特効Vのエンチャント本", 10),
+    _enchanted_book(
+        "n_knockback",
+        "N",
+        "knockback",
+        2,
+        "ノックバックIIのエンチャント本",  # noqa: RUF001 - Minecraft公式の日本語名
+        10,
+    ),
+    _enchanted_book("n_loyalty", "N", "loyalty", 3, "忠誠IIIのエンチャント本", 11),
+    _enchanted_book("n_multishot", "N", "multishot", 1, "拡散のエンチャント本", 11),
+    _enchanted_book("n_piercing", "N", "piercing", 4, "貫通IVのエンチャント本", 10),
+    _enchanted_book(
+        "n_projectile_protection",
+        "N",
+        "projectile_protection",
+        4,
+        "飛び道具耐性IVのエンチャント本",
+        11,
+    ),
+    _enchanted_book("n_punch", "N", "punch", 2, "パンチIIのエンチャント本", 10),
+    _enchanted_book("n_quick_charge", "N", "quick_charge", 3, "高速装填IIIのエンチャント本", 11),
+    _enchanted_book("n_thorns", "N", "thorns", 3, "棘の鎧IIIのエンチャント本", 11),
+    ItemGachaReward("r_diamond", "R", "minecraft:diamond", "ダイヤモンド", 3, 10),
+    ItemGachaReward("r_golden_apple", "R", "minecraft:golden_apple", "金のリンゴ", 3, 10),
+    ItemGachaReward("r_shulker_shell", "R", "minecraft:shulker_shell", "シュルカーの殻", 2, 10),
+    ItemGachaReward("r_breeze_rod", "R", "minecraft:breeze_rod", "ブリーズロッド", 8, 10),
     ItemGachaReward(
         "r_wither_skull",
         "R",
         "minecraft:wither_skeleton_skull",
         "ウィザースケルトンの頭蓋骨",
         2,
-        35,
+        10,
     ),
     ItemGachaReward(
         "r_ominous_trial_key",
@@ -59,43 +110,62 @@ ITEM_GACHA_REWARDS = (
         "minecraft:ominous_trial_key",
         "不吉な試練の鍵",
         1,
-        35,
+        10,
     ),
+    _enchanted_book("r_mending", "R", "mending", 1, "修繕のエンチャント本", 11),
+    _enchanted_book("r_fortune", "R", "fortune", 3, "幸運IIIのエンチャント本", 11),
+    _enchanted_book("r_efficiency", "R", "efficiency", 5, "効率強化Vのエンチャント本", 11),
+    _enchanted_book("r_unbreaking", "R", "unbreaking", 3, "耐久力IIIのエンチャント本", 11),
+    _enchanted_book("r_silk_touch", "R", "silk_touch", 1, "シルクタッチのエンチャント本", 11),
+    _enchanted_book("r_protection", "R", "protection", 4, "ダメージ軽減IVのエンチャント本", 11),
+    _enchanted_book(
+        "r_feather_falling", "R", "feather_falling", 4, "落下耐性IVのエンチャント本", 11
+    ),
+    _enchanted_book("r_looting", "R", "looting", 3, "ドロップ増加IIIのエンチャント本", 11),
+    _enchanted_book("r_sharpness", "R", "sharpness", 5, "ダメージ増加Vのエンチャント本", 11),
+    _enchanted_book("r_power", "R", "power", 5, "射撃ダメージ増加Vのエンチャント本", 11),
+    _enchanted_book("r_infinity", "R", "infinity", 1, "無限のエンチャント本", 11),
+    _enchanted_book("r_depth_strider", "R", "depth_strider", 3, "水中歩行IIIのエンチャント本", 11),
+    _enchanted_book("r_respiration", "R", "respiration", 3, "水中呼吸IIIのエンチャント本", 11),
+    _enchanted_book("r_aqua_affinity", "R", "aqua_affinity", 1, "水中採掘のエンチャント本", 11),
+    _enchanted_book(
+        "r_luck_of_the_sea", "R", "luck_of_the_sea", 3, "宝釣りIIIのエンチャント本", 11
+    ),
+    _enchanted_book("r_lure", "R", "lure", 3, "入れ食いIIIのエンチャント本", 11),
+    _enchanted_book("r_fire_aspect", "R", "fire_aspect", 2, "火属性IIのエンチャント本", 11),
+    _enchanted_book("r_smite", "R", "smite", 5, "アンデッド特効Vのエンチャント本", 11),
+    _enchanted_book(
+        "r_sweeping_edge", "R", "sweeping_edge", 3, "範囲ダメージ増加IIIのエンチャント本", 11
+    ),
+    _enchanted_book("r_riptide", "R", "riptide", 3, "激流IIIのエンチャント本", 11),
     ItemGachaReward(
-        "r_mending",
-        "R",
-        "minecraft:enchanted_book[stored_enchantments={mending:1}]",
-        "修繕のエンチャント本",
-        1,
-        35,
+        "sr_diamond_block", "SR", "minecraft:diamond_block", "ダイヤモンドブロック", 1, 16
     ),
+    ItemGachaReward("sr_ancient_debris", "SR", "minecraft:ancient_debris", "古代の残骸", 3, 16),
+    ItemGachaReward("sr_totem", "SR", "minecraft:totem_of_undying", "不死のトーテム", 1, 15),
+    ItemGachaReward("sr_heavy_core", "SR", "minecraft:heavy_core", "ヘビーコア", 1, 15),
+    ItemGachaReward("sr_trident", "SR", "minecraft:trident", "トライデント", 1, 15),
+    _enchanted_book(
+        "sr_swift_sneak", "SR", "swift_sneak", 3, "スニーク速度上昇IIIのエンチャント本", 15
+    ),
+    _enchanted_book(
+        "sr_soul_speed", "SR", "soul_speed", 3, "ソウルスピードIIIのエンチャント本", 15
+    ),
+    _enchanted_book("sr_density", "SR", "density", 5, "重撃Vのエンチャント本", 15),
+    _enchanted_book("sr_breach", "SR", "breach", 4, "防具貫通IVのエンチャント本", 15),
+    _enchanted_book("sr_lunge", "SR", "lunge", 3, "突進IIIのエンチャント本", 15),
     ItemGachaReward(
-        "r_silk_touch",
-        "R",
-        "minecraft:enchanted_book[stored_enchantments={silk_touch:1}]",
-        "シルクタッチのエンチャント本",
-        1,
-        35,
+        "ssr_netherite", "SSR", "minecraft:netherite_ingot", "ネザライトインゴット", 1, 10
     ),
-    ItemGachaReward(
-        "sr_diamond_block", "SR", "minecraft:diamond_block", "ダイヤモンドブロック", 1, 31
-    ),
-    ItemGachaReward("sr_ancient_debris", "SR", "minecraft:ancient_debris", "古代の残骸", 3, 31),
-    ItemGachaReward("sr_totem", "SR", "minecraft:totem_of_undying", "不死のトーテム", 1, 30),
-    ItemGachaReward("sr_heavy_core", "SR", "minecraft:heavy_core", "ヘビーコア", 1, 30),
-    ItemGachaReward("sr_trident", "SR", "minecraft:trident", "トライデント", 1, 30),
-    ItemGachaReward(
-        "ssr_netherite", "SSR", "minecraft:netherite_ingot", "ネザライトインゴット", 1, 12
-    ),
-    ItemGachaReward("ssr_elytra", "SSR", "minecraft:elytra", "エリトラ", 1, 12),
-    ItemGachaReward("ssr_beacon", "SSR", "minecraft:beacon", "ビーコン", 1, 12),
+    ItemGachaReward("ssr_elytra", "SSR", "minecraft:elytra", "エリトラ", 1, 10),
+    ItemGachaReward("ssr_beacon", "SSR", "minecraft:beacon", "ビーコン", 1, 10),
     ItemGachaReward(
         "ssr_enchanted_apple",
         "SSR",
         "minecraft:enchanted_golden_apple",
         "エンチャントされた金のリンゴ",
         2,
-        12,
+        10,
     ),
     ItemGachaReward(
         "ssr_diamond_blocks",
@@ -103,7 +173,10 @@ ITEM_GACHA_REWARDS = (
         "minecraft:diamond_block",
         "ダイヤモンドブロック",
         3,
-        12,
+        10,
+    ),
+    _enchanted_book(
+        "ssr_wind_burst", "SSR", "wind_burst", 3, "ウィンドバーストIIIのエンチャント本", 10
     ),
     ItemGachaReward(
         "ur_netherite", "UR", "minecraft:netherite_ingot", "ネザライトインゴット", 3, 6

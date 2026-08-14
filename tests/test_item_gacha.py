@@ -131,6 +131,97 @@ def test_reward_table_has_exact_published_tier_probabilities() -> None:
         draw_item_gacha_reward(800)
 
 
+def test_reward_table_has_all_non_curse_max_level_enchantment_books() -> None:
+    expected_by_tier = {
+        "N": {
+            "n_bane": ("bane_of_arthropods", 5, "虫特効Vのエンチャント本"),
+            "n_blast_protection": ("blast_protection", 4, "爆発耐性IVのエンチャント本"),
+            "n_channeling": ("channeling", 1, "召雷のエンチャント本"),
+            "n_fire_protection": ("fire_protection", 4, "火炎耐性IVのエンチャント本"),
+            "n_flame": ("flame", 1, "フレイムのエンチャント本"),
+            "n_frost_walker": ("frost_walker", 2, "氷渡りIIのエンチャント本"),
+            "n_impaling": ("impaling", 5, "水生特効Vのエンチャント本"),
+            "n_knockback": (
+                "knockback",
+                2,
+                "ノックバックIIのエンチャント本",  # noqa: RUF001 - Minecraft公式の日本語名
+            ),
+            "n_loyalty": ("loyalty", 3, "忠誠IIIのエンチャント本"),
+            "n_multishot": ("multishot", 1, "拡散のエンチャント本"),
+            "n_piercing": ("piercing", 4, "貫通IVのエンチャント本"),
+            "n_projectile_protection": (
+                "projectile_protection",
+                4,
+                "飛び道具耐性IVのエンチャント本",
+            ),
+            "n_punch": ("punch", 2, "パンチIIのエンチャント本"),
+            "n_quick_charge": ("quick_charge", 3, "高速装填IIIのエンチャント本"),
+            "n_thorns": ("thorns", 3, "棘の鎧IIIのエンチャント本"),
+        },
+        "R": {
+            "r_mending": ("mending", 1, "修繕のエンチャント本"),
+            "r_fortune": ("fortune", 3, "幸運IIIのエンチャント本"),
+            "r_efficiency": ("efficiency", 5, "効率強化Vのエンチャント本"),
+            "r_unbreaking": ("unbreaking", 3, "耐久力IIIのエンチャント本"),
+            "r_silk_touch": ("silk_touch", 1, "シルクタッチのエンチャント本"),
+            "r_protection": ("protection", 4, "ダメージ軽減IVのエンチャント本"),
+            "r_feather_falling": ("feather_falling", 4, "落下耐性IVのエンチャント本"),
+            "r_looting": ("looting", 3, "ドロップ増加IIIのエンチャント本"),
+            "r_sharpness": ("sharpness", 5, "ダメージ増加Vのエンチャント本"),
+            "r_power": ("power", 5, "射撃ダメージ増加Vのエンチャント本"),
+            "r_infinity": ("infinity", 1, "無限のエンチャント本"),
+            "r_depth_strider": ("depth_strider", 3, "水中歩行IIIのエンチャント本"),
+            "r_respiration": ("respiration", 3, "水中呼吸IIIのエンチャント本"),
+            "r_aqua_affinity": ("aqua_affinity", 1, "水中採掘のエンチャント本"),
+            "r_luck_of_the_sea": ("luck_of_the_sea", 3, "宝釣りIIIのエンチャント本"),
+            "r_lure": ("lure", 3, "入れ食いIIIのエンチャント本"),
+            "r_fire_aspect": ("fire_aspect", 2, "火属性IIのエンチャント本"),
+            "r_smite": ("smite", 5, "アンデッド特効Vのエンチャント本"),
+            "r_sweeping_edge": ("sweeping_edge", 3, "範囲ダメージ増加IIIのエンチャント本"),
+            "r_riptide": ("riptide", 3, "激流IIIのエンチャント本"),
+        },
+        "SR": {
+            "sr_swift_sneak": ("swift_sneak", 3, "スニーク速度上昇IIIのエンチャント本"),
+            "sr_soul_speed": ("soul_speed", 3, "ソウルスピードIIIのエンチャント本"),
+            "sr_density": ("density", 5, "重撃Vのエンチャント本"),
+            "sr_breach": ("breach", 4, "防具貫通IVのエンチャント本"),
+            "sr_lunge": ("lunge", 3, "突進IIIのエンチャント本"),
+        },
+        "SSR": {
+            "ssr_wind_burst": ("wind_burst", 3, "ウィンドバーストIIIのエンチャント本"),
+        },
+    }
+    expected = {
+        key: (tier, enchantment, level, item_name)
+        for tier, rewards in expected_by_tier.items()
+        for key, (enchantment, level, item_name) in rewards.items()
+    }
+    actual = {
+        reward.key: reward
+        for reward in ITEM_GACHA_REWARDS
+        if reward.item_spec.startswith("minecraft:enchanted_book[")
+    }
+
+    assert set(actual) == set(expected)
+    assert Counter(reward.tier for reward in actual.values()) == {
+        "N": 15,
+        "R": 20,
+        "SR": 5,
+        "SSR": 1,
+    }
+    for key, (tier, enchantment, level, item_name) in expected.items():
+        reward = actual[key]
+        assert reward.tier == tier
+        assert reward.item_spec == (
+            f"minecraft:enchanted_book[stored_enchantments={{{enchantment}:{level}}}]"
+        )
+        assert reward.item_name == item_name
+        assert reward.item_count == 1
+
+    assert all("binding_curse" not in reward.item_spec for reward in actual.values())
+    assert all("vanishing_curse" not in reward.item_spec for reward in actual.values())
+
+
 def test_reward_table_uses_current_nontrivial_rewards() -> None:
     item_ids = {reward.item_spec.split("[", 1)[0] for reward in ITEM_GACHA_REWARDS}
 
