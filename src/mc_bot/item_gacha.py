@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import secrets
@@ -15,6 +16,7 @@ if TYPE_CHECKING:
 
 _JST = ZoneInfo("Asia/Tokyo")
 _SAFE_PLAYER_NAME = re.compile(r"\.?[A-Za-z0-9_]{1,32}")
+ITEM_GACHA_COST_XP = 100
 
 
 @dataclass(frozen=True, slots=True)
@@ -331,7 +333,8 @@ def item_gacha_panel_embed() -> discord.Embed:
     embed = discord.Embed(
         title="🎁 Minecraft アイテムガチャ",
         description=(
-            "連携したMinecraftアカウントで参加中に、**1日1回**引けます。\n"
+            "連携したMinecraftアカウントで参加中に、"
+            f"**サーバーXP {ITEM_GACHA_COST_XP:,}**で1日1回引けます。\n"
             "何が出るかは受け取るまで秘密。景品はその場でMinecraftへ届きます。"
         ),
         color=discord.Color.gold(),
@@ -342,9 +345,9 @@ def item_gacha_panel_embed() -> discord.Embed:
         inline=False,
     )
     embed.add_field(
-        name="更新と通知",
+        name="料金・更新・通知",
         value=(
-            "毎日 **日本時間0:00** に更新します。\n"
+            f"1回 **{ITEM_GACHA_COST_XP:,} XP**・毎日 **日本時間0:00** に更新します。\n"
             "Nを含むすべての結果をMinecraft内チャットとDiscordログへ通知します。\n"
             "インベントリに入らない分は足元へドロップします。"
         ),
@@ -371,12 +374,72 @@ class MinecraftItemGachaPanelView(discord.ui.View):
     )
     async def draw(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if await self.bot.validate_item_gacha_panel(interaction):
-            await self.bot.draw_minecraft_item_gacha(interaction)
+            await self.bot.show_minecraft_item_gacha_confirmation(interaction)
+
+
+class MinecraftItemGachaConfirmView(discord.ui.View):
+    def __init__(
+        self,
+        bot: MinecraftDiscordBot,
+        *,
+        owner_id: int,
+        cost_xp: int,
+        affordable: bool,
+    ) -> None:
+        super().__init__(timeout=180)
+        self.bot = bot
+        self.owner_id = owner_id
+        self.cost_xp = cost_xp
+        self._operation_lock = asyncio.Lock()
+        self._completed = False
+        self.confirm.label = f"{cost_xp:,} XPで引く"
+        if not affordable:
+            self.confirm.disabled = True
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id == self.owner_id:
+            return True
+        await interaction.response.send_message(
+            "このガチャを操作できるのは本人だけです。", ephemeral=True
+        )
+        return False
+
+    @discord.ui.button(label="XPで引く", emoji="🎁", style=discord.ButtonStyle.primary)
+    async def confirm(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if self._operation_lock.locked() or self._completed:
+            await interaction.response.send_message(
+                "この抽選は処理中または処理済みです。", ephemeral=True
+            )
+            return
+        async with self._operation_lock:
+            self._completed = True
+            for child in self.children:
+                child.disabled = True
+            await interaction.response.edit_message(view=self)
+            await self.bot.draw_minecraft_item_gacha(
+                interaction,
+                expected_cost_xp=self.cost_xp,
+                response_ready=True,
+            )
+
+    @discord.ui.button(label="キャンセル", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if self._operation_lock.locked():
+            await interaction.response.send_message(
+                "抽選処理中のためキャンセルできません。", ephemeral=True
+            )
+            return
+        self._completed = True
+        await interaction.response.edit_message(
+            content="アイテムガチャをキャンセルしました。", embed=None, view=None
+        )
 
 
 __all__ = [
+    "ITEM_GACHA_COST_XP",
     "ITEM_GACHA_REWARDS",
     "ItemGachaReward",
+    "MinecraftItemGachaConfirmView",
     "MinecraftItemGachaPanelView",
     "draw_item_gacha_reward",
     "get_item_gacha_reward",

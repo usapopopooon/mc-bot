@@ -61,6 +61,37 @@ class _FakeSession:
         return _FakeResponse()
 
 
+class _FakeItemGachaResponse:
+    def __init__(self, payload: dict[str, object] | None = None, *, status: int = 200) -> None:
+        self.payload = payload or {}
+        self.status = status
+
+    async def __aenter__(self) -> _FakeItemGachaResponse:
+        return self
+
+    async def __aexit__(self, *_args: object) -> None:
+        return None
+
+    async def json(self) -> dict[str, object]:
+        return self.payload
+
+    async def text(self) -> str:
+        return ""
+
+
+class _FakeItemGachaSession:
+    closed = False
+
+    def __init__(self, payload: dict[str, object] | None = None) -> None:
+        self.payload = payload
+        self.calls: list[dict[str, Any]] = []
+
+    def post(self, url: str, **kwargs: Any) -> _FakeItemGachaResponse:
+        self.calls.append({"method": "POST", "url": url, **kwargs})
+        status = 204 if url.endswith(("/complete", "/cancel")) else 200
+        return _FakeItemGachaResponse(self.payload, status=status)
+
+
 def test_parses_level_up_and_xp_exchange_api_events() -> None:
     level_up = LevelBotXpClient._parse_level_up_event(
         {
@@ -155,6 +186,81 @@ def test_exchange_request_sends_idempotency_id_and_expected_rate() -> None:
             "cost_xp": 10,
             "expected_reward_xp": 50,
         }
+
+    asyncio.run(exercise())
+
+
+def test_parses_item_gacha_offer_and_spend() -> None:
+    offer = LevelBotXpClient._parse_item_gacha_offer(
+        {
+            "cost_xp": 100,
+            "wallet": {"total_xp": 250, "spent_xp": 50, "available_xp": 200},
+        }
+    )
+    spend = LevelBotXpClient._parse_item_gacha_spend_request(
+        {
+            "status": "reserved",
+            "message": "予約しました。",
+            "cost_xp": 100,
+            "wallet_before": {
+                "total_xp": 250,
+                "spent_xp": 50,
+                "available_xp": 200,
+            },
+            "wallet_after": {
+                "total_xp": 250,
+                "spent_xp": 150,
+                "available_xp": 100,
+            },
+        }
+    )
+
+    assert offer.cost_xp == 100
+    assert offer.wallet.available_xp == 200
+    assert spend.status == "reserved"
+    assert spend.wallet_after.available_xp == 100
+
+
+def test_item_gacha_spend_uses_draw_id_and_account_binding() -> None:
+    payload: dict[str, object] = {
+        "status": "reserved",
+        "message": "予約しました。",
+        "cost_xp": 100,
+        "wallet_before": {"total_xp": 200, "spent_xp": 0, "available_xp": 200},
+        "wallet_after": {"total_xp": 200, "spent_xp": 100, "available_xp": 100},
+    }
+
+    async def exercise() -> None:
+        client = LevelBotXpClient("https://levels.example.test", "secret")
+        session = _FakeItemGachaSession(payload)
+        client._session = session  # type: ignore[assignment]
+
+        result = await client.request_item_gacha_spend(
+            guild_id=1001,
+            user_id=2001,
+            request_id="00000000-0000-4000-8000-000000000021",
+            account_id=7,
+            draw_day="2026-08-15",
+            expected_cost_xp=100,
+        )
+        completed = await client.update_item_gacha_spend(
+            request_id="00000000-0000-4000-8000-000000000021",
+            guild_id=1001,
+            user_id=2001,
+            action="complete",
+        )
+
+        assert result is not None and result.status == "reserved"
+        assert completed
+        assert session.calls[0]["json"] == {
+            "request_id": "00000000-0000-4000-8000-000000000021",
+            "guild_id": "1001",
+            "user_id": "2001",
+            "minecraft_account_id": "mc-bot:7",
+            "draw_day": "2026-08-15",
+            "expected_cost_xp": 100,
+        }
+        assert session.calls[1]["json"] == {"guild_id": "1001", "user_id": "2001"}
 
     asyncio.run(exercise())
 

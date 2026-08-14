@@ -125,6 +125,21 @@ class MinecraftResourceExchangeEvent:
     status: str
 
 
+@dataclass(frozen=True, slots=True)
+class MinecraftItemGachaOffer:
+    cost_xp: int
+    wallet: MinecraftXpWallet
+
+
+@dataclass(frozen=True, slots=True)
+class MinecraftItemGachaSpendRequest:
+    status: str
+    message: str
+    cost_xp: int
+    wallet_before: MinecraftXpWallet
+    wallet_after: MinecraftXpWallet
+
+
 def parse_experience_query(response: str, unit: str) -> int:
     """``experience query`` の英語RCON応答から値を取り出す。"""
     match = _QUERY_RESULT.search(response)
@@ -582,6 +597,37 @@ class LevelBotXpClient:
             LOGGER.warning("Could not fetch resource shop from level-bot: %s", error)
             return None
 
+    async def fetch_item_gacha_offer(
+        self, guild_id: int, user_id: int
+    ) -> MinecraftItemGachaOffer | None:
+        if not self._token:
+            return None
+        session = self._require_session()
+        try:
+            async with session.get(
+                f"{self._base_url}/api/v1/integrations/minecraft/item-gacha",
+                headers={"Authorization": f"Bearer {self._token}"},
+                params={"guild_id": str(guild_id), "user_id": str(user_id)},
+            ) as response:
+                if response.status != 200:
+                    body = await response.text()
+                    LOGGER.warning(
+                        "level-bot item gacha fetch rejected status=%d body=%s",
+                        response.status,
+                        body[:300],
+                    )
+                    return None
+                return self._parse_item_gacha_offer(await response.json())
+        except (
+            aiohttp.ClientError,
+            TimeoutError,
+            KeyError,
+            TypeError,
+            ValueError,
+        ) as error:
+            LOGGER.warning("Could not fetch item gacha from level-bot: %s", error)
+            return None
+
     async def request_xp_exchange(
         self,
         guild_id: int,
@@ -667,6 +713,51 @@ class LevelBotXpClient:
             ValueError,
         ) as error:
             LOGGER.warning("Could not request resource exchange from level-bot: %s", error)
+            return None
+
+    async def request_item_gacha_spend(
+        self,
+        *,
+        guild_id: int,
+        user_id: int,
+        request_id: str,
+        account_id: int,
+        draw_day: str,
+        expected_cost_xp: int,
+    ) -> MinecraftItemGachaSpendRequest | None:
+        if not self._token:
+            return None
+        session = self._require_session()
+        try:
+            async with session.post(
+                f"{self._base_url}/api/v1/integrations/minecraft/item-gacha/spends",
+                headers={"Authorization": f"Bearer {self._token}"},
+                json={
+                    "request_id": request_id,
+                    "guild_id": str(guild_id),
+                    "user_id": str(user_id),
+                    "minecraft_account_id": f"mc-bot:{account_id}",
+                    "draw_day": draw_day,
+                    "expected_cost_xp": expected_cost_xp,
+                },
+            ) as response:
+                if response.status != 200:
+                    body = await response.text()
+                    LOGGER.warning(
+                        "level-bot item gacha spend rejected status=%d body=%s",
+                        response.status,
+                        body[:300],
+                    )
+                    return None
+                return self._parse_item_gacha_spend_request(await response.json())
+        except (
+            aiohttp.ClientError,
+            TimeoutError,
+            KeyError,
+            TypeError,
+            ValueError,
+        ) as error:
+            LOGGER.warning("Could not request item gacha spend from level-bot: %s", error)
             return None
 
     async def update_xp_exchange(
@@ -762,6 +853,37 @@ class LevelBotXpClient:
                 )
         except (aiohttp.ClientError, TimeoutError) as error:
             LOGGER.warning("Could not %s resource exchange: %s", action, error)
+        return False
+
+    async def update_item_gacha_spend(
+        self,
+        *,
+        request_id: str,
+        guild_id: int,
+        user_id: int,
+        action: str,
+    ) -> bool:
+        if action not in {"complete", "cancel"} or not self._token:
+            return False
+        session = self._require_session()
+        try:
+            async with session.post(
+                f"{self._base_url}/api/v1/integrations/minecraft/"
+                f"item-gacha/spends/{request_id}/{action}",
+                headers={"Authorization": f"Bearer {self._token}"},
+                json={"guild_id": str(guild_id), "user_id": str(user_id)},
+            ) as response:
+                if response.status == 204:
+                    return True
+                body = await response.text()
+                LOGGER.warning(
+                    "level-bot item gacha spend %s rejected status=%d body=%s",
+                    action,
+                    response.status,
+                    body[:300],
+                )
+        except (aiohttp.ClientError, TimeoutError) as error:
+            LOGGER.warning("Could not %s item gacha spend: %s", action, error)
         return False
 
     def _require_session(self) -> aiohttp.ClientSession:
@@ -949,3 +1071,39 @@ class LevelBotXpClient:
         ):
             raise ValueError("resource exchange event contains invalid values")
         return event
+
+    @classmethod
+    def _parse_item_gacha_offer(cls, item: object) -> MinecraftItemGachaOffer:
+        if not isinstance(item, dict):
+            raise ValueError("item gacha offer must be an object")
+        offer = MinecraftItemGachaOffer(
+            cost_xp=int(item["cost_xp"]),
+            wallet=cls._parse_wallet(item["wallet"]),
+        )
+        if offer.cost_xp <= 0:
+            raise ValueError("item gacha offer has invalid cost")
+        return offer
+
+    @classmethod
+    def _parse_item_gacha_spend_request(cls, item: object) -> MinecraftItemGachaSpendRequest:
+        if not isinstance(item, dict):
+            raise ValueError("item gacha spend must be an object")
+        status = str(item["status"])
+        if status not in {
+            "reserved",
+            "completed",
+            "offline",
+            "insufficient_xp",
+            "unavailable",
+        }:
+            raise ValueError("item gacha spend has invalid status")
+        result = MinecraftItemGachaSpendRequest(
+            status=status,
+            message=str(item["message"]),
+            cost_xp=int(item["cost_xp"]),
+            wallet_before=cls._parse_wallet(item["wallet_before"]),
+            wallet_after=cls._parse_wallet(item["wallet_after"]),
+        )
+        if result.cost_xp <= 0:
+            raise ValueError("item gacha spend has invalid cost")
+        return result

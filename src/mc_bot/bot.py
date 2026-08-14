@@ -70,6 +70,8 @@ from mc_bot.formatting import (
     format_xp_exchange,
 )
 from mc_bot.item_gacha import (
+    ITEM_GACHA_COST_XP,
+    MinecraftItemGachaConfirmView,
     MinecraftItemGachaPanelView,
     draw_item_gacha_reward,
     get_item_gacha_reward,
@@ -1129,13 +1131,103 @@ class MinecraftDiscordBot(discord.Client):
             return False
         return True
 
-    async def draw_minecraft_item_gacha(self, interaction: discord.Interaction) -> None:
+    async def show_minecraft_item_gacha_confirmation(
+        self, interaction: discord.Interaction
+    ) -> None:
         if interaction.guild_id is None:
             await interaction.response.send_message(
                 "Discordサーバー内で利用してください。", ephemeral=True
             )
             return
         await interaction.response.defer(ephemeral=True, thinking=True)
+        try:
+            account, reason = await self._online_exchange_account(interaction.user.id)
+        except (OSError, RconError, RuntimeError, ValueError) as error:
+            LOGGER.warning("Could not verify player for item gacha preview: %s", error)
+            await interaction.followup.send(
+                "Minecraftサーバーへの参加状況を確認できませんでした。"
+                "少し待ってから再度お試しください。",
+                ephemeral=True,
+            )
+            return
+        if account is None:
+            message = (
+                "連携したMinecraftアカウントが複数同時にオンラインです。"
+                "受取先にする1アカウントだけで参加してから再度お試しください。"
+                if reason == "account_ambiguous"
+                else "連携したMinecraftアカウントでサーバーに参加してからご利用ください。"
+            )
+            await interaction.followup.send(message, ephemeral=True)
+            return
+
+        offer = await self._level_bot_xp.fetch_item_gacha_offer(
+            interaction.guild_id, interaction.user.id
+        )
+        if offer is None or offer.cost_xp != ITEM_GACHA_COST_XP:
+            await interaction.followup.send(
+                "ガチャのXP残高または価格を確認できませんでした。"
+                "少し待ってから再度お試しください。",
+                ephemeral=True,
+            )
+            return
+        affordable = offer.wallet.available_xp >= offer.cost_xp
+        embed = discord.Embed(
+            title="アイテムガチャの確認",
+            description=(
+                f"サーバーXP **{offer.cost_xp:,} XP**を使って、"
+                "本日のアイテムガチャを1回引きます。\n"
+                "景品の内容は確定するまで秘密です。"
+            ),
+            color=discord.Color.gold(),
+        )
+        embed.add_field(
+            name="現在のXP",
+            value=f"{offer.wallet.available_xp:,} XP",
+            inline=True,
+        )
+        embed.add_field(
+            name="抽選後",
+            value=(
+                f"{offer.wallet.available_xp - offer.cost_xp:,} XP"
+                if affordable
+                else "XPが不足しています"
+            ),
+            inline=True,
+        )
+        embed.add_field(
+            name="受け取り",
+            value=(
+                "Minecraftが景品の配布を明確に拒否した場合、XP予約を取り消します。"
+                "通信断で成否を確認できない場合は、二重配布防止のため管理者確認になります。"
+            ),
+            inline=False,
+        )
+        await interaction.followup.send(
+            embed=embed,
+            view=MinecraftItemGachaConfirmView(
+                self,
+                owner_id=interaction.user.id,
+                cost_xp=offer.cost_xp,
+                affordable=affordable,
+            ),
+            ephemeral=True,
+        )
+
+    async def draw_minecraft_item_gacha(
+        self,
+        interaction: discord.Interaction,
+        *,
+        expected_cost_xp: int = ITEM_GACHA_COST_XP,
+        response_ready: bool = False,
+    ) -> None:
+        if interaction.guild_id is None:
+            sender = (
+                interaction.followup.send if response_ready else interaction.response.send_message
+            )
+            await sender("Discordサーバー内で利用してください。", ephemeral=True)
+            return
+        if not response_ready:
+            await interaction.response.defer(ephemeral=True, thinking=True)
         async with self._item_gacha_lock:
             try:
                 account, reason = await self._online_exchange_account(interaction.user.id)
@@ -1182,13 +1274,34 @@ class MinecraftDiscordBot(discord.Client):
                 )
                 return
 
+            if created:
+                # ``reserved`` はRCON送信直前以降の不確定区間だけに使う。
+                # XP API待ちの間に停止しても、安全に同じ抽選を再開できるようにする。
+                await asyncio.to_thread(
+                    self._accounts.mark_minecraft_item_gacha_status,
+                    draw.draw_id,
+                    "retryable",
+                )
+
             if draw.status == "delivered":
+                await self._level_bot_xp.update_item_gacha_spend(
+                    request_id=draw.draw_id,
+                    guild_id=interaction.guild_id,
+                    user_id=interaction.user.id,
+                    action="complete",
+                )
                 await interaction.followup.send(
                     self._item_gacha_received_text(draw, already=True),
                     ephemeral=True,
                 )
                 return
             if draw.status == "ambiguous":
+                await self._level_bot_xp.update_item_gacha_spend(
+                    request_id=draw.draw_id,
+                    guild_id=interaction.guild_id,
+                    user_id=interaction.user.id,
+                    action="complete",
+                )
                 await interaction.followup.send(
                     "本日の抽選は処理済みですが、景品の配布結果を確認できませんでした。"
                     "二重配布を避けるため再抽選は行いません。管理者へご連絡ください。",
@@ -1234,32 +1347,90 @@ class MinecraftDiscordBot(discord.Client):
                     draw.draw_id,
                     "ambiguous",
                 )
+                await self._level_bot_xp.update_item_gacha_spend(
+                    request_id=draw.draw_id,
+                    guild_id=interaction.guild_id,
+                    user_id=interaction.user.id,
+                    action="complete",
+                )
                 await interaction.followup.send(
                     "本日の抽選は処理済みですが、景品の配布結果を確認できませんでした。"
                     "二重配布を避けるため再抽選は行いません。管理者へご連絡ください。",
                     ephemeral=True,
                 )
                 return
-            if draw.status == "retryable":
+            spend = await self._level_bot_xp.request_item_gacha_spend(
+                guild_id=interaction.guild_id,
+                user_id=interaction.user.id,
+                request_id=draw.draw_id,
+                account_id=draw.account_id,
+                draw_day=draw.draw_day,
+                expected_cost_xp=expected_cost_xp,
+            )
+            if spend is None:
                 await asyncio.to_thread(
                     self._accounts.mark_minecraft_item_gacha_status,
                     draw.draw_id,
-                    "reserved",
+                    "retryable",
                 )
+                await interaction.followup.send(
+                    "XP決済を確認できなかったため、景品は配布していません。"
+                    "少し待ってからパネルより再度お試しください。",
+                    ephemeral=True,
+                )
+                return
+            if spend.status != "reserved":
+                if spend.status == "completed":
+                    await asyncio.to_thread(
+                        self._accounts.mark_minecraft_item_gacha_status,
+                        draw.draw_id,
+                        "reserved",
+                    )
+                    await asyncio.to_thread(
+                        self._accounts.mark_minecraft_item_gacha_status,
+                        draw.draw_id,
+                        "ambiguous",
+                    )
+                    message = (
+                        "XP決済は確定済みですが、景品の配布状態を安全に確認できません。"
+                        "二重配布を避けるため管理者へご連絡ください。"
+                    )
+                else:
+                    await asyncio.to_thread(
+                        self._accounts.mark_minecraft_item_gacha_status,
+                        draw.draw_id,
+                        "retryable",
+                    )
+                    message = spend.message
+                await interaction.followup.send(message, ephemeral=True)
+                return
+
+            await asyncio.to_thread(
+                self._accounts.mark_minecraft_item_gacha_status,
+                draw.draw_id,
+                "reserved",
+            )
 
             try:
                 await self._execute_checked_rcon(
                     item_gacha_give_command(draw.player_name, draw.reward_key)
                 )
             except ValueError as error:
+                cancelled = await self._level_bot_xp.update_item_gacha_spend(
+                    request_id=draw.draw_id,
+                    guild_id=interaction.guild_id,
+                    user_id=interaction.user.id,
+                    action="cancel",
+                )
                 await asyncio.to_thread(
                     self._accounts.mark_minecraft_item_gacha_status,
                     draw.draw_id,
                     "retryable",
                 )
                 LOGGER.warning(
-                    "Minecraft rejected item gacha delivery draw=%s: %s",
+                    "Minecraft rejected item gacha delivery draw=%s refund=%s: %s",
                     draw.draw_id,
+                    cancelled,
                     error,
                 )
                 await interaction.followup.send(
@@ -1279,6 +1450,12 @@ class MinecraftDiscordBot(discord.Client):
                     draw.draw_id,
                     error,
                 )
+                await self._level_bot_xp.update_item_gacha_spend(
+                    request_id=draw.draw_id,
+                    guild_id=interaction.guild_id,
+                    user_id=interaction.user.id,
+                    action="complete",
+                )
                 await interaction.followup.send(
                     "景品の配布結果を確認できませんでした。二重配布を避けるため"
                     "再抽選は行いません。アイテム欄を確認し、見当たらなければ管理者へ"
@@ -1292,6 +1469,17 @@ class MinecraftDiscordBot(discord.Client):
                 draw.draw_id,
                 "delivered",
             )
+            completed = await self._level_bot_xp.update_item_gacha_spend(
+                request_id=draw.draw_id,
+                guild_id=interaction.guild_id,
+                user_id=interaction.user.id,
+                action="complete",
+            )
+            if not completed:
+                LOGGER.warning(
+                    "Could not finalize item gacha XP spend draw=%s",
+                    draw.draw_id,
+                )
             await self._flush_minecraft_item_gacha_notifications(interaction.guild_id)
             await interaction.followup.send(
                 self._item_gacha_received_text(draw, already=False),
@@ -1317,6 +1505,7 @@ class MinecraftDiscordBot(discord.Client):
         return (
             f"{prefix}: **【{item_gacha_tier_label(draw.tier)}】"
             f"{discord.utils.escape_markdown(draw.item_name)} x{draw.item_count}**"
+            f" / サーバーXP **{ITEM_GACHA_COST_XP:,}**消費"
         )
 
     async def show_minecraft_resource_shop(self, interaction: discord.Interaction) -> None:
