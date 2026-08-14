@@ -396,6 +396,7 @@ def test_registers_manager_only_configuration_commands() -> None:
         "admin-panel",
         "approval",
         "channel",
+        "item-gacha-panel",
         "panel",
         "player-count",
         "resource-panel",

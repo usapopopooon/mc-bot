@@ -82,6 +82,59 @@ def test_whitelist_retry_migration_preserves_existing_accounts(tmp_path) -> None
     assert tuple(row) == ("Steve", "pending_add", 0, None)
 
 
+def test_item_gacha_notification_retry_migration_preserves_existing_draws(tmp_path) -> None:
+    database = tmp_path / "accounts.db"
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            """
+            CREATE TABLE minecraft_item_gacha_draws (
+                draw_id TEXT PRIMARY KEY,
+                guild_id INTEGER NOT NULL,
+                discord_user_id INTEGER NOT NULL,
+                account_id INTEGER NOT NULL,
+                player_name TEXT NOT NULL,
+                draw_day TEXT NOT NULL,
+                tier TEXT NOT NULL,
+                reward_key TEXT NOT NULL,
+                item_spec TEXT NOT NULL,
+                item_name TEXT NOT NULL,
+                item_count INTEGER NOT NULL,
+                status TEXT NOT NULL,
+                minecraft_notified INTEGER NOT NULL DEFAULT 0,
+                discord_notified INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(guild_id, discord_user_id, draw_day)
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO minecraft_item_gacha_draws (
+                draw_id, guild_id, discord_user_id, account_id, player_name,
+                draw_day, tier, reward_key, item_spec, item_name, item_count,
+                status, created_at, updated_at
+            ) VALUES (
+                'old-draw', 456, 123, 1, 'Steve', '2026-08-14', 'N',
+                'n_iron', 'minecraft:iron_ingot', '鉄インゴット', 24,
+                'delivered', 'old', 'old'
+            )
+            """
+        )
+
+    AccountStore(database).initialize()
+
+    with sqlite3.connect(database) as connection:
+        row = connection.execute(
+            """
+            SELECT draw_id, minecraft_notification_attempts,
+                   discord_notification_attempts
+            FROM minecraft_item_gacha_draws
+            """
+        ).fetchone()
+    assert row == ("old-draw", 0, 0)
+
+
 def test_whitelist_retry_failures_persist_and_stop_at_limit(tmp_path) -> None:
     store = AccountStore(tmp_path / "accounts.db")
     store.initialize()

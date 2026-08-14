@@ -6,7 +6,7 @@ import re
 import time
 import uuid
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from urllib.parse import quote
 
@@ -15,10 +15,12 @@ import discord
 from discord import app_commands
 
 from mc_bot.accounts import (
+    ITEM_GACHA_NOTIFICATION_RETRY_LIMIT,
     WHITELIST_RETRY_LIMIT,
     AccountStore,
     FishingComboRewardEvent,
     MinecraftAccount,
+    MinecraftItemGachaDraw,
     WoodcuttingComboRewardEvent,
 )
 from mc_bot.activity import ActivityKind, MinecraftActivityEvent, parse_activity_event
@@ -66,6 +68,17 @@ from mc_bot.formatting import (
     format_voice_bonus_started,
     format_woodcutting_combo_milestone,
     format_xp_exchange,
+)
+from mc_bot.item_gacha import (
+    MinecraftItemGachaPanelView,
+    draw_item_gacha_reward,
+    get_item_gacha_reward,
+    item_gacha_day,
+    item_gacha_give_command,
+    item_gacha_panel_embed,
+    item_gacha_result_embed,
+    item_gacha_tellraw_command,
+    item_gacha_tier_label,
 )
 from mc_bot.player_count import (
     PLAYER_COUNT_CHANNEL_NAME,
@@ -208,6 +221,8 @@ class MinecraftDiscordBot(discord.Client):
         self._voice_bonus_lock = asyncio.Lock()
         self._minecraft_xp_observation_lock = asyncio.Lock()
         self._activity_delivery_lock = asyncio.Lock()
+        self._item_gacha_lock = asyncio.Lock()
+        self._item_gacha_notification_lock = asyncio.Lock()
         self._online_player_names: set[str] = set()
         self._voice_bonus_active_users: set[int] = set()
         self._voice_bonus_initialized_users: set[int] = set()
@@ -260,6 +275,10 @@ class MinecraftDiscordBot(discord.Client):
             description="Minecraft 資源交換所パネルを設置します",
         )(self._configure_resource_shop_panel)
         group.command(
+            name="item-gacha-panel",
+            description="1日1回のMinecraftアイテムガチャパネルを設置します",
+        )(self._configure_item_gacha_panel)
+        group.command(
             name="show",
             description="現在のBot設定と稼働状態を表示します",
         )(self._show_configuration)
@@ -276,6 +295,7 @@ class MinecraftDiscordBot(discord.Client):
         self.add_view(AdminPanelView(self))
         self.add_view(MinecraftXpShopPanelView(self))
         self.add_view(MinecraftResourceShopPanelView(self))
+        self.add_view(MinecraftItemGachaPanelView(self))
         for account in await asyncio.to_thread(self._accounts.list_pending_approvals):
             if account.approval_message_id is not None:
                 self.add_view(
@@ -294,6 +314,7 @@ class MinecraftDiscordBot(discord.Client):
         await self._refresh_admin_panel()
         await self._refresh_xp_shop_panel()
         await self._refresh_resource_shop_panel()
+        await self._refresh_item_gacha_panel()
         channel_id = self._settings.channel_id
         if channel_id is None:
             self._channel = None
@@ -322,6 +343,11 @@ class MinecraftDiscordBot(discord.Client):
         await self._refresh_online_player_cache()
         self._ensure_minecraft_xp_started()
         self._ensure_activity_delivery_started()
+        if self._settings.guild_id is not None:
+            try:
+                await self._recover_minecraft_item_gacha_notifications(self._settings.guild_id)
+            except (OSError, RuntimeError, ValueError) as error:
+                LOGGER.warning("Could not restore item gacha notifications: %s", error)
 
         LOGGER.info(
             "Discord connected as %s; loaded %d advancement translations",
@@ -663,6 +689,70 @@ class MinecraftDiscordBot(discord.Client):
             allowed_mentions=discord.AllowedMentions.none(),
         )
 
+    @app_commands.describe(channel="アイテムガチャパネルの投稿先。省略時は現在のチャンネル")
+    async def _configure_item_gacha_panel(
+        self,
+        interaction: discord.Interaction,
+        channel: discord.TextChannel | None = None,
+    ) -> None:
+        if not await self._require_server_manager(interaction):
+            return
+        target = channel or interaction.channel
+        if not isinstance(target, discord.TextChannel):
+            await interaction.response.send_message(
+                "パネルの投稿先にはテキストチャンネルを指定してください。",
+                ephemeral=True,
+            )
+            return
+        await interaction.response.defer(ephemeral=True)
+        try:
+            self._ensure_same_guild(target.guild.id)
+            self._require_rcon()
+            if self._settings.channel_id is None:
+                raise RuntimeError("先に /mc-config channel でログ通知先を設定してください")
+            await self._resolve_and_validate_channel(target.id, require_embeds=True)
+            await self._resolve_and_validate_channel(
+                self._settings.channel_id,
+                require_embeds=True,
+            )
+            old_channel_id = self._settings.item_gacha_panel_channel_id
+            old_message_id = self._settings.item_gacha_panel_message_id
+            message: discord.Message | None = None
+            if old_channel_id == target.id and old_message_id is not None:
+                try:
+                    message = await target.fetch_message(old_message_id)
+                    await message.edit(
+                        embed=item_gacha_panel_embed(),
+                        view=MinecraftItemGachaPanelView(self),
+                        allowed_mentions=discord.AllowedMentions.none(),
+                    )
+                except discord.NotFound:
+                    message = None
+            if message is None:
+                message = await target.send(
+                    embed=item_gacha_panel_embed(),
+                    view=MinecraftItemGachaPanelView(self),
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+                await self._disable_old_panel(old_channel_id, old_message_id)
+            await self._save_settings(
+                replace(
+                    self._settings,
+                    guild_id=target.guild.id,
+                    item_gacha_panel_channel_id=target.id,
+                    item_gacha_panel_message_id=message.id,
+                )
+            )
+        except (OSError, RuntimeError, discord.DiscordException) as error:
+            LOGGER.warning("Could not configure Minecraft item gacha panel: %s", error)
+            await interaction.followup.send(f"設置できませんでした: {error}", ephemeral=True)
+            return
+        await interaction.followup.send(
+            f"Minecraftアイテムガチャパネルを {target.mention} に設置しました。",
+            ephemeral=True,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
     @app_commands.describe(
         mode="自動承認または管理者承認",
         channel="管理者承認時に申請を投稿するチャンネル",
@@ -804,6 +894,8 @@ class MinecraftDiscordBot(discord.Client):
                     f"{self._channel_text(self._settings.xp_shop_panel_channel_id)}",
                     "資源交換所パネル: "
                     f"{self._channel_text(self._settings.resource_shop_panel_channel_id)}",
+                    "アイテムガチャパネル: "
+                    f"{self._channel_text(self._settings.item_gacha_panel_channel_id)}",
                     f"承認方式: {mode}",
                     f"申請確認先: {self._channel_text(self._settings.approval_channel_id)}",
                     "人数表示: "
@@ -1014,6 +1106,218 @@ class MinecraftDiscordBot(discord.Client):
             )
             return False
         return True
+
+    async def validate_item_gacha_panel(self, interaction: discord.Interaction) -> bool:
+        if (
+            interaction.message is None
+            or interaction.message.id != self._settings.item_gacha_panel_message_id
+        ):
+            await interaction.response.send_message(
+                "このパネルは現在使用されていません。最新のパネルをご利用ください。",
+                ephemeral=True,
+            )
+            return False
+        if interaction.guild_id != self._settings.guild_id:
+            await interaction.response.send_message(
+                "このDiscordサーバーでは利用できません。", ephemeral=True
+            )
+            return False
+        if not isinstance(interaction.user, discord.Member) or interaction.user.bot:
+            await interaction.response.send_message(
+                "Discordサーバーのメンバーだけが利用できます。", ephemeral=True
+            )
+            return False
+        return True
+
+    async def draw_minecraft_item_gacha(self, interaction: discord.Interaction) -> None:
+        if interaction.guild_id is None:
+            await interaction.response.send_message(
+                "Discordサーバー内で利用してください。", ephemeral=True
+            )
+            return
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        async with self._item_gacha_lock:
+            try:
+                account, reason = await self._online_exchange_account(interaction.user.id)
+            except (OSError, RconError, RuntimeError, ValueError) as error:
+                LOGGER.warning("Could not verify player for item gacha: %s", error)
+                await interaction.followup.send(
+                    "Minecraftサーバーへの参加状況を確認できませんでした。"
+                    "少し待ってから再度お試しください。",
+                    ephemeral=True,
+                )
+                return
+            if account is None:
+                message = (
+                    "連携したMinecraftアカウントが複数同時にオンラインです。"
+                    "受取先にする1アカウントだけで参加してから再度お試しください。"
+                    if reason == "account_ambiguous"
+                    else "連携したMinecraftアカウントでサーバーに参加してからご利用ください。"
+                )
+                await interaction.followup.send(message, ephemeral=True)
+                return
+
+            reward = draw_item_gacha_reward()
+            draw_day = item_gacha_day(datetime.now(UTC))
+            try:
+                draw, created = await asyncio.to_thread(
+                    self._accounts.reserve_minecraft_item_gacha_draw,
+                    draw_id=str(uuid.uuid4()),
+                    guild_id=interaction.guild_id,
+                    discord_user_id=interaction.user.id,
+                    account_id=account.id,
+                    player_name=account.server_player_name,
+                    draw_day=draw_day,
+                    tier=reward.tier,
+                    reward_key=reward.key,
+                    item_spec=reward.item_spec,
+                    item_name=reward.item_name,
+                    item_count=reward.item_count,
+                )
+            except (OSError, RuntimeError, ValueError) as error:
+                LOGGER.error("Could not reserve Minecraft item gacha draw: %s", error)
+                await interaction.followup.send(
+                    "抽選を開始できませんでした。少し待ってから再度お試しください。",
+                    ephemeral=True,
+                )
+                return
+
+            if draw.status == "delivered":
+                await interaction.followup.send(
+                    self._item_gacha_received_text(draw, already=True),
+                    ephemeral=True,
+                )
+                return
+            if draw.status == "ambiguous":
+                await interaction.followup.send(
+                    "本日の抽選は処理済みですが、景品の配布結果を確認できませんでした。"
+                    "二重配布を避けるため再抽選は行いません。管理者へご連絡ください。",
+                    ephemeral=True,
+                )
+                return
+            if draw.account_id != account.id:
+                await interaction.followup.send(
+                    f"本日の景品は **{discord.utils.escape_markdown(draw.player_name)}** さん宛てに"
+                    "確定しています。そのアカウントで参加してから再度お試しください。",
+                    ephemeral=True,
+                )
+                return
+            if not self._item_gacha_draw_matches_catalog(draw):
+                if draw.status == "retryable":
+                    await asyncio.to_thread(
+                        self._accounts.mark_minecraft_item_gacha_status,
+                        draw.draw_id,
+                        "reserved",
+                    )
+                await asyncio.to_thread(
+                    self._accounts.mark_minecraft_item_gacha_status,
+                    draw.draw_id,
+                    "ambiguous",
+                )
+                LOGGER.error("Minecraft item gacha catalog changed for draw=%s", draw.draw_id)
+                await interaction.followup.send(
+                    "本日の景品データを安全に確認できませんでした。管理者へご連絡ください。",
+                    ephemeral=True,
+                )
+                return
+            if not created and draw.status == "reserved":
+                updated_at = datetime.fromisoformat(draw.updated_at)
+                if datetime.now(UTC) - updated_at < timedelta(seconds=60):
+                    await interaction.followup.send(
+                        "本日の抽選を処理中です。少し待ってから結果をご確認ください。",
+                        ephemeral=True,
+                    )
+                    return
+                # 前回プロセスが付与前後に停止した可能性があり、安全な再送判定ができない。
+                await asyncio.to_thread(
+                    self._accounts.mark_minecraft_item_gacha_status,
+                    draw.draw_id,
+                    "ambiguous",
+                )
+                await interaction.followup.send(
+                    "本日の抽選は処理済みですが、景品の配布結果を確認できませんでした。"
+                    "二重配布を避けるため再抽選は行いません。管理者へご連絡ください。",
+                    ephemeral=True,
+                )
+                return
+            if draw.status == "retryable":
+                await asyncio.to_thread(
+                    self._accounts.mark_minecraft_item_gacha_status,
+                    draw.draw_id,
+                    "reserved",
+                )
+
+            try:
+                await self._execute_checked_rcon(
+                    item_gacha_give_command(draw.player_name, draw.reward_key)
+                )
+            except ValueError as error:
+                await asyncio.to_thread(
+                    self._accounts.mark_minecraft_item_gacha_status,
+                    draw.draw_id,
+                    "retryable",
+                )
+                LOGGER.warning(
+                    "Minecraft rejected item gacha delivery draw=%s: %s",
+                    draw.draw_id,
+                    error,
+                )
+                await interaction.followup.send(
+                    "景品は確定しましたが、Minecraftが配布を受け付けませんでした。"
+                    "本日の同じ景品で再試行できます。少し待ってからもう一度押してください。",
+                    ephemeral=True,
+                )
+                return
+            except (OSError, RconError, RuntimeError) as error:
+                await asyncio.to_thread(
+                    self._accounts.mark_minecraft_item_gacha_status,
+                    draw.draw_id,
+                    "ambiguous",
+                )
+                LOGGER.warning(
+                    "Minecraft item gacha delivery became ambiguous draw=%s: %s",
+                    draw.draw_id,
+                    error,
+                )
+                await interaction.followup.send(
+                    "景品の配布結果を確認できませんでした。二重配布を避けるため"
+                    "再抽選は行いません。アイテム欄を確認し、見当たらなければ管理者へ"
+                    "ご連絡ください。",
+                    ephemeral=True,
+                )
+                return
+
+            await asyncio.to_thread(
+                self._accounts.mark_minecraft_item_gacha_status,
+                draw.draw_id,
+                "delivered",
+            )
+            await self._flush_minecraft_item_gacha_notifications(interaction.guild_id)
+            await interaction.followup.send(
+                self._item_gacha_received_text(draw, already=False),
+                ephemeral=True,
+            )
+
+    @staticmethod
+    def _item_gacha_draw_matches_catalog(draw: MinecraftItemGachaDraw) -> bool:
+        try:
+            reward = get_item_gacha_reward(draw.reward_key)
+        except ValueError:
+            return False
+        return (
+            draw.tier == reward.tier
+            and draw.item_spec == reward.item_spec
+            and draw.item_name == reward.item_name
+            and draw.item_count == reward.item_count
+        )
+
+    @staticmethod
+    def _item_gacha_received_text(draw: MinecraftItemGachaDraw, *, already: bool) -> str:
+        prefix = "本日は受取済みです" if already else "受け取りました"
+        return (
+            f"{prefix}: **【{item_gacha_tier_label(draw.tier)}】"
+            f"{discord.utils.escape_markdown(draw.item_name)} x{draw.item_count}**"
+        )
 
     async def show_minecraft_resource_shop(self, interaction: discord.Interaction) -> None:
         if interaction.guild_id is None:
@@ -3045,6 +3349,22 @@ class MinecraftDiscordBot(discord.Client):
         except (RuntimeError, discord.DiscordException) as error:
             LOGGER.warning("Could not refresh Minecraft resource shop panel: %s", error)
 
+    async def _refresh_item_gacha_panel(self) -> None:
+        channel_id = self._settings.item_gacha_panel_channel_id
+        message_id = self._settings.item_gacha_panel_message_id
+        if channel_id is None or message_id is None:
+            return
+        try:
+            channel = await self._resolve_and_validate_channel(channel_id, require_embeds=True)
+            message = await channel.fetch_message(message_id)
+            await message.edit(
+                embed=item_gacha_panel_embed(),
+                view=MinecraftItemGachaPanelView(self),
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+        except (RuntimeError, discord.DiscordException) as error:
+            LOGGER.warning("Could not refresh Minecraft item gacha panel: %s", error)
+
     async def _disable_old_panel(self, channel_id: int | None, message_id: int | None) -> None:
         if channel_id is None or message_id is None:
             return
@@ -3456,6 +3776,114 @@ class MinecraftDiscordBot(discord.Client):
             allowed_mentions=discord.AllowedMentions.none(),
         )
 
+    async def _flush_minecraft_item_gacha_notifications(self, guild_id: int) -> None:
+        async with self._item_gacha_notification_lock:
+            await self._flush_minecraft_item_gacha_notifications_locked(guild_id)
+
+    async def _recover_minecraft_item_gacha_notifications(self, guild_id: int) -> None:
+        pending = await asyncio.to_thread(
+            self._accounts.has_pending_minecraft_item_gacha_notifications,
+            guild_id=guild_id,
+        )
+        if pending:
+            await self._flush_minecraft_item_gacha_notifications(guild_id)
+
+    async def _flush_minecraft_item_gacha_notifications_locked(self, guild_id: int) -> None:
+        draws = await asyncio.to_thread(
+            self._accounts.list_pending_minecraft_item_gacha_notifications
+        )
+        for draw in draws:
+            if draw.guild_id != guild_id:
+                continue
+            if not self._item_gacha_draw_matches_catalog(draw):
+                LOGGER.error(
+                    "Could not notify changed Minecraft item gacha reward draw=%s",
+                    draw.draw_id,
+                )
+                await asyncio.to_thread(
+                    self._accounts.begin_minecraft_item_gacha_notification_attempt,
+                    draw.draw_id,
+                    "minecraft",
+                )
+                await asyncio.to_thread(
+                    self._accounts.begin_minecraft_item_gacha_notification_attempt,
+                    draw.draw_id,
+                    "discord",
+                )
+                continue
+            if not draw.minecraft_notified:
+                attempt = await asyncio.to_thread(
+                    self._accounts.begin_minecraft_item_gacha_notification_attempt,
+                    draw.draw_id,
+                    "minecraft",
+                )
+                if attempt is not None:
+                    try:
+                        await self._execute_checked_rcon(
+                            item_gacha_tellraw_command(draw.player_name, draw.reward_key)
+                        )
+                    except (OSError, RconError, RuntimeError, ValueError) as error:
+                        LOGGER.warning(
+                            "Could not announce item gacha draw in Minecraft draw=%s: %s",
+                            draw.draw_id,
+                            error,
+                        )
+                        if attempt >= ITEM_GACHA_NOTIFICATION_RETRY_LIMIT:
+                            LOGGER.error(
+                                "Giving up Minecraft item gacha notification after %s attempts "
+                                "draw=%s",
+                                attempt,
+                                draw.draw_id,
+                            )
+                    else:
+                        await asyncio.to_thread(
+                            self._accounts.mark_minecraft_item_gacha_notified,
+                            draw.draw_id,
+                            "minecraft",
+                        )
+            if not draw.discord_notified:
+                attempt = await asyncio.to_thread(
+                    self._accounts.begin_minecraft_item_gacha_notification_attempt,
+                    draw.draw_id,
+                    "discord",
+                )
+                if attempt is None:
+                    continue
+                try:
+                    await self._send_item_gacha_log(draw)
+                except (RuntimeError, discord.DiscordException) as error:
+                    LOGGER.warning(
+                        "Could not announce item gacha draw in Discord draw=%s: %s",
+                        draw.draw_id,
+                        error,
+                    )
+                    if attempt >= ITEM_GACHA_NOTIFICATION_RETRY_LIMIT:
+                        LOGGER.error(
+                            "Giving up Discord item gacha notification after %s attempts draw=%s",
+                            attempt,
+                            draw.draw_id,
+                        )
+                else:
+                    await asyncio.to_thread(
+                        self._accounts.mark_minecraft_item_gacha_notified,
+                        draw.draw_id,
+                        "discord",
+                    )
+
+    async def _send_item_gacha_log(self, draw: MinecraftItemGachaDraw) -> None:
+        if self._channel is None:
+            raise RuntimeError("Discord channel has not been validated")
+        await self._channel.send(
+            content=f"<@{draw.discord_user_id}>",
+            embed=item_gacha_result_embed(draw.player_name, draw.reward_key),
+            allowed_mentions=discord.AllowedMentions(
+                everyone=False,
+                users=[discord.Object(id=draw.discord_user_id)],
+                roles=False,
+                replied_user=False,
+            ),
+        )
+
     async def _resolve_and_validate_channel(
         self,
         channel_id: int,
@@ -3529,6 +3957,13 @@ class MinecraftDiscordBot(discord.Client):
                 await self._sync_whitelist_accounts()
                 if self._settings.voice_enabled:
                     await self._restore_voice_connection()
+                if self._settings.guild_id is not None:
+                    try:
+                        await self._recover_minecraft_item_gacha_notifications(
+                            self._settings.guild_id
+                        )
+                    except (OSError, RuntimeError, ValueError) as error:
+                        LOGGER.warning("Could not flush item gacha notifications: %s", error)
             self._schedule_player_count_refresh(delay=0)
             self._schedule_periodic_status_panel_refresh()
             self._ensure_minecraft_xp_started()

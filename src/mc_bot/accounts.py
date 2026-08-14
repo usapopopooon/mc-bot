@@ -4,10 +4,11 @@ import json
 import sqlite3
 import uuid
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 WHITELIST_RETRY_LIMIT = 5
+ITEM_GACHA_NOTIFICATION_RETRY_LIMIT = 5
 
 
 @dataclass(frozen=True, slots=True)
@@ -105,6 +106,28 @@ class MinecraftResourceExchangeDelivery:
     minecraft_notified: bool
     minecraft_public_notified: bool
     discord_notified: bool
+
+
+@dataclass(frozen=True, slots=True)
+class MinecraftItemGachaDraw:
+    draw_id: str
+    guild_id: int
+    discord_user_id: int
+    account_id: int
+    player_name: str
+    draw_day: str
+    tier: str
+    reward_key: str
+    item_spec: str
+    item_name: str
+    item_count: int
+    status: str
+    minecraft_notified: bool
+    discord_notified: bool
+    minecraft_notification_attempts: int
+    discord_notification_attempts: int
+    created_at: str
+    updated_at: str
 
 
 class AccountStore:
@@ -235,6 +258,38 @@ class AccountStore:
                         CHECK (discord_notified IN (0, 1)),
                     created_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS minecraft_item_gacha_draws (
+                    draw_id TEXT PRIMARY KEY,
+                    guild_id INTEGER NOT NULL,
+                    discord_user_id INTEGER NOT NULL,
+                    account_id INTEGER NOT NULL
+                        REFERENCES minecraft_accounts(id) ON DELETE RESTRICT,
+                    player_name TEXT NOT NULL,
+                    draw_day TEXT NOT NULL,
+                    tier TEXT NOT NULL
+                        CHECK (tier IN ('N', 'R', 'SR', 'SSR', 'UR', 'MYTHIC')),
+                    reward_key TEXT NOT NULL,
+                    item_spec TEXT NOT NULL,
+                    item_name TEXT NOT NULL,
+                    item_count INTEGER NOT NULL CHECK (item_count BETWEEN 1 AND 64),
+                    status TEXT NOT NULL DEFAULT 'reserved'
+                        CHECK (status IN ('reserved', 'retryable', 'delivered', 'ambiguous')),
+                    minecraft_notified INTEGER NOT NULL DEFAULT 0
+                        CHECK (minecraft_notified IN (0, 1)),
+                    discord_notified INTEGER NOT NULL DEFAULT 0
+                        CHECK (discord_notified IN (0, 1)),
+                    minecraft_notification_attempts INTEGER NOT NULL DEFAULT 0
+                        CHECK (minecraft_notification_attempts >= 0),
+                    discord_notification_attempts INTEGER NOT NULL DEFAULT 0
+                        CHECK (discord_notification_attempts >= 0),
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE(guild_id, discord_user_id, draw_day)
+                );
+                CREATE INDEX IF NOT EXISTS minecraft_item_gacha_pending_notifications
+                    ON minecraft_item_gacha_draws(
+                        status, minecraft_notified, discord_notified, created_at
+                    );
                 CREATE TABLE IF NOT EXISTS minecraft_fishing_combo_states (
                     account_id INTEGER PRIMARY KEY
                         REFERENCES minecraft_accounts(id) ON DELETE CASCADE,
@@ -335,6 +390,7 @@ class AccountStore:
             )
             self._add_resource_exchange_notification_columns(connection)
             self._add_whitelist_retry_columns(connection)
+            self._add_item_gacha_notification_attempt_columns(connection)
 
     @staticmethod
     def _add_public_delivery_columns(connection: sqlite3.Connection, table: str) -> None:
@@ -389,6 +445,26 @@ class AccountStore:
                 """
                 ALTER TABLE minecraft_accounts
                 ADD COLUMN whitelist_last_error TEXT
+                """
+            )
+
+    @staticmethod
+    def _add_item_gacha_notification_attempt_columns(
+        connection: sqlite3.Connection,
+    ) -> None:
+        table = "minecraft_item_gacha_draws"
+        columns = {row["name"] for row in connection.execute(f"PRAGMA table_info({table})")}
+        for column in (
+            "minecraft_notification_attempts",
+            "discord_notification_attempts",
+        ):
+            if column in columns:
+                continue
+            connection.execute(
+                f"""
+                ALTER TABLE {table}
+                ADD COLUMN {column} INTEGER NOT NULL DEFAULT 0
+                    CHECK ({column} >= 0)
                 """
             )
 
@@ -1504,6 +1580,235 @@ class AccountStore:
                 "DELETE FROM minecraft_resource_exchange_deliveries WHERE exchange_id = ?",
                 (exchange_id,),
             )
+
+    def reserve_minecraft_item_gacha_draw(
+        self,
+        *,
+        draw_id: str,
+        guild_id: int,
+        discord_user_id: int,
+        account_id: int,
+        player_name: str,
+        draw_day: str,
+        tier: str,
+        reward_key: str,
+        item_spec: str,
+        item_name: str,
+        item_count: int,
+    ) -> tuple[MinecraftItemGachaDraw, bool]:
+        try:
+            normalized_draw_id = str(uuid.UUID(draw_id))
+            normalized_day = date.fromisoformat(draw_day).isoformat()
+        except (TypeError, ValueError) as error:
+            raise ValueError("invalid Minecraft item gacha draw") from error
+        if (
+            guild_id <= 0
+            or discord_user_id <= 0
+            or account_id <= 0
+            or not player_name
+            or draw_day != normalized_day
+            or tier not in {"N", "R", "SR", "SSR", "UR", "MYTHIC"}
+            or not reward_key
+            or not item_spec
+            or not item_name
+            or not 1 <= item_count <= 64
+        ):
+            raise ValueError("invalid Minecraft item gacha draw")
+        now = _now()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            existing = connection.execute(
+                """
+                SELECT * FROM minecraft_item_gacha_draws
+                WHERE guild_id = ? AND discord_user_id = ? AND draw_day = ?
+                """,
+                (guild_id, discord_user_id, normalized_day),
+            ).fetchone()
+            if existing is not None:
+                return _minecraft_item_gacha_draw(existing), False
+            connection.execute(
+                """
+                INSERT INTO minecraft_item_gacha_draws (
+                    draw_id, guild_id, discord_user_id, account_id, player_name,
+                    draw_day, tier, reward_key, item_spec, item_name, item_count,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    normalized_draw_id,
+                    guild_id,
+                    discord_user_id,
+                    account_id,
+                    player_name,
+                    normalized_day,
+                    tier,
+                    reward_key,
+                    item_spec,
+                    item_name,
+                    item_count,
+                    now,
+                    now,
+                ),
+            )
+            row = connection.execute(
+                "SELECT * FROM minecraft_item_gacha_draws WHERE draw_id = ?",
+                (normalized_draw_id,),
+            ).fetchone()
+        if row is None:
+            raise RuntimeError("Could not load the reserved Minecraft item gacha draw")
+        return _minecraft_item_gacha_draw(row), True
+
+    def get_minecraft_item_gacha_draw(
+        self, *, guild_id: int, discord_user_id: int, draw_day: str
+    ) -> MinecraftItemGachaDraw | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT * FROM minecraft_item_gacha_draws
+                WHERE guild_id = ? AND discord_user_id = ? AND draw_day = ?
+                """,
+                (guild_id, discord_user_id, draw_day),
+            ).fetchone()
+        return _minecraft_item_gacha_draw(row) if row is not None else None
+
+    def mark_minecraft_item_gacha_status(self, draw_id: str, status: str) -> None:
+        transitions = {
+            "reserved": {"retryable", "delivered", "ambiguous"},
+            "retryable": {"reserved"},
+        }
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT status FROM minecraft_item_gacha_draws WHERE draw_id = ?",
+                (draw_id,),
+            ).fetchone()
+            if row is None:
+                raise ValueError("Minecraft item gacha draw was not found")
+            current = str(row["status"])
+            if status == current:
+                return
+            if status not in transitions.get(current, set()):
+                raise ValueError(f"invalid Minecraft item gacha transition: {current} -> {status}")
+            connection.execute(
+                """
+                UPDATE minecraft_item_gacha_draws
+                SET status = ?, updated_at = ?
+                WHERE draw_id = ? AND status = ?
+                """,
+                (status, _now(), draw_id, current),
+            )
+
+    def mark_minecraft_item_gacha_notified(self, draw_id: str, destination: str) -> None:
+        column = {
+            "minecraft": "minecraft_notified",
+            "discord": "discord_notified",
+        }.get(destination)
+        if column is None:
+            raise ValueError("unknown item gacha notification destination")
+        with self._connect() as connection:
+            connection.execute(
+                f"UPDATE minecraft_item_gacha_draws SET {column} = 1, updated_at = ? "
+                "WHERE draw_id = ? AND status = 'delivered'",
+                (_now(), draw_id),
+            )
+
+    def begin_minecraft_item_gacha_notification_attempt(
+        self,
+        draw_id: str,
+        destination: str,
+    ) -> int | None:
+        columns = {
+            "minecraft": (
+                "minecraft_notified",
+                "minecraft_notification_attempts",
+            ),
+            "discord": (
+                "discord_notified",
+                "discord_notification_attempts",
+            ),
+        }.get(destination)
+        if columns is None:
+            raise ValueError("unknown item gacha notification destination")
+        notified_column, attempts_column = columns
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                f"""
+                SELECT status, {notified_column}, {attempts_column}
+                FROM minecraft_item_gacha_draws
+                WHERE draw_id = ?
+                """,
+                (draw_id,),
+            ).fetchone()
+            if row is None:
+                raise ValueError("Minecraft item gacha draw was not found")
+            attempts = int(row[attempts_column])
+            if (
+                str(row["status"]) != "delivered"
+                or bool(row[notified_column])
+                or attempts >= ITEM_GACHA_NOTIFICATION_RETRY_LIMIT
+            ):
+                return None
+            attempts += 1
+            connection.execute(
+                f"""
+                UPDATE minecraft_item_gacha_draws
+                SET {attempts_column} = ?, updated_at = ?
+                WHERE draw_id = ?
+                """,
+                (attempts, _now(), draw_id),
+            )
+        return attempts
+
+    def has_pending_minecraft_item_gacha_notifications(self, *, guild_id: int) -> bool:
+        if guild_id <= 0:
+            raise ValueError("guild_id must be positive")
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT EXISTS(
+                    SELECT 1 FROM minecraft_item_gacha_draws
+                    WHERE guild_id = ?
+                      AND status = 'delivered'
+                      AND (
+                          (minecraft_notified = 0
+                           AND minecraft_notification_attempts < ?)
+                          OR
+                          (discord_notified = 0
+                           AND discord_notification_attempts < ?)
+                      )
+                ) AS pending
+                """,
+                (
+                    guild_id,
+                    ITEM_GACHA_NOTIFICATION_RETRY_LIMIT,
+                    ITEM_GACHA_NOTIFICATION_RETRY_LIMIT,
+                ),
+            ).fetchone()
+        return bool(row["pending"])
+
+    def list_pending_minecraft_item_gacha_notifications(
+        self,
+    ) -> list[MinecraftItemGachaDraw]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM minecraft_item_gacha_draws
+                WHERE status = 'delivered'
+                  AND (
+                      (minecraft_notified = 0
+                       AND minecraft_notification_attempts < ?)
+                      OR
+                      (discord_notified = 0
+                       AND discord_notification_attempts < ?)
+                  )
+                ORDER BY created_at, draw_id
+                """,
+                (
+                    ITEM_GACHA_NOTIFICATION_RETRY_LIMIT,
+                    ITEM_GACHA_NOTIFICATION_RETRY_LIMIT,
+                ),
+            ).fetchall()
+        return [_minecraft_item_gacha_draw(row) for row in rows]
 
     def claim_advancement_reward(
         self,
@@ -2734,6 +3039,29 @@ def _minecraft_resource_exchange_delivery(
         minecraft_notified=bool(row["minecraft_notified"]),
         minecraft_public_notified=bool(row["minecraft_public_notified"]),
         discord_notified=bool(row["discord_notified"]),
+    )
+
+
+def _minecraft_item_gacha_draw(row: sqlite3.Row) -> MinecraftItemGachaDraw:
+    return MinecraftItemGachaDraw(
+        draw_id=str(row["draw_id"]),
+        guild_id=int(row["guild_id"]),
+        discord_user_id=int(row["discord_user_id"]),
+        account_id=int(row["account_id"]),
+        player_name=str(row["player_name"]),
+        draw_day=str(row["draw_day"]),
+        tier=str(row["tier"]),
+        reward_key=str(row["reward_key"]),
+        item_spec=str(row["item_spec"]),
+        item_name=str(row["item_name"]),
+        item_count=int(row["item_count"]),
+        status=str(row["status"]),
+        minecraft_notified=bool(row["minecraft_notified"]),
+        discord_notified=bool(row["discord_notified"]),
+        minecraft_notification_attempts=int(row["minecraft_notification_attempts"]),
+        discord_notification_attempts=int(row["discord_notification_attempts"]),
+        created_at=str(row["created_at"]),
+        updated_at=str(row["updated_at"]),
     )
 
 

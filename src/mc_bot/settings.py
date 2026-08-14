@@ -21,6 +21,8 @@ class RuntimeSettings:
     xp_shop_panel_message_id: int | None = None
     resource_shop_panel_channel_id: int | None = None
     resource_shop_panel_message_id: int | None = None
+    item_gacha_panel_channel_id: int | None = None
+    item_gacha_panel_message_id: int | None = None
     approval_mode: str = "automatic"
     approval_channel_id: int | None = None
     player_count_channel_id: int | None = None
@@ -59,6 +61,8 @@ class SettingsStore:
             "xp_shop_panel_message_id",
             "resource_shop_panel_channel_id",
             "resource_shop_panel_message_id",
+            "item_gacha_panel_channel_id",
+            "item_gacha_panel_message_id",
             "approval_channel_id",
             "player_count_channel_id",
             "voice_channel_id",

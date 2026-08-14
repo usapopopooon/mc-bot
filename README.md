@@ -85,6 +85,17 @@ Minecraft 資源交換所では、既存のサーバーXPから資源への交�
 プレイヤーデータに保持した履歴で二重交換を防ぎます。完了時はMinecraft全体チャットへ
 通知し、UUID付き構造化ログを通じてDiscordの通知チャンネルにも再送可能な記録を残します。
 
+Minecraft アイテムガチャは、オンライン中の連携プレイヤーがDiscordの常設パネルから
+日本時間5:00区切りで1日1回引けます。公開するのはランク確率
+（N 35%、R 35%、SR 19%、SSR 7.5%、UR 3%、幻 0.5%）だけで、景品内容と個別確率は
+抽選・受取が完了するまで公開しません。抽選結果をSQLiteへ先に固定してから、固定許可リストの
+景品だけをRCONで付与します。同日連打やBot再起動で再抽選せず、RCON応答を失って付与結果を
+断定できない場合も二重配布を避けるため自動再送しません。Nを含む全結果をMinecraft全体
+チャットとDiscordログへ投稿します。Discordで通知を許可するのは抽選者本人だけで、
+`@everyone`、`@here`、ロールメンションは許可しません。
+景品の入手経路はMinecraft Java 26.2の公式レシピ・ルートテーブルと照合し、安価に
+クラフトできる名札などをレア景品へ含めません。
+
 ```text
 client.jar: 4e618f09a0c649dde3fdf829df443ce0b8831e65
 ja_jp.json: 82ae51a68e114943fd95cc870643317dc02fe5e4
@@ -103,7 +114,7 @@ mc-botコンテナ
   ├─ /minecraft/whitelist.json から既存登録を保護対象として取り込み
   ├─ /data/cursor.json に送信済み位置を保存
   ├─ /data/settings.json にDiscord上で行った設定を保存
-  ├─ /data/accounts.db にDiscordとMinecraftアカウントの紐付けを保存
+  ├─ /data/accounts.db にアカウント紐付け・交換・ガチャ結果を保存
   ├─ Discord Gateway → 指定チャンネルへEmbed通知
   └─ 内部DockerネットワークのRCON → whitelist/fwhitelist
 ```
@@ -130,6 +141,7 @@ mc-botコンテナ
 /mc-config approval mode:自動承認
 /mc-config approval mode:管理者承認 channel:#minecraft申請
 /mc-config player-count action:有効化
+/mc-config item-gacha-panel channel:#minecraftガチャ
 /mc-config show
 ```
 
@@ -316,6 +328,6 @@ docker build -t mc-bot:local .
 
 通知はイベント種別ごとに色分けしたDiscord Embedです。紐付け済みプレイヤーは
 `**.hoge (<@DiscordユーザーID>)**` の形式で、クリック可能なDiscordメンションを
-表示します。通知はEmbedで送り、さらに `AllowedMentions.none()` を指定しているため、
-この表示によるメンション通知や、Minecraftチャットからの `@everyone`・ロール通知は
-発生しません。
+表示します。通常の通知はEmbedと `AllowedMentions.none()` で送り、Minecraftチャットからの
+`@everyone`・ロール通知は発生しません。アイテムガチャ結果だけは抽選者本人を通常投稿で
+メンションしますが、許可対象をそのユーザーIDだけに限定します。
