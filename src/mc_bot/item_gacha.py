@@ -225,10 +225,16 @@ def item_gacha_tellraw_command(player_name: str, reward_key: str) -> str:
     return f"tellraw @a {json.dumps(components, ensure_ascii=False, separators=(',', ':'))}"
 
 
-def item_gacha_result_embed(discord_user_id: int, reward_key: str) -> discord.Embed:
+def item_gacha_result_embed(
+    *,
+    player_name: str,
+    discord_user_id: int,
+    reward_key: str,
+) -> discord.Embed:
     if discord_user_id <= 0:
         raise ValueError("discord_user_id must be positive")
     reward = get_item_gacha_reward(reward_key)
+    player_name = discord.utils.escape_markdown(player_name)
     tier = item_gacha_tier_label(reward.tier)
     color = {
         "N": discord.Color.light_grey(),
@@ -241,7 +247,7 @@ def item_gacha_result_embed(discord_user_id: int, reward_key: str) -> discord.Em
     return discord.Embed(
         title=f"🎁 アイテムガチャ【{tier}】",
         description=(
-            f"**<@{discord_user_id}>さん**が\n"
+            f"**{player_name} (<@{discord_user_id}>) さん** が\n"
             f"**{reward.item_name} x{reward.item_count}** を獲得しました!"
         ),
         color=color,

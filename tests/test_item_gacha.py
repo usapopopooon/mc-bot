@@ -188,11 +188,15 @@ def test_commands_use_only_catalog_rewards_and_safe_player_names() -> None:
         item_gacha_give_command("Steve", "unknown")
 
 
-def test_result_embed_uses_discord_mention_and_includes_even_normal_rewards() -> None:
-    embed = item_gacha_result_embed(123, "n_iron")
+def test_result_embed_uses_minecraft_name_and_discord_mention() -> None:
+    embed = item_gacha_result_embed(
+        player_name="*Steve*",
+        discord_user_id=123,
+        reward_key="n_iron",
+    )
 
     assert embed.title == "🎁 アイテムガチャ【N】"
-    assert "<@123>さん" in str(embed.description)
+    assert r"**\*Steve\* (<@123>) さん** が" in str(embed.description)
     assert "鉄インゴット x24" in str(embed.description)
 
 
@@ -367,8 +371,7 @@ def test_draw_delivers_once_and_logs_n_to_minecraft_and_discord(tmp_path) -> Non
     assert log["allowed_mentions"].roles is False
     assert [user.id for user in log["allowed_mentions"].users] == [123]
     assert "【N】" in log["embed"].title
-    assert "<@123>さん" in str(log["embed"].description)
-    assert "Steve" not in str(log["embed"].description)
+    assert "**Steve (<@123>) さん** が" in str(log["embed"].description)
     assert "鉄インゴット x24" in str(log["embed"].description)
     assert "受け取りました" in first.followup.send.await_args.args[0]
     assert "本日は受取済み" in second.followup.send.await_args.args[0]

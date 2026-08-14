@@ -3875,7 +3875,11 @@ class MinecraftDiscordBot(discord.Client):
             raise RuntimeError("Discord channel has not been validated")
         await self._channel.send(
             content=f"<@{draw.discord_user_id}>",
-            embed=item_gacha_result_embed(draw.discord_user_id, draw.reward_key),
+            embed=item_gacha_result_embed(
+                player_name=draw.player_name,
+                discord_user_id=draw.discord_user_id,
+                reward_key=draw.reward_key,
+            ),
             allowed_mentions=discord.AllowedMentions(
                 everyone=False,
                 users=[discord.Object(id=draw.discord_user_id)],
