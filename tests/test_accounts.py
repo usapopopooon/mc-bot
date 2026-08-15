@@ -127,12 +127,12 @@ def test_item_gacha_notification_retry_migration_preserves_existing_draws(tmp_pa
     with sqlite3.connect(database) as connection:
         row = connection.execute(
             """
-            SELECT draw_id, minecraft_notification_attempts,
-                   discord_notification_attempts
+            SELECT draw_id, draw_number, draw_kind, cost_xp,
+                   minecraft_notification_attempts, discord_notification_attempts
             FROM minecraft_item_gacha_draws
             """
         ).fetchone()
-    assert row == ("old-draw", 0, 0)
+    assert row == ("old-draw", 1, "normal", 100, 0, 0)
 
 
 def test_whitelist_retry_failures_persist_and_stop_at_limit(tmp_path) -> None:

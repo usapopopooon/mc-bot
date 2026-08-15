@@ -20,6 +20,7 @@ from mc_bot.accounts import (
     AccountStore,
     FishingComboRewardEvent,
     MinecraftAccount,
+    MinecraftItemGachaDailyLimitReached,
     MinecraftItemGachaDraw,
     WoodcuttingComboRewardEvent,
 )
@@ -71,12 +72,18 @@ from mc_bot.formatting import (
 )
 from mc_bot.item_gacha import (
     ITEM_GACHA_COST_XP,
+    ITEM_GACHA_DAILY_LIMIT,
+    ITEM_GACHA_NORMAL_COST_XP,
+    ITEM_GACHA_PREMIUM_COST_XP,
+    ItemGachaKind,
     MinecraftItemGachaConfirmView,
     MinecraftItemGachaPanelView,
     draw_item_gacha_reward,
     get_item_gacha_reward,
+    item_gacha_cost_xp,
     item_gacha_day,
     item_gacha_give_command,
+    item_gacha_kind_label,
     item_gacha_panel_embed,
     item_gacha_result_embed,
     item_gacha_tellraw_command,
@@ -278,7 +285,7 @@ class MinecraftDiscordBot(discord.Client):
         )(self._configure_resource_shop_panel)
         group.command(
             name="item-gacha-panel",
-            description="1日1回のMinecraftアイテムガチャパネルを設置します",
+            description="1日3回までのMinecraftアイテムガチャパネルを設置します",
         )(self._configure_item_gacha_panel)
         group.command(
             name="show",
@@ -1132,7 +1139,7 @@ class MinecraftDiscordBot(discord.Client):
         return True
 
     async def show_minecraft_item_gacha_confirmation(
-        self, interaction: discord.Interaction
+        self, interaction: discord.Interaction, draw_kind: ItemGachaKind
     ) -> None:
         if interaction.guild_id is None:
             await interaction.response.send_message(
@@ -1160,23 +1167,61 @@ class MinecraftDiscordBot(discord.Client):
             await interaction.followup.send(message, ephemeral=True)
             return
 
+        draw_day = item_gacha_day(datetime.now(UTC))
+        latest_draw = await asyncio.to_thread(
+            self._accounts.get_minecraft_item_gacha_draw,
+            guild_id=interaction.guild_id,
+            discord_user_id=interaction.user.id,
+            draw_day=draw_day,
+        )
+        draw_count = await asyncio.to_thread(
+            self._accounts.count_minecraft_item_gacha_draws,
+            guild_id=interaction.guild_id,
+            discord_user_id=interaction.user.id,
+            draw_day=draw_day,
+        )
+        retrying = latest_draw is not None and latest_draw.status in {"reserved", "retryable"}
+        if draw_count >= ITEM_GACHA_DAILY_LIMIT and not retrying:
+            await interaction.followup.send(
+                f"本日のアイテムガチャは **{ITEM_GACHA_DAILY_LIMIT}回**すべて引き終えています。"
+                "次は日本時間0:00から引けます。",
+                ephemeral=True,
+            )
+            return
+        effective_kind: ItemGachaKind = draw_kind
+        retry_note = ""
+        if retrying and latest_draw is not None:
+            effective_kind = "premium" if latest_draw.draw_kind == "premium" else "normal"
+            retry_note = (
+                f"\n未完了の**{item_gacha_kind_label(effective_kind)}ガチャ**"
+                f" (本日{latest_draw.draw_number}回目) を同じ景品で再開します。"
+            )
+
         offer = await self._level_bot_xp.fetch_item_gacha_offer(
             interaction.guild_id, interaction.user.id
         )
-        if offer is None or offer.cost_xp != ITEM_GACHA_COST_XP:
+        if (
+            offer is None
+            or offer.cost_xp != ITEM_GACHA_NORMAL_COST_XP
+            or offer.normal_cost_xp != ITEM_GACHA_NORMAL_COST_XP
+            or offer.premium_cost_xp != ITEM_GACHA_PREMIUM_COST_XP
+            or offer.daily_limit != ITEM_GACHA_DAILY_LIMIT
+        ):
             await interaction.followup.send(
                 "ガチャのXP残高または価格を確認できませんでした。"
                 "少し待ってから再度お試しください。",
                 ephemeral=True,
             )
             return
-        affordable = offer.wallet.available_xp >= offer.cost_xp
+        cost_xp = item_gacha_cost_xp(effective_kind)
+        affordable = retrying or offer.wallet.available_xp >= cost_xp
         embed = discord.Embed(
-            title="アイテムガチャの確認",
+            title=f"{item_gacha_kind_label(effective_kind)}ガチャの確認",
             description=(
-                f"サーバーXP **{offer.cost_xp:,} XP**を使って、"
-                "本日のアイテムガチャを1回引きます。\n"
-                "景品の内容は確定するまで秘密です。"
+                f"サーバーXP **{cost_xp:,} XP**を使って、"
+                f"本日 **{draw_count + (0 if retrying else 1)}/{ITEM_GACHA_DAILY_LIMIT}回目**"
+                "のアイテムガチャを引きます。\n"
+                f"景品の内容は確定するまで秘密です。{retry_note}"
             ),
             color=discord.Color.gold(),
         )
@@ -1188,9 +1233,13 @@ class MinecraftDiscordBot(discord.Client):
         embed.add_field(
             name="抽選後",
             value=(
-                f"{offer.wallet.available_xp - offer.cost_xp:,} XP"
-                if affordable
-                else "XPが不足しています"
+                "決済状態を再確認します"
+                if retrying
+                else (
+                    f"{offer.wallet.available_xp - cost_xp:,} XP"
+                    if affordable
+                    else "XPが不足しています"
+                )
             ),
             inline=True,
         )
@@ -1207,7 +1256,8 @@ class MinecraftDiscordBot(discord.Client):
             view=MinecraftItemGachaConfirmView(
                 self,
                 owner_id=interaction.user.id,
-                cost_xp=offer.cost_xp,
+                draw_kind=effective_kind,
+                cost_xp=cost_xp,
                 affordable=affordable,
             ),
             ephemeral=True,
@@ -1217,6 +1267,7 @@ class MinecraftDiscordBot(discord.Client):
         self,
         interaction: discord.Interaction,
         *,
+        draw_kind: ItemGachaKind = "normal",
         expected_cost_xp: int = ITEM_GACHA_COST_XP,
         response_ready: bool = False,
     ) -> None:
@@ -1228,6 +1279,12 @@ class MinecraftDiscordBot(discord.Client):
             return
         if not response_ready:
             await interaction.response.defer(ephemeral=True, thinking=True)
+        if expected_cost_xp != item_gacha_cost_xp(draw_kind):
+            await interaction.followup.send(
+                "ガチャ価格が更新されました。パネルから開き直してください。",
+                ephemeral=True,
+            )
+            return
         async with self._item_gacha_lock:
             try:
                 account, reason = await self._online_exchange_account(interaction.user.id)
@@ -1249,7 +1306,7 @@ class MinecraftDiscordBot(discord.Client):
                 await interaction.followup.send(message, ephemeral=True)
                 return
 
-            reward = draw_item_gacha_reward()
+            reward = draw_item_gacha_reward(draw_kind)
             draw_day = item_gacha_day(datetime.now(UTC))
             try:
                 draw, created = await asyncio.to_thread(
@@ -1260,12 +1317,21 @@ class MinecraftDiscordBot(discord.Client):
                     account_id=account.id,
                     player_name=account.server_player_name,
                     draw_day=draw_day,
+                    draw_kind=draw_kind,
+                    cost_xp=expected_cost_xp,
                     tier=reward.tier,
                     reward_key=reward.key,
                     item_spec=reward.item_spec,
                     item_name=reward.item_name,
                     item_count=reward.item_count,
                 )
+            except MinecraftItemGachaDailyLimitReached:
+                await interaction.followup.send(
+                    f"本日のアイテムガチャは **{ITEM_GACHA_DAILY_LIMIT}回**すべて引き終えています。"
+                    "次は日本時間0:00から引けます。",
+                    ephemeral=True,
+                )
+                return
             except (OSError, RuntimeError, ValueError) as error:
                 LOGGER.error("Could not reserve Minecraft item gacha draw: %s", error)
                 await interaction.followup.send(
@@ -1365,7 +1431,7 @@ class MinecraftDiscordBot(discord.Client):
                 request_id=draw.draw_id,
                 account_id=draw.account_id,
                 draw_day=draw.draw_day,
-                expected_cost_xp=expected_cost_xp,
+                expected_cost_xp=draw.cost_xp,
             )
             if spend is None:
                 await asyncio.to_thread(
@@ -1375,6 +1441,32 @@ class MinecraftDiscordBot(discord.Client):
                 )
                 await interaction.followup.send(
                     "XP決済を確認できなかったため、景品は配布していません。"
+                    "少し待ってからパネルより再度お試しください。",
+                    ephemeral=True,
+                )
+                return
+            if spend.cost_xp != draw.cost_xp:
+                cancelled = await self._level_bot_xp.update_item_gacha_spend(
+                    request_id=draw.draw_id,
+                    guild_id=interaction.guild_id,
+                    user_id=interaction.user.id,
+                    action="cancel",
+                )
+                await asyncio.to_thread(
+                    self._accounts.mark_minecraft_item_gacha_status,
+                    draw.draw_id,
+                    "retryable",
+                )
+                LOGGER.error(
+                    "Minecraft item gacha spend price mismatch draw=%s expected=%d actual=%d "
+                    "cancelled=%s",
+                    draw.draw_id,
+                    draw.cost_xp,
+                    spend.cost_xp,
+                    cancelled,
+                )
+                await interaction.followup.send(
+                    "XP決済の価格が一致しなかったため、景品は配布していません。"
                     "少し待ってからパネルより再度お試しください。",
                     ephemeral=True,
                 )
@@ -1497,15 +1589,21 @@ class MinecraftDiscordBot(discord.Client):
             and draw.item_spec == reward.item_spec
             and draw.item_name == reward.item_name
             and draw.item_count == reward.item_count
+            and draw.draw_kind in {"normal", "premium"}
+            and draw.cost_xp
+            == item_gacha_cost_xp("premium" if draw.draw_kind == "premium" else "normal")
+            and not (draw.draw_kind == "premium" and draw.tier == "N")
         )
 
     @staticmethod
     def _item_gacha_received_text(draw: MinecraftItemGachaDraw, *, already: bool) -> str:
-        prefix = "本日は受取済みです" if already else "受け取りました"
+        prefix = "この抽選は受取済みです" if already else "受け取りました"
         return (
             f"{prefix}: **【{item_gacha_tier_label(draw.tier)}】"
             f"{discord.utils.escape_markdown(draw.item_name)} x{draw.item_count}**"
-            f" / サーバーXP **{ITEM_GACHA_COST_XP:,}**消費"
+            f" / {item_gacha_kind_label('premium' if draw.draw_kind == 'premium' else 'normal')}"
+            f"・サーバーXP **{draw.cost_xp:,}**消費"
+            f" (本日 {draw.draw_number}/{ITEM_GACHA_DAILY_LIMIT}回)"
         )
 
     async def show_minecraft_resource_shop(self, interaction: discord.Interaction) -> None:

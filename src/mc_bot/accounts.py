@@ -116,6 +116,9 @@ class MinecraftItemGachaDraw:
     account_id: int
     player_name: str
     draw_day: str
+    draw_number: int
+    draw_kind: str
+    cost_xp: int
     tier: str
     reward_key: str
     item_spec: str
@@ -128,6 +131,10 @@ class MinecraftItemGachaDraw:
     discord_notification_attempts: int
     created_at: str
     updated_at: str
+
+
+class MinecraftItemGachaDailyLimitReached(RuntimeError):
+    """Raised when all item-gacha slots for a user and JST day are used."""
 
 
 class AccountStore:
@@ -266,6 +273,9 @@ class AccountStore:
                         REFERENCES minecraft_accounts(id) ON DELETE RESTRICT,
                     player_name TEXT NOT NULL,
                     draw_day TEXT NOT NULL,
+                    draw_number INTEGER NOT NULL CHECK (draw_number BETWEEN 1 AND 3),
+                    draw_kind TEXT NOT NULL CHECK (draw_kind IN ('normal', 'premium')),
+                    cost_xp INTEGER NOT NULL CHECK (cost_xp IN (100, 1000)),
                     tier TEXT NOT NULL
                         CHECK (tier IN ('N', 'R', 'SR', 'SSR', 'UR', 'MYTHIC')),
                     reward_key TEXT NOT NULL,
@@ -284,7 +294,7 @@ class AccountStore:
                         CHECK (discord_notification_attempts >= 0),
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
-                    UNIQUE(guild_id, discord_user_id, draw_day)
+                    UNIQUE(guild_id, discord_user_id, draw_day, draw_number)
                 );
                 CREATE INDEX IF NOT EXISTS minecraft_item_gacha_pending_notifications
                     ON minecraft_item_gacha_draws(
@@ -391,6 +401,7 @@ class AccountStore:
             self._add_resource_exchange_notification_columns(connection)
             self._add_whitelist_retry_columns(connection)
             self._add_item_gacha_notification_attempt_columns(connection)
+            self._upgrade_item_gacha_draw_table(connection)
 
     @staticmethod
     def _add_public_delivery_columns(connection: sqlite3.Connection, table: str) -> None:
@@ -467,6 +478,69 @@ class AccountStore:
                     CHECK ({column} >= 0)
                 """
             )
+
+    @staticmethod
+    def _upgrade_item_gacha_draw_table(connection: sqlite3.Connection) -> None:
+        table = "minecraft_item_gacha_draws"
+        columns = {row["name"] for row in connection.execute(f"PRAGMA table_info({table})")}
+        if {"draw_number", "draw_kind", "cost_xp"} <= columns:
+            return
+        connection.executescript(
+            """
+            DROP TABLE IF EXISTS minecraft_item_gacha_draws_v2;
+            CREATE TABLE minecraft_item_gacha_draws_v2 (
+                draw_id TEXT PRIMARY KEY,
+                guild_id INTEGER NOT NULL,
+                discord_user_id INTEGER NOT NULL,
+                account_id INTEGER NOT NULL
+                    REFERENCES minecraft_accounts(id) ON DELETE RESTRICT,
+                player_name TEXT NOT NULL,
+                draw_day TEXT NOT NULL,
+                draw_number INTEGER NOT NULL CHECK (draw_number BETWEEN 1 AND 3),
+                draw_kind TEXT NOT NULL CHECK (draw_kind IN ('normal', 'premium')),
+                cost_xp INTEGER NOT NULL CHECK (cost_xp IN (100, 1000)),
+                tier TEXT NOT NULL
+                    CHECK (tier IN ('N', 'R', 'SR', 'SSR', 'UR', 'MYTHIC')),
+                reward_key TEXT NOT NULL,
+                item_spec TEXT NOT NULL,
+                item_name TEXT NOT NULL,
+                item_count INTEGER NOT NULL CHECK (item_count BETWEEN 1 AND 64),
+                status TEXT NOT NULL DEFAULT 'reserved'
+                    CHECK (status IN ('reserved', 'retryable', 'delivered', 'ambiguous')),
+                minecraft_notified INTEGER NOT NULL DEFAULT 0
+                    CHECK (minecraft_notified IN (0, 1)),
+                discord_notified INTEGER NOT NULL DEFAULT 0
+                    CHECK (discord_notified IN (0, 1)),
+                minecraft_notification_attempts INTEGER NOT NULL DEFAULT 0
+                    CHECK (minecraft_notification_attempts >= 0),
+                discord_notification_attempts INTEGER NOT NULL DEFAULT 0
+                    CHECK (discord_notification_attempts >= 0),
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(guild_id, discord_user_id, draw_day, draw_number)
+            );
+            INSERT INTO minecraft_item_gacha_draws_v2 (
+                draw_id, guild_id, discord_user_id, account_id, player_name,
+                draw_day, draw_number, draw_kind, cost_xp, tier, reward_key,
+                item_spec, item_name, item_count, status, minecraft_notified,
+                discord_notified, minecraft_notification_attempts,
+                discord_notification_attempts, created_at, updated_at
+            )
+            SELECT
+                draw_id, guild_id, discord_user_id, account_id, player_name,
+                draw_day, 1, 'normal', 100, tier, reward_key, item_spec,
+                item_name, item_count, status, minecraft_notified,
+                discord_notified, minecraft_notification_attempts,
+                discord_notification_attempts, created_at, updated_at
+            FROM minecraft_item_gacha_draws;
+            DROP TABLE minecraft_item_gacha_draws;
+            ALTER TABLE minecraft_item_gacha_draws_v2 RENAME TO minecraft_item_gacha_draws;
+            CREATE INDEX minecraft_item_gacha_pending_notifications
+                ON minecraft_item_gacha_draws(
+                    status, minecraft_notified, discord_notified, created_at
+                );
+            """
+        )
 
     def import_whitelist(self, whitelist_path: Path, bedrock_prefix: str = ".") -> int:
         if not whitelist_path.exists():
@@ -1590,6 +1664,8 @@ class AccountStore:
         account_id: int,
         player_name: str,
         draw_day: str,
+        draw_kind: str,
+        cost_xp: int,
         tier: str,
         reward_key: str,
         item_spec: str,
@@ -1607,6 +1683,8 @@ class AccountStore:
             or account_id <= 0
             or not player_name
             or draw_day != normalized_day
+            or draw_kind not in {"normal", "premium"}
+            or cost_xp != {"normal": 100, "premium": 1_000}[draw_kind]
             or tier not in {"N", "R", "SR", "SSR", "UR", "MYTHIC"}
             or not reward_key
             or not item_spec
@@ -1621,18 +1699,34 @@ class AccountStore:
                 """
                 SELECT * FROM minecraft_item_gacha_draws
                 WHERE guild_id = ? AND discord_user_id = ? AND draw_day = ?
+                  AND status IN ('reserved', 'retryable')
+                ORDER BY draw_number DESC
+                LIMIT 1
                 """,
                 (guild_id, discord_user_id, normalized_day),
             ).fetchone()
             if existing is not None:
                 return _minecraft_item_gacha_draw(existing), False
+            daily = connection.execute(
+                """
+                SELECT COUNT(*) AS draw_count, COALESCE(MAX(draw_number), 0) AS last_number
+                FROM minecraft_item_gacha_draws
+                WHERE guild_id = ? AND discord_user_id = ? AND draw_day = ?
+                """,
+                (guild_id, discord_user_id, normalized_day),
+            ).fetchone()
+            if daily is None or int(daily["draw_count"]) >= 3:
+                raise MinecraftItemGachaDailyLimitReached(
+                    "Minecraft item gacha daily limit reached"
+                )
+            draw_number = int(daily["last_number"]) + 1
             connection.execute(
                 """
                 INSERT INTO minecraft_item_gacha_draws (
                     draw_id, guild_id, discord_user_id, account_id, player_name,
-                    draw_day, tier, reward_key, item_spec, item_name, item_count,
-                    created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    draw_day, draw_number, draw_kind, cost_xp, tier, reward_key,
+                    item_spec, item_name, item_count, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     normalized_draw_id,
@@ -1641,6 +1735,9 @@ class AccountStore:
                     account_id,
                     player_name,
                     normalized_day,
+                    draw_number,
+                    draw_kind,
+                    cost_xp,
                     tier,
                     reward_key,
                     item_spec,
@@ -1666,10 +1763,25 @@ class AccountStore:
                 """
                 SELECT * FROM minecraft_item_gacha_draws
                 WHERE guild_id = ? AND discord_user_id = ? AND draw_day = ?
+                ORDER BY draw_number DESC
+                LIMIT 1
                 """,
                 (guild_id, discord_user_id, draw_day),
             ).fetchone()
         return _minecraft_item_gacha_draw(row) if row is not None else None
+
+    def count_minecraft_item_gacha_draws(
+        self, *, guild_id: int, discord_user_id: int, draw_day: str
+    ) -> int:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT COUNT(*) AS draw_count FROM minecraft_item_gacha_draws
+                WHERE guild_id = ? AND discord_user_id = ? AND draw_day = ?
+                """,
+                (guild_id, discord_user_id, draw_day),
+            ).fetchone()
+        return int(row["draw_count"])
 
     def mark_minecraft_item_gacha_status(self, draw_id: str, status: str) -> None:
         transitions = {
@@ -3050,6 +3162,9 @@ def _minecraft_item_gacha_draw(row: sqlite3.Row) -> MinecraftItemGachaDraw:
         account_id=int(row["account_id"]),
         player_name=str(row["player_name"]),
         draw_day=str(row["draw_day"]),
+        draw_number=int(row["draw_number"]),
+        draw_kind=str(row["draw_kind"]),
+        cost_xp=int(row["cost_xp"]),
         tier=str(row["tier"]),
         reward_key=str(row["reward_key"]),
         item_spec=str(row["item_spec"]),

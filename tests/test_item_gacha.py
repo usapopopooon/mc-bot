@@ -6,11 +6,11 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from itertools import pairwise
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, call, patch
 
 import pytest
 
-from mc_bot.accounts import AccountStore
+from mc_bot.accounts import AccountStore, MinecraftItemGachaDailyLimitReached
 from mc_bot.bot import MinecraftDiscordBot
 from mc_bot.config import Config
 from mc_bot.experience import (
@@ -20,6 +20,9 @@ from mc_bot.experience import (
 )
 from mc_bot.item_gacha import (
     ITEM_GACHA_COST_XP,
+    ITEM_GACHA_DAILY_LIMIT,
+    ITEM_GACHA_NORMAL_COST_XP,
+    ITEM_GACHA_PREMIUM_COST_XP,
     ITEM_GACHA_REWARDS,
     MinecraftItemGachaConfirmView,
     MinecraftItemGachaPanelView,
@@ -67,7 +70,13 @@ def _store_with_account(tmp_path) -> tuple[AccountStore, int]:
     return store, account.id
 
 
-def _reserve(store: AccountStore, account_id: int, *, reward_key: str = "n_iron"):
+def _reserve(
+    store: AccountStore,
+    account_id: int,
+    *,
+    reward_key: str = "n_iron",
+    draw_kind: str = "normal",
+):
     reward = get_item_gacha_reward(reward_key)
     return store.reserve_minecraft_item_gacha_draw(
         draw_id=str(uuid.uuid4()),
@@ -76,6 +85,8 @@ def _reserve(store: AccountStore, account_id: int, *, reward_key: str = "n_iron"
         account_id=account_id,
         player_name="Steve",
         draw_day="2026-08-14",
+        draw_kind=draw_kind,
+        cost_xp=1_000 if draw_kind == "premium" else 100,
         tier=reward.tier,
         reward_key=reward.key,
         item_spec=reward.item_spec,
@@ -110,6 +121,9 @@ def _bot_with_account(tmp_path):
     bot._level_bot_xp.fetch_item_gacha_offer = AsyncMock(  # type: ignore[method-assign]
         return_value=MinecraftItemGachaOffer(
             cost_xp=ITEM_GACHA_COST_XP,
+            normal_cost_xp=ITEM_GACHA_NORMAL_COST_XP,
+            premium_cost_xp=ITEM_GACHA_PREMIUM_COST_XP,
+            daily_limit=ITEM_GACHA_DAILY_LIMIT,
             wallet=wallet_before,
         )
     )
@@ -140,23 +154,30 @@ def _interaction():
 
 
 def test_reward_table_has_exact_published_tier_probabilities() -> None:
-    selected = [draw_item_gacha_reward(roll) for roll in range(1600)]
+    normal = [draw_item_gacha_reward("normal", roll, 0) for roll in range(400)]
+    premium = [draw_item_gacha_reward("premium", roll, 0) for roll in range(400)]
 
-    assert Counter(reward.tier for reward in selected) == {
-        "N": 560,
-        "R": 560,
-        "SR": 304,
-        "SSR": 120,
-        "UR": 48,
-        "MYTHIC": 8,
+    assert Counter(reward.tier for reward in normal) == {
+        "N": 220,
+        "R": 112,
+        "SR": 44,
+        "SSR": 16,
+        "UR": 7,
+        "MYTHIC": 1,
     }
-    assert Counter(reward.key for reward in selected) == {
-        reward.key: reward.weight for reward in ITEM_GACHA_REWARDS
+    assert Counter(reward.tier for reward in premium) == {
+        "R": 280,
+        "SR": 80,
+        "SSR": 28,
+        "UR": 10,
+        "MYTHIC": 2,
     }
     with pytest.raises(ValueError):
-        draw_item_gacha_reward(-1)
+        draw_item_gacha_reward("normal", -1)
     with pytest.raises(ValueError):
-        draw_item_gacha_reward(1600)
+        draw_item_gacha_reward("normal", 400)
+    with pytest.raises(ValueError):
+        draw_item_gacha_reward("invalid")  # type: ignore[arg-type]
 
 
 def test_reward_table_has_no_per_item_rarity_inversion() -> None:
@@ -456,9 +477,12 @@ def test_panel_publishes_only_tier_rates_and_keeps_rewards_secret() -> None:
     embed = item_gacha_panel_embed()
     rendered = str(embed.to_dict())
 
-    assert "N 35%" in rendered
-    assert "幻 0.5%" in rendered
-    assert "サーバーXP 100" in rendered
+    assert "N 55%" in rendered
+    assert "幻 0.25%" in rendered
+    assert "R 70%" in rendered
+    assert "100 XP" in rendered
+    assert "1,000 XP" in rendered
+    assert "1日 **3回**" in rendered
     assert "日本時間0:00" in rendered
     for reward in ITEM_GACHA_REWARDS:
         assert reward.item_name not in rendered
@@ -469,19 +493,22 @@ def test_panel_publishes_only_tier_rates_and_keeps_rewards_secret() -> None:
 
     view = asyncio.run(build_view())
     assert view.timeout is None
-    assert [child.custom_id for child in view.children] == ["mc-item-gacha:draw"]
+    assert [child.custom_id for child in view.children] == [
+        "mc-item-gacha:draw:normal",
+        "mc-item-gacha:draw:premium",
+    ]
 
 
 def test_confirmation_shows_balance_and_disables_unaffordable_draw(tmp_path) -> None:
     bot, _, _ = _bot_with_account(tmp_path)
     interaction = _interaction()
 
-    asyncio.run(bot.show_minecraft_item_gacha_confirmation(interaction))  # type: ignore[arg-type]
+    asyncio.run(bot.show_minecraft_item_gacha_confirmation(interaction, "normal"))  # type: ignore[arg-type]
 
     bot._level_bot_xp.fetch_item_gacha_offer.assert_awaited_once_with(456, 123)  # type: ignore[attr-defined]
     sent = interaction.followup.send.await_args.kwargs
     assert sent["ephemeral"] is True
-    assert sent["embed"].title == "アイテムガチャの確認"
+    assert sent["embed"].title == "通常ガチャの確認"
     assert "200 XP" in str(sent["embed"].to_dict())
     assert "100 XP" in str(sent["embed"].to_dict())
     assert isinstance(sent["view"], MinecraftItemGachaConfirmView)
@@ -489,12 +516,55 @@ def test_confirmation_shows_balance_and_disables_unaffordable_draw(tmp_path) -> 
 
     bot._level_bot_xp.fetch_item_gacha_offer.return_value = MinecraftItemGachaOffer(  # type: ignore[attr-defined]
         cost_xp=ITEM_GACHA_COST_XP,
+        normal_cost_xp=ITEM_GACHA_NORMAL_COST_XP,
+        premium_cost_xp=ITEM_GACHA_PREMIUM_COST_XP,
+        daily_limit=ITEM_GACHA_DAILY_LIMIT,
         wallet=MinecraftXpWallet(total_xp=99, spent_xp=0, available_xp=99),
     )
     insufficient = _interaction()
-    asyncio.run(bot.show_minecraft_item_gacha_confirmation(insufficient))  # type: ignore[arg-type]
+    asyncio.run(bot.show_minecraft_item_gacha_confirmation(insufficient, "normal"))  # type: ignore[arg-type]
     insufficient_view = insufficient.followup.send.await_args.kwargs["view"]
     assert insufficient_view.confirm.disabled
+
+
+def test_confirmation_keeps_an_unfinished_draw_retryable_with_low_available_xp(
+    tmp_path,
+) -> None:
+    bot, account, _ = _bot_with_account(tmp_path)
+    reward = get_item_gacha_reward("n_iron")
+    draw, created = bot._accounts.reserve_minecraft_item_gacha_draw(
+        draw_id=str(uuid.uuid4()),
+        guild_id=456,
+        discord_user_id=123,
+        account_id=account.id,
+        player_name="Steve",
+        draw_day=item_gacha_day(datetime.now(UTC)),
+        draw_kind="normal",
+        cost_xp=100,
+        tier=reward.tier,
+        reward_key=reward.key,
+        item_spec=reward.item_spec,
+        item_name=reward.item_name,
+        item_count=reward.item_count,
+    )
+    assert created and draw.status == "reserved"
+    bot._level_bot_xp.fetch_item_gacha_offer.return_value = MinecraftItemGachaOffer(  # type: ignore[attr-defined]
+        cost_xp=100,
+        normal_cost_xp=100,
+        premium_cost_xp=1_000,
+        daily_limit=3,
+        wallet=MinecraftXpWallet(total_xp=100, spent_xp=100, available_xp=0),
+    )
+    interaction = _interaction()
+
+    asyncio.run(bot.show_minecraft_item_gacha_confirmation(interaction, "premium"))  # type: ignore[arg-type]
+
+    sent = interaction.followup.send.await_args.kwargs
+    rendered = str(sent["embed"].to_dict())
+    assert sent["embed"].title == "通常ガチャの確認"
+    assert "未完了" in rendered
+    assert "決済状態を再確認" in rendered
+    assert not sent["view"].confirm.disabled
 
 
 def test_panel_and_confirmation_buttons_wire_the_confirmed_price(tmp_path) -> None:
@@ -507,10 +577,12 @@ def test_panel_and_confirmation_buttons_wire_the_confirmed_price(tmp_path) -> No
 
     async def exercise() -> None:
         panel = MinecraftItemGachaPanelView(bot)
-        await panel.draw.callback(interaction)  # type: ignore[arg-type]
+        await panel.normal.callback(interaction)  # type: ignore[arg-type]
+        await panel.premium.callback(interaction)  # type: ignore[arg-type]
         confirmation = MinecraftItemGachaConfirmView(
             bot,
             owner_id=123,
+            draw_kind="normal",
             cost_xp=100,
             affordable=True,
         )
@@ -518,11 +590,18 @@ def test_panel_and_confirmation_buttons_wire_the_confirmed_price(tmp_path) -> No
 
     asyncio.run(exercise())
 
-    bot.validate_item_gacha_panel.assert_awaited_once_with(interaction)  # type: ignore[attr-defined]
-    bot.show_minecraft_item_gacha_confirmation.assert_awaited_once_with(interaction)  # type: ignore[attr-defined]
+    assert bot.validate_item_gacha_panel.await_count == 2  # type: ignore[attr-defined]
+    bot.validate_item_gacha_panel.assert_has_awaits(  # type: ignore[attr-defined]
+        [call(interaction), call(interaction)]
+    )
+    assert bot.show_minecraft_item_gacha_confirmation.await_args_list == [  # type: ignore[attr-defined]
+        call(interaction, "normal"),
+        call(interaction, "premium"),
+    ]
     interaction.response.edit_message.assert_awaited_once()
     bot.draw_minecraft_item_gacha.assert_awaited_once_with(  # type: ignore[attr-defined]
         interaction,
+        draw_kind="normal",
         expected_cost_xp=100,
         response_ready=True,
     )
@@ -568,7 +647,9 @@ def test_result_embed_uses_minecraft_name_and_discord_mention() -> None:
     assert "鉄インゴット x24" in str(embed.description)
 
 
-def test_store_allows_only_one_draw_per_user_guild_and_day(tmp_path) -> None:
+def test_store_reuses_incomplete_draw_and_allows_three_completed_draws_per_day(
+    tmp_path,
+) -> None:
     store, account_id = _store_with_account(tmp_path)
 
     with ThreadPoolExecutor(max_workers=8) as executor:
@@ -584,6 +665,25 @@ def test_store_allows_only_one_draw_per_user_guild_and_day(tmp_path) -> None:
     assert saved is not None
     assert saved.reward_key == "n_iron"
     assert saved.status == "reserved"
+    assert saved.draw_number == 1
+    assert saved.draw_kind == "normal"
+    assert saved.cost_xp == 100
+
+    for expected_number in (2, 3):
+        store.mark_minecraft_item_gacha_status(saved.draw_id, "delivered")
+        saved, created = _reserve(store, account_id)
+        assert created
+        assert saved.draw_number == expected_number
+
+    store.mark_minecraft_item_gacha_status(saved.draw_id, "delivered")
+    with pytest.raises(MinecraftItemGachaDailyLimitReached):
+        _reserve(store, account_id)
+    assert (
+        store.count_minecraft_item_gacha_draws(
+            guild_id=456, discord_user_id=123, draw_day="2026-08-14"
+        )
+        == 3
+    )
 
 
 def test_store_tracks_delivery_and_each_public_notification(tmp_path) -> None:
@@ -713,26 +813,25 @@ def test_concurrent_notification_flush_sends_each_destination_once(tmp_path) -> 
     channel.send.assert_awaited_once()
 
 
-def test_draw_delivers_once_and_logs_n_to_minecraft_and_discord(tmp_path) -> None:
+def test_three_daily_draws_deliver_and_fourth_is_rejected(tmp_path) -> None:
     bot, account, channel = _bot_with_account(tmp_path)
-    rcon = GachaRcon()
+    rcon = GachaRcon(["Gave 24 [Iron Ingot] to Steve"] * 3)
     bot._rcon = rcon  # type: ignore[assignment]
-    first = _interaction()
-    second = _interaction()
+    interactions = [_interaction() for _ in range(4)]
     reward = get_item_gacha_reward("n_iron")
 
     async def exercise() -> None:
         with patch("mc_bot.bot.draw_item_gacha_reward", return_value=reward):
-            await bot.draw_minecraft_item_gacha(first)  # type: ignore[arg-type]
-            await bot.draw_minecraft_item_gacha(second)  # type: ignore[arg-type]
+            for interaction in interactions:
+                await bot.draw_minecraft_item_gacha(interaction)  # type: ignore[arg-type]
 
     asyncio.run(exercise())
 
-    assert rcon.commands.count("give Steve minecraft:iron_ingot 24") == 1
+    assert rcon.commands.count("give Steve minecraft:iron_ingot 24") == 3
     public_commands = [command for command in rcon.commands if command.startswith("tellraw @a ")]
-    assert len(public_commands) == 1
-    assert "【N】" in public_commands[0]
-    channel.send.assert_awaited_once()
+    assert len(public_commands) == 3
+    assert all("【N】" in command for command in public_commands)
+    assert channel.send.await_count == 3
     log = channel.send.await_args.kwargs
     assert log["content"] == "<@123>"
     assert log["allowed_mentions"].everyone is False
@@ -741,8 +840,11 @@ def test_draw_delivers_once_and_logs_n_to_minecraft_and_discord(tmp_path) -> Non
     assert "【N】" in log["embed"].title
     assert "**Steve (<@123>) さん** が" in str(log["embed"].description)
     assert "鉄インゴット x24" in str(log["embed"].description)
-    assert "受け取りました" in first.followup.send.await_args.args[0]
-    assert "本日は受取済み" in second.followup.send.await_args.args[0]
+    for draw_number, interaction in enumerate(interactions[:3], start=1):
+        received = interaction.followup.send.await_args.args[0]
+        assert "受け取りました" in received
+        assert f"本日 {draw_number}/3回" in received
+    assert "3回" in interactions[3].followup.send.await_args.args[0]
     draw = bot._accounts.get_minecraft_item_gacha_draw(
         guild_id=456,
         discord_user_id=123,
@@ -750,19 +852,74 @@ def test_draw_delivers_once_and_logs_n_to_minecraft_and_discord(tmp_path) -> Non
     )
     assert draw is not None
     assert draw.account_id == account.id
+    assert draw.draw_number == 3
+    assert draw.draw_kind == "normal"
+    assert draw.cost_xp == 100
     assert draw.status == "delivered"
     assert draw.minecraft_notified
     assert draw.discord_notified
+    assert bot._level_bot_xp.request_item_gacha_spend.await_count == 3  # type: ignore[attr-defined]
+    for spend_call in bot._level_bot_xp.request_item_gacha_spend.await_args_list:  # type: ignore[attr-defined]
+        assert spend_call.kwargs["guild_id"] == 456
+        assert spend_call.kwargs["user_id"] == 123
+        assert spend_call.kwargs["account_id"] == account.id
+        assert spend_call.kwargs["draw_day"] == draw.draw_day
+        assert spend_call.kwargs["expected_cost_xp"] == 100
+    assert bot._level_bot_xp.update_item_gacha_spend.await_count == 3  # type: ignore[attr-defined]
+    assert "サーバーXP **100**消費" in interactions[0].followup.send.await_args.args[0]
+
+
+def test_premium_draw_uses_1000_xp_and_persists_its_kind(tmp_path) -> None:
+    bot, account, channel = _bot_with_account(tmp_path)
+    bot._rcon = GachaRcon(["Gave 3 [Diamond] to Steve"])  # type: ignore[assignment]
+    wallet_before = MinecraftXpWallet(total_xp=2_000, spent_xp=0, available_xp=2_000)
+    wallet_after = MinecraftXpWallet(total_xp=2_000, spent_xp=1_000, available_xp=1_000)
+    bot._level_bot_xp.request_item_gacha_spend.return_value = (  # type: ignore[attr-defined]
+        MinecraftItemGachaSpendRequest(
+            status="reserved",
+            message="予約しました。",
+            cost_xp=1_000,
+            wallet_before=wallet_before,
+            wallet_after=wallet_after,
+        )
+    )
+    interaction = _interaction()
+
+    async def exercise() -> None:
+        with patch(
+            "mc_bot.bot.draw_item_gacha_reward",
+            return_value=get_item_gacha_reward("r_diamond"),
+        ):
+            await bot.draw_minecraft_item_gacha(  # type: ignore[arg-type]
+                interaction,
+                draw_kind="premium",
+                expected_cost_xp=1_000,
+            )
+
+    asyncio.run(exercise())
+
+    draw = bot._accounts.get_minecraft_item_gacha_draw(
+        guild_id=456,
+        discord_user_id=123,
+        draw_day=item_gacha_day(datetime.now(UTC)),
+    )
+    assert draw is not None
+    assert draw.account_id == account.id
+    assert draw.draw_kind == "premium"
+    assert draw.cost_xp == 1_000
+    assert draw.tier == "R"
+    assert draw.status == "delivered"
     bot._level_bot_xp.request_item_gacha_spend.assert_awaited_once_with(  # type: ignore[attr-defined]
         guild_id=456,
         user_id=123,
         request_id=draw.draw_id,
         account_id=account.id,
         draw_day=draw.draw_day,
-        expected_cost_xp=100,
+        expected_cost_xp=1_000,
     )
-    assert bot._level_bot_xp.update_item_gacha_spend.await_count == 2  # type: ignore[attr-defined]
-    assert "サーバーXP **100**消費" in first.followup.send.await_args.args[0]
+    assert "R以上確定" in interaction.followup.send.await_args.args[0]
+    assert "**1,000**消費" in interaction.followup.send.await_args.args[0]
+    channel.send.assert_awaited_once()
 
 
 def test_draw_is_retryable_while_payment_is_requested_and_reserved_before_rcon(
@@ -836,27 +993,45 @@ def test_explicit_minecraft_rejection_retries_the_same_secret_reward(tmp_path) -
     assert actions == ["cancel", "complete"]
 
 
-def test_ambiguous_rcon_delivery_is_never_retried(tmp_path) -> None:
+def test_ambiguous_delivery_consumes_one_slot_and_next_draw_is_new(tmp_path) -> None:
     bot, _, channel = _bot_with_account(tmp_path)
-    rcon = GachaRcon([OSError("RCON response lost")])
+    rcon = GachaRcon([OSError("RCON response lost"), "Gave 1 [Elytra] to Steve"])
     bot._rcon = rcon  # type: ignore[assignment]
     first = _interaction()
     second = _interaction()
-    reward = get_item_gacha_reward("n_iron")
 
     async def exercise() -> None:
-        with patch("mc_bot.bot.draw_item_gacha_reward", return_value=reward):
+        with patch(
+            "mc_bot.bot.draw_item_gacha_reward",
+            side_effect=[
+                get_item_gacha_reward("n_iron"),
+                get_item_gacha_reward("ssr_elytra"),
+            ],
+        ):
             await bot.draw_minecraft_item_gacha(first)  # type: ignore[arg-type]
             await bot.draw_minecraft_item_gacha(second)  # type: ignore[arg-type]
 
     asyncio.run(exercise())
 
     gives = [command for command in rcon.commands if command.startswith("give Steve ")]
-    assert gives == ["give Steve minecraft:iron_ingot 24"]
+    assert gives == [
+        "give Steve minecraft:iron_ingot 24",
+        "give Steve minecraft:elytra 1",
+    ]
     assert "再抽選は行いません" in first.followup.send.await_args.args[0]
-    assert "再抽選は行いません" in second.followup.send.await_args.args[0]
-    channel.send.assert_not_awaited()
-    assert bot._level_bot_xp.request_item_gacha_spend.await_count == 1  # type: ignore[attr-defined]
+    assert "受け取りました" in second.followup.send.await_args.args[0]
+    channel.send.assert_awaited_once()
+    assert bot._level_bot_xp.request_item_gacha_spend.await_count == 2  # type: ignore[attr-defined]
+
+    with sqlite3.connect(tmp_path / "accounts.db") as connection:
+        rows = connection.execute(
+            """
+            SELECT draw_number, status
+            FROM minecraft_item_gacha_draws
+            ORDER BY draw_number
+            """
+        ).fetchall()
+    assert rows == [(1, "ambiguous"), (2, "delivered")]
 
 
 def test_discord_log_failure_retries_only_the_log_not_the_reward(tmp_path) -> None:
@@ -931,4 +1106,38 @@ def test_insufficient_xp_does_not_deliver_and_can_retry_same_reward(tmp_path) ->
         draw_day=item_gacha_day(datetime.now(UTC)),
     )
     assert draw is not None and draw.status == "retryable"
+    channel.send.assert_not_awaited()
+
+
+def test_spend_price_mismatch_cancels_without_delivering(tmp_path) -> None:
+    bot, _, channel = _bot_with_account(tmp_path)
+    rcon = GachaRcon()
+    bot._rcon = rcon  # type: ignore[assignment]
+    bot._level_bot_xp.request_item_gacha_spend.return_value = (  # type: ignore[attr-defined]
+        MinecraftItemGachaSpendRequest(
+            status="reserved",
+            message="予約しました。",
+            cost_xp=1_000,
+            wallet_before=MinecraftXpWallet(total_xp=2_000, spent_xp=0, available_xp=2_000),
+            wallet_after=MinecraftXpWallet(total_xp=2_000, spent_xp=1_000, available_xp=1_000),
+        )
+    )
+    interaction = _interaction()
+
+    asyncio.run(bot.draw_minecraft_item_gacha(interaction))  # type: ignore[arg-type]
+
+    assert rcon.commands == []
+    assert "価格が一致" in interaction.followup.send.await_args.args[0]
+    draw = bot._accounts.get_minecraft_item_gacha_draw(
+        guild_id=456,
+        discord_user_id=123,
+        draw_day=item_gacha_day(datetime.now(UTC)),
+    )
+    assert draw is not None and draw.status == "retryable"
+    bot._level_bot_xp.update_item_gacha_spend.assert_awaited_once_with(  # type: ignore[attr-defined]
+        request_id=draw.draw_id,
+        guild_id=456,
+        user_id=123,
+        action="cancel",
+    )
     channel.send.assert_not_awaited()

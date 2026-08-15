@@ -194,6 +194,9 @@ def test_parses_item_gacha_offer_and_spend() -> None:
     offer = LevelBotXpClient._parse_item_gacha_offer(
         {
             "cost_xp": 100,
+            "normal_cost_xp": 100,
+            "premium_cost_xp": 1_000,
+            "daily_limit": 3,
             "wallet": {"total_xp": 250, "spent_xp": 50, "available_xp": 200},
         }
     )
@@ -216,6 +219,8 @@ def test_parses_item_gacha_offer_and_spend() -> None:
     )
 
     assert offer.cost_xp == 100
+    assert offer.premium_cost_xp == 1_000
+    assert offer.daily_limit == 3
     assert offer.wallet.available_xp == 200
     assert spend.status == "reserved"
     assert spend.wallet_after.available_xp == 100

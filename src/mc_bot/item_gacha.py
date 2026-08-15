@@ -6,7 +6,7 @@ import re
 import secrets
 from dataclasses import dataclass
 from datetime import datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 from zoneinfo import ZoneInfo
 
 import discord
@@ -16,7 +16,32 @@ if TYPE_CHECKING:
 
 _JST = ZoneInfo("Asia/Tokyo")
 _SAFE_PLAYER_NAME = re.compile(r"\.?[A-Za-z0-9_]{1,32}")
-ITEM_GACHA_COST_XP = 100
+ITEM_GACHA_NORMAL_COST_XP = 100
+ITEM_GACHA_PREMIUM_COST_XP = 1_000
+ITEM_GACHA_DAILY_LIMIT = 3
+ITEM_GACHA_COST_XP = ITEM_GACHA_NORMAL_COST_XP
+type ItemGachaKind = Literal["normal", "premium"]
+
+_DRAW_TABLE_SIZE = 400
+_TIER_ORDER = ("N", "R", "SR", "SSR", "UR", "MYTHIC")
+_TIER_WEIGHTS_BY_KIND: dict[ItemGachaKind, dict[str, int]] = {
+    "normal": {
+        "N": 220,
+        "R": 112,
+        "SR": 44,
+        "SSR": 16,
+        "UR": 7,
+        "MYTHIC": 1,
+    },
+    "premium": {
+        "N": 0,
+        "R": 280,
+        "SR": 80,
+        "SSR": 28,
+        "UR": 10,
+        "MYTHIC": 2,
+    },
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,7 +72,9 @@ def _enchanted_book(
     )
 
 
-# 1600口で、N 35% / R 35% / SR 19% / SSR 7.5% / UR 3% / 幻 0.5%。
+# レアリティを先に公開確率で抽選し、そのランク内では既存weightを相対比として使う。
+# 通常は N 55% / R 28% / SR 11% / SSR 4% / UR 1.75% / 幻 0.25%、
+# R以上確定は R 70% / SR 20% / SSR 7% / UR 2.5% / 幻 0.5%。
 # Minecraft Java 26.2 の公式 recipe / loot_table / enchantment を基準に確認する。
 # パネルにはランク確率だけを出し、景品内容と個別確率は抽選まで公開しない。
 # keyは予約済み抽選の復旧に使うため、レアリティ変更後も既存値を維持する。
@@ -667,8 +694,16 @@ ITEM_GACHA_REWARDS = (
 )
 
 _REWARDS_BY_KEY = {reward.key: reward for reward in ITEM_GACHA_REWARDS}
-_TOTAL_WEIGHT = sum(reward.weight for reward in ITEM_GACHA_REWARDS)
-if _TOTAL_WEIGHT != 1600 or len(_REWARDS_BY_KEY) != len(ITEM_GACHA_REWARDS):
+_REWARDS_BY_TIER = {
+    tier: tuple(reward for reward in ITEM_GACHA_REWARDS if reward.tier == tier)
+    for tier in _TIER_ORDER
+}
+_CATALOG_TOTAL_WEIGHT = sum(reward.weight for reward in ITEM_GACHA_REWARDS)
+if (
+    _CATALOG_TOTAL_WEIGHT != 1600
+    or len(_REWARDS_BY_KEY) != len(ITEM_GACHA_REWARDS)
+    or any(sum(weights.values()) != _DRAW_TABLE_SIZE for weights in _TIER_WEIGHTS_BY_KIND.values())
+):
     raise RuntimeError("item gacha reward table is invalid")
 
 
@@ -678,14 +713,48 @@ def item_gacha_day(now: datetime) -> str:
     return now.astimezone(_JST).date().isoformat()
 
 
-def draw_item_gacha_reward(roll: int | None = None) -> ItemGachaReward:
-    selected = secrets.randbelow(_TOTAL_WEIGHT) if roll is None else roll
-    if not 0 <= selected < _TOTAL_WEIGHT:
+def item_gacha_cost_xp(draw_kind: ItemGachaKind) -> int:
+    return {
+        "normal": ITEM_GACHA_NORMAL_COST_XP,
+        "premium": ITEM_GACHA_PREMIUM_COST_XP,
+    }[draw_kind]
+
+
+def item_gacha_kind_label(draw_kind: ItemGachaKind) -> str:
+    return "通常" if draw_kind == "normal" else "R以上確定"
+
+
+def draw_item_gacha_reward(
+    draw_kind: ItemGachaKind = "normal",
+    roll: int | None = None,
+    reward_roll: int | None = None,
+) -> ItemGachaReward:
+    try:
+        tier_weights = _TIER_WEIGHTS_BY_KIND[draw_kind]
+    except KeyError as error:
+        raise ValueError("unknown item gacha kind") from error
+    selected = secrets.randbelow(_DRAW_TABLE_SIZE) if roll is None else roll
+    if not 0 <= selected < _DRAW_TABLE_SIZE:
         raise ValueError("roll is outside the item gacha table")
     cursor = 0
-    for reward in ITEM_GACHA_REWARDS:
-        cursor += reward.weight
+    selected_tier: str | None = None
+    for tier in _TIER_ORDER:
+        cursor += tier_weights[tier]
         if selected < cursor:
+            selected_tier = tier
+            break
+    if selected_tier is None:
+        raise RuntimeError("item gacha tier table did not select a tier")
+
+    candidates = _REWARDS_BY_TIER[selected_tier]
+    candidate_total = sum(reward.weight for reward in candidates)
+    selected_reward = secrets.randbelow(candidate_total) if reward_roll is None else reward_roll
+    if not 0 <= selected_reward < candidate_total:
+        raise ValueError("reward_roll is outside the selected item gacha tier")
+    cursor = 0
+    for reward in candidates:
+        cursor += reward.weight
+        if selected_reward < cursor:
             return reward
     raise RuntimeError("item gacha reward table did not select a reward")
 
@@ -766,20 +835,27 @@ def item_gacha_panel_embed() -> discord.Embed:
         title="🎁 Minecraft アイテムガチャ",
         description=(
             "連携したMinecraftアカウントで参加中に、"
-            f"**サーバーXP {ITEM_GACHA_COST_XP:,}**で1日1回引けます。\n"
+            f"通常 **{ITEM_GACHA_NORMAL_COST_XP:,} XP**、R以上確定 "
+            f"**{ITEM_GACHA_PREMIUM_COST_XP:,} XP**から選べます。\n"
+            f"両方を合わせて1日 **{ITEM_GACHA_DAILY_LIMIT}回**までです。\n"
             "何が出るかは受け取るまで秘密。景品はその場でMinecraftへ届きます。"
         ),
         color=discord.Color.gold(),
     )
     embed.add_field(
-        name="ランク確率",
-        value="`N 35%` `R 35%` `SR 19%`\n`SSR 7.5%` `UR 3%` `幻 0.5%`",
+        name=f"通常 · {ITEM_GACHA_NORMAL_COST_XP:,} XP",
+        value="`N 55%` `R 28%` `SR 11%`\n`SSR 4%` `UR 1.75%` `幻 0.25%`",
+        inline=False,
+    )
+    embed.add_field(
+        name=f"R以上確定 · {ITEM_GACHA_PREMIUM_COST_XP:,} XP",
+        value="`R 70%` `SR 20%` `SSR 7%`\n`UR 2.5%` `幻 0.5%`",
         inline=False,
     )
     embed.add_field(
         name="料金・更新・通知",
         value=(
-            f"1回 **{ITEM_GACHA_COST_XP:,} XP**・毎日 **日本時間0:00** に更新します。\n"
+            f"1日合計 **{ITEM_GACHA_DAILY_LIMIT}回**・毎日 **日本時間0:00** に更新します。\n"
             "Nを含むすべての結果をMinecraft内チャットとDiscordログへ通知します。\n"
             "インベントリに入らない分は足元へドロップします。"
         ),
@@ -799,14 +875,24 @@ class MinecraftItemGachaPanelView(discord.ui.View):
         self.bot = bot
 
     @discord.ui.button(
-        label="今日のガチャを引く",
+        label="通常 100 XP",
         emoji="🎁",
         style=discord.ButtonStyle.primary,
-        custom_id="mc-item-gacha:draw",
+        custom_id="mc-item-gacha:draw:normal",
     )
-    async def draw(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+    async def normal(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if await self.bot.validate_item_gacha_panel(interaction):
-            await self.bot.show_minecraft_item_gacha_confirmation(interaction)
+            await self.bot.show_minecraft_item_gacha_confirmation(interaction, "normal")
+
+    @discord.ui.button(
+        label="R以上確定 1,000 XP",
+        emoji="💎",
+        style=discord.ButtonStyle.success,
+        custom_id="mc-item-gacha:draw:premium",
+    )
+    async def premium(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if await self.bot.validate_item_gacha_panel(interaction):
+            await self.bot.show_minecraft_item_gacha_confirmation(interaction, "premium")
 
 
 class MinecraftItemGachaConfirmView(discord.ui.View):
@@ -815,12 +901,14 @@ class MinecraftItemGachaConfirmView(discord.ui.View):
         bot: MinecraftDiscordBot,
         *,
         owner_id: int,
+        draw_kind: ItemGachaKind,
         cost_xp: int,
         affordable: bool,
     ) -> None:
         super().__init__(timeout=180)
         self.bot = bot
         self.owner_id = owner_id
+        self.draw_kind = draw_kind
         self.cost_xp = cost_xp
         self._operation_lock = asyncio.Lock()
         self._completed = False
@@ -850,6 +938,7 @@ class MinecraftItemGachaConfirmView(discord.ui.View):
             await interaction.response.edit_message(view=self)
             await self.bot.draw_minecraft_item_gacha(
                 interaction,
+                draw_kind=self.draw_kind,
                 expected_cost_xp=self.cost_xp,
                 response_ready=True,
             )
@@ -869,14 +958,20 @@ class MinecraftItemGachaConfirmView(discord.ui.View):
 
 __all__ = [
     "ITEM_GACHA_COST_XP",
+    "ITEM_GACHA_DAILY_LIMIT",
+    "ITEM_GACHA_NORMAL_COST_XP",
+    "ITEM_GACHA_PREMIUM_COST_XP",
     "ITEM_GACHA_REWARDS",
+    "ItemGachaKind",
     "ItemGachaReward",
     "MinecraftItemGachaConfirmView",
     "MinecraftItemGachaPanelView",
     "draw_item_gacha_reward",
     "get_item_gacha_reward",
+    "item_gacha_cost_xp",
     "item_gacha_day",
     "item_gacha_give_command",
+    "item_gacha_kind_label",
     "item_gacha_panel_embed",
     "item_gacha_result_embed",
     "item_gacha_tellraw_command",

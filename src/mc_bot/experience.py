@@ -128,6 +128,9 @@ class MinecraftResourceExchangeEvent:
 @dataclass(frozen=True, slots=True)
 class MinecraftItemGachaOffer:
     cost_xp: int
+    normal_cost_xp: int
+    premium_cost_xp: int
+    daily_limit: int
     wallet: MinecraftXpWallet
 
 
@@ -1078,9 +1081,17 @@ class LevelBotXpClient:
             raise ValueError("item gacha offer must be an object")
         offer = MinecraftItemGachaOffer(
             cost_xp=int(item["cost_xp"]),
+            normal_cost_xp=int(item["normal_cost_xp"]),
+            premium_cost_xp=int(item["premium_cost_xp"]),
+            daily_limit=int(item["daily_limit"]),
             wallet=cls._parse_wallet(item["wallet"]),
         )
-        if offer.cost_xp <= 0:
+        if (
+            offer.cost_xp <= 0
+            or offer.normal_cost_xp <= 0
+            or offer.premium_cost_xp <= 0
+            or offer.daily_limit <= 0
+        ):
             raise ValueError("item gacha offer has invalid cost")
         return offer
 
