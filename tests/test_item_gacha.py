@@ -4,6 +4,7 @@ import uuid
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
+from itertools import pairwise
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -139,15 +140,15 @@ def _interaction():
 
 
 def test_reward_table_has_exact_published_tier_probabilities() -> None:
-    selected = [draw_item_gacha_reward(roll) for roll in range(800)]
+    selected = [draw_item_gacha_reward(roll) for roll in range(1600)]
 
     assert Counter(reward.tier for reward in selected) == {
-        "N": 280,
-        "R": 280,
-        "SR": 152,
-        "SSR": 60,
-        "UR": 24,
-        "MYTHIC": 4,
+        "N": 560,
+        "R": 560,
+        "SR": 304,
+        "SSR": 120,
+        "UR": 48,
+        "MYTHIC": 8,
     }
     assert Counter(reward.key for reward in selected) == {
         reward.key: reward.weight for reward in ITEM_GACHA_REWARDS
@@ -155,7 +156,24 @@ def test_reward_table_has_exact_published_tier_probabilities() -> None:
     with pytest.raises(ValueError):
         draw_item_gacha_reward(-1)
     with pytest.raises(ValueError):
-        draw_item_gacha_reward(800)
+        draw_item_gacha_reward(1600)
+
+
+def test_reward_table_has_no_per_item_rarity_inversion() -> None:
+    tier_order = ("N", "R", "SR", "SSR", "UR", "MYTHIC")
+    weights_by_tier = {
+        tier: [reward.weight for reward in ITEM_GACHA_REWARDS if reward.tier == tier]
+        for tier in tier_order
+    }
+
+    average_weights = [
+        sum(weights_by_tier[tier]) / len(weights_by_tier[tier]) for tier in tier_order
+    ]
+    assert all(common > rare for common, rare in pairwise(average_weights))
+    assert all(
+        max(weights_by_tier[rare]) <= min(weights_by_tier[common])
+        for common, rare in pairwise(tier_order)
+    )
 
 
 def test_reward_table_has_all_non_curse_max_level_enchantment_books() -> None:
@@ -186,15 +204,9 @@ def test_reward_table_has_all_non_curse_max_level_enchantment_books() -> None:
             "n_thorns": ("thorns", 3, "棘の鎧IIIのエンチャント本"),
         },
         "R": {
-            "r_mending": ("mending", 1, "修繕のエンチャント本"),
-            "r_fortune": ("fortune", 3, "幸運IIIのエンチャント本"),
-            "r_efficiency": ("efficiency", 5, "効率強化Vのエンチャント本"),
-            "r_unbreaking": ("unbreaking", 3, "耐久力IIIのエンチャント本"),
             "r_silk_touch": ("silk_touch", 1, "シルクタッチのエンチャント本"),
-            "r_protection": ("protection", 4, "ダメージ軽減IVのエンチャント本"),
             "r_feather_falling": ("feather_falling", 4, "落下耐性IVのエンチャント本"),
             "r_looting": ("looting", 3, "ドロップ増加IIIのエンチャント本"),
-            "r_sharpness": ("sharpness", 5, "ダメージ増加Vのエンチャント本"),
             "r_power": ("power", 5, "射撃ダメージ増加Vのエンチャント本"),
             "r_infinity": ("infinity", 1, "無限のエンチャント本"),
             "r_depth_strider": ("depth_strider", 3, "水中歩行IIIのエンチャント本"),
@@ -208,13 +220,19 @@ def test_reward_table_has_all_non_curse_max_level_enchantment_books() -> None:
             "r_riptide": ("riptide", 3, "激流IIIのエンチャント本"),
         },
         "SR": {
+            "r_mending": ("mending", 1, "修繕のエンチャント本"),
+            "r_fortune": ("fortune", 3, "幸運IIIのエンチャント本"),
+            "r_efficiency": ("efficiency", 5, "効率強化Vのエンチャント本"),
+            "r_unbreaking": ("unbreaking", 3, "耐久力IIIのエンチャント本"),
+            "r_protection": ("protection", 4, "ダメージ軽減IVのエンチャント本"),
+            "r_sharpness": ("sharpness", 5, "ダメージ増加Vのエンチャント本"),
             "sr_swift_sneak": ("swift_sneak", 3, "スニーク速度上昇IIIのエンチャント本"),
             "sr_soul_speed": ("soul_speed", 3, "ソウルスピードIIIのエンチャント本"),
             "sr_density": ("density", 5, "重撃Vのエンチャント本"),
             "sr_breach": ("breach", 4, "防具貫通IVのエンチャント本"),
             "sr_lunge": ("lunge", 3, "突進IIIのエンチャント本"),
         },
-        "SSR": {
+        "UR": {
             "ssr_wind_burst": ("wind_burst", 3, "ウィンドバーストIIIのエンチャント本"),
         },
     }
@@ -232,9 +250,9 @@ def test_reward_table_has_all_non_curse_max_level_enchantment_books() -> None:
     assert set(actual) == set(expected)
     assert Counter(reward.tier for reward in actual.values()) == {
         "N": 15,
-        "R": 20,
-        "SR": 5,
-        "SSR": 1,
+        "R": 14,
+        "SR": 11,
+        "UR": 1,
     }
     for key, (tier, enchantment, level, item_name) in expected.items():
         reward = actual[key]
@@ -252,6 +270,15 @@ def test_reward_table_has_all_non_curse_max_level_enchantment_books() -> None:
 def test_reward_table_uses_current_nontrivial_rewards() -> None:
     item_ids = {reward.item_spec.split("[", 1)[0] for reward in ITEM_GACHA_REWARDS}
 
+    assert len(ITEM_GACHA_REWARDS) == 152
+    assert Counter(reward.tier for reward in ITEM_GACHA_REWARDS) == {
+        "N": 46,
+        "R": 49,
+        "SR": 28,
+        "SSR": 13,
+        "UR": 8,
+        "MYTHIC": 8,
+    }
     assert {"minecraft:name_tag", "minecraft:sponge", "minecraft:saddle"}.isdisjoint(item_ids)
     assert {
         "minecraft:breeze_rod",
@@ -259,11 +286,170 @@ def test_reward_table_uses_current_nontrivial_rewards() -> None:
         "minecraft:ominous_trial_key",
         "minecraft:heavy_core",
     } <= item_ids
+    assert {
+        "minecraft:sulfur",
+        "minecraft:cinnabar",
+        "minecraft:sulfur_cube_bucket",
+        "minecraft:diamond_spear",
+        "minecraft:netherite_spear",
+        "minecraft:diamond_nautilus_armor",
+        "minecraft:netherite_nautilus_armor",
+    } <= item_ids
+    assert {
+        "minecraft:recovery_compass",
+        "minecraft:sniffer_egg",
+        "minecraft:music_disc_creator",
+        "minecraft:silence_armor_trim_smithing_template",
+        "minecraft:dragon_head",
+        "minecraft:conduit",
+    } <= item_ids
     assert get_item_gacha_reward("r_breeze_rod").item_count == 8
     assert get_item_gacha_reward("r_wither_skull").item_count == 2
+    assert get_item_gacha_reward("r_wither_skull").tier == "SR"
     assert get_item_gacha_reward("r_ominous_trial_key").item_count == 1
     assert get_item_gacha_reward("sr_heavy_core").item_count == 1
+    assert get_item_gacha_reward("sr_heavy_core").tier == "SSR"
+    assert get_item_gacha_reward("sr_dragon_head").tier == "SSR"
+    assert get_item_gacha_reward("sr_silence_trim").tier == "SSR"
+    assert get_item_gacha_reward("ssr_wind_burst").tier == "UR"
+    assert get_item_gacha_reward("ur_bow").tier == "SSR"
+    assert get_item_gacha_reward("r_diamond_spear").tier == "N"
+    assert get_item_gacha_reward("r_sulfur_cube_bucket").tier == "N"
+    assert get_item_gacha_reward("n_nautilus_shell").tier == "R"
+    assert get_item_gacha_reward("sr_music_creator_box").tier == "R"
     assert get_item_gacha_reward("n_redstone").item_name == "レッドストーンダスト"
+    assert get_item_gacha_reward("n_sulfur").item_name == "硫黄"
+    assert get_item_gacha_reward("r_music_5").item_name == "レコード: Samuel Åberg - 5"
+
+
+def test_reward_table_has_food_and_potions_for_different_uses() -> None:
+    expected = {
+        "n_steak": ("N", "minecraft:cooked_beef", "ステーキ", 32),
+        "n_cooked_porkchop": ("N", "minecraft:cooked_porkchop", "焼き豚", 32),
+        "n_pumpkin_pie": ("N", "minecraft:pumpkin_pie", "パンプキンパイ", 32),
+        "n_honey_bottle": ("N", "minecraft:honey_bottle", "ハチミツ入りの瓶", 16),
+        "n_cookie": ("N", "minecraft:cookie", "クッキー", 64),
+        "n_night_vision_potion": (
+            "N",
+            'minecraft:potion[potion_contents="minecraft:long_night_vision"]',
+            "暗視のポーション 8:00",
+            3,
+        ),
+        "n_water_breathing_potion": (
+            "N",
+            'minecraft:potion[potion_contents="minecraft:long_water_breathing"]',
+            "水中呼吸のポーション 8:00",
+            3,
+        ),
+        "r_fire_resistance_potion": (
+            "R",
+            'minecraft:potion[potion_contents="minecraft:long_fire_resistance"]',
+            "耐火のポーション 8:00",
+            3,
+        ),
+        "r_slow_falling_potion": (
+            "R",
+            'minecraft:potion[potion_contents="minecraft:long_slow_falling"]',
+            "低速落下のポーション 4:00",
+            3,
+        ),
+        "r_healing_splash_potion": (
+            "R",
+            'minecraft:splash_potion[potion_contents="minecraft:strong_healing"]',
+            "治癒のスプラッシュポーション II",
+            4,
+        ),
+        "r_strength_potion": (
+            "R",
+            'minecraft:potion[potion_contents="minecraft:strong_strength"]',
+            "力のポーション II",
+            3,
+        ),
+        "r_regeneration_potion": (
+            "R",
+            'minecraft:potion[potion_contents="minecraft:strong_regeneration"]',
+            "再生のポーション II",
+            3,
+        ),
+        "r_oozing_splash_potion": (
+            "R",
+            'minecraft:splash_potion[potion_contents="minecraft:oozing"]',
+            "滲出のスプラッシュポーション",
+            3,
+        ),
+        "sr_harming_lingering_potion": (
+            "SR",
+            'minecraft:lingering_potion[potion_contents="minecraft:strong_harming"]',
+            "負傷の残留ポーション II",
+            4,
+        ),
+        "sr_turtle_master_splash_potion": (
+            "SR",
+            'minecraft:splash_potion[potion_contents="minecraft:strong_turtle_master"]',
+            "タートルマスターのスプラッシュポーション II",
+            3,
+        ),
+        "sr_wind_charged_lingering_potion": (
+            "SR",
+            'minecraft:lingering_potion[potion_contents="minecraft:wind_charged"]',
+            "蓄風の残留ポーション",
+            3,
+        ),
+        "sr_weaving_lingering_potion": (
+            "SR",
+            'minecraft:lingering_potion[potion_contents="minecraft:weaving"]',
+            "巣張りの残留ポーション",
+            3,
+        ),
+    }
+
+    assert Counter(tier for tier, *_ in expected.values()) == {"N": 7, "R": 6, "SR": 4}
+    for key, (tier, item_spec, item_name, item_count) in expected.items():
+        reward = get_item_gacha_reward(key)
+        assert (reward.tier, reward.item_spec, reward.item_name, reward.item_count) == (
+            tier,
+            item_spec,
+            item_name,
+            item_count,
+        )
+
+
+def test_reward_table_has_every_current_smithing_template() -> None:
+    actual = {
+        reward.item_spec.removeprefix("minecraft:")
+        for reward in ITEM_GACHA_REWARDS
+        if reward.item_spec.endswith("smithing_template")
+    }
+
+    assert actual == {
+        "bolt_armor_trim_smithing_template",
+        "coast_armor_trim_smithing_template",
+        "dune_armor_trim_smithing_template",
+        "eye_armor_trim_smithing_template",
+        "flow_armor_trim_smithing_template",
+        "host_armor_trim_smithing_template",
+        "netherite_upgrade_smithing_template",
+        "raiser_armor_trim_smithing_template",
+        "rib_armor_trim_smithing_template",
+        "sentry_armor_trim_smithing_template",
+        "shaper_armor_trim_smithing_template",
+        "silence_armor_trim_smithing_template",
+        "snout_armor_trim_smithing_template",
+        "spire_armor_trim_smithing_template",
+        "tide_armor_trim_smithing_template",
+        "vex_armor_trim_smithing_template",
+        "ward_armor_trim_smithing_template",
+        "wayfinder_armor_trim_smithing_template",
+        "wild_armor_trim_smithing_template",
+    }
+
+
+def test_joke_rewards_use_real_survival_items() -> None:
+    assert get_item_gacha_reward("n_poisonous_potato").item_spec == "minecraft:poisonous_potato"
+    assert get_item_gacha_reward("n_dead_bush").item_spec == "minecraft:dead_bush"
+    assert get_item_gacha_reward("n_legendary_dirt").item_spec == "minecraft:dirt"
+    assert all(reward.key != "n_obsidian_boat" for reward in ITEM_GACHA_REWARDS)
+    assert all(reward.item_spec != "minecraft:dark_oak_boat" for reward in ITEM_GACHA_REWARDS)
 
 
 def test_panel_publishes_only_tier_rates_and_keeps_rewards_secret() -> None:
@@ -353,6 +539,13 @@ def test_commands_use_only_catalog_rewards_and_safe_player_names() -> None:
     assert item_gacha_give_command("Steve", "n_iron") == ("give Steve minecraft:iron_ingot 24")
     assert "stored_enchantments={mending:1}" in item_gacha_give_command("Steve", "r_mending")
     assert "enchantments={sharpness:5" in item_gacha_give_command("Steve", "mythic_sword")
+    assert item_gacha_give_command("Steve", "r_diamond_spear") == (
+        "give Steve minecraft:diamond_spear 1"
+    )
+    assert item_gacha_give_command("Steve", "r_healing_splash_potion") == (
+        'give Steve minecraft:splash_potion[potion_contents="minecraft:strong_healing"] 4'
+    )
+    assert "lunge:3" in item_gacha_give_command("Steve", "mythic_spear")
     tellraw = item_gacha_tellraw_command("Steve", "n_iron")
     assert tellraw.startswith("tellraw @a ")
     assert "【N】" in tellraw

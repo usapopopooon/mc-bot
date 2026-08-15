@@ -102,8 +102,8 @@ Minecraft アイテムガチャは、オンライン中の連携プレイヤー�
 レア景品へ含めません。
 
 ```text
-client.jar: 4e618f09a0c649dde3fdf829df443ce0b8831e65
-ja_jp.json: 82ae51a68e114943fd95cc870643317dc02fe5e4
+client.jar: 2dc72797acbc1b63fc16a11c4ac393605f453754
+ja_jp.json: 53e15b2f69a51d0c4291d4d453acd81a1828f416
 ```
 
 ## 構成
