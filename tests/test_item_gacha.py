@@ -162,19 +162,19 @@ def test_reward_table_has_exact_published_tier_probabilities() -> None:
     premium = [draw_item_gacha_reward("premium", roll, 0) for roll in range(400)]
 
     assert Counter(reward.tier for reward in normal) == {
-        "N": 220,
-        "R": 112,
-        "SR": 44,
-        "SSR": 16,
-        "UR": 7,
-        "MYTHIC": 1,
+        "N": 208,
+        "R": 116,
+        "SR": 48,
+        "SSR": 18,
+        "UR": 8,
+        "MYTHIC": 2,
     }
     assert Counter(reward.tier for reward in premium) == {
-        "R": 280,
-        "SR": 80,
-        "SSR": 28,
-        "UR": 10,
-        "MYTHIC": 2,
+        "R": 260,
+        "SR": 88,
+        "SSR": 32,
+        "UR": 16,
+        "MYTHIC": 4,
     }
     with pytest.raises(ValueError):
         draw_item_gacha_reward("normal", -1)
@@ -182,6 +182,18 @@ def test_reward_table_has_exact_published_tier_probabilities() -> None:
         draw_item_gacha_reward("normal", 400)
     with pytest.raises(ValueError):
         draw_item_gacha_reward("invalid")  # type: ignore[arg-type]
+
+
+def test_premium_draw_has_higher_cumulative_upper_tier_rates() -> None:
+    normal = Counter(draw_item_gacha_reward("normal", roll, 0).tier for roll in range(400))
+    premium = Counter(draw_item_gacha_reward("premium", roll, 0).tier for roll in range(400))
+
+    assert sum(premium[tier] for tier in ("SR", "SSR", "UR", "MYTHIC")) == 140
+    assert sum(normal[tier] for tier in ("SR", "SSR", "UR", "MYTHIC")) == 76
+    assert sum(premium[tier] for tier in ("SSR", "UR", "MYTHIC")) == 52
+    assert sum(normal[tier] for tier in ("SSR", "UR", "MYTHIC")) == 28
+    assert sum(premium[tier] for tier in ("UR", "MYTHIC")) == 20
+    assert sum(normal[tier] for tier in ("UR", "MYTHIC")) == 10
 
 
 def test_reward_table_has_no_per_item_rarity_inversion() -> None:
@@ -623,9 +635,17 @@ def test_panel_publishes_only_tier_rates_and_keeps_rewards_secret() -> None:
     embed = item_gacha_panel_embed()
     rendered = str(embed.to_dict())
 
-    assert "N 55%" in rendered
-    assert "幻 0.25%" in rendered
-    assert "R 70%" in rendered
+    assert "N 52%" in rendered
+    assert "R 29%" in rendered
+    assert "SR 12%" in rendered
+    assert "SSR 4.5%" in rendered
+    assert "UR 2%" in rendered
+    assert "幻 0.5%" in rendered
+    assert "R 65%" in rendered
+    assert "SR 22%" in rendered
+    assert "SSR 8%" in rendered
+    assert "UR 4%" in rendered
+    assert "幻 1%" in rendered
     assert "100 XP" in rendered
     assert "1,000 XP" in rendered
     assert "1日 **3回**" in rendered

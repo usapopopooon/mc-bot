@@ -26,20 +26,20 @@ _DRAW_TABLE_SIZE = 400
 _TIER_ORDER = ("N", "R", "SR", "SSR", "UR", "MYTHIC")
 _TIER_WEIGHTS_BY_KIND: dict[ItemGachaKind, dict[str, int]] = {
     "normal": {
-        "N": 220,
-        "R": 112,
-        "SR": 44,
-        "SSR": 16,
-        "UR": 7,
-        "MYTHIC": 1,
+        "N": 208,
+        "R": 116,
+        "SR": 48,
+        "SSR": 18,
+        "UR": 8,
+        "MYTHIC": 2,
     },
     "premium": {
         "N": 0,
-        "R": 280,
-        "SR": 80,
-        "SSR": 28,
-        "UR": 10,
-        "MYTHIC": 2,
+        "R": 260,
+        "SR": 88,
+        "SSR": 32,
+        "UR": 16,
+        "MYTHIC": 4,
     },
 }
 
@@ -73,8 +73,8 @@ def _enchanted_book(
 
 
 # レアリティを先に公開確率で抽選し、そのランク内では既存weightを相対比として使う。
-# 通常は N 55% / R 28% / SR 11% / SSR 4% / UR 1.75% / 幻 0.25%、
-# R以上確定は R 70% / SR 20% / SSR 7% / UR 2.5% / 幻 0.5%。
+# 通常は N 52% / R 29% / SR 12% / SSR 4.5% / UR 2% / 幻 0.5%、
+# R以上確定は R 65% / SR 22% / SSR 8% / UR 4% / 幻 1%。
 # Minecraft Java 26.2 の公式 recipe / loot_table / enchantment を基準に確認する。
 # パネルにはランク確率だけを出し、景品内容と個別確率は抽選まで公開しない。
 # keyは予約済み抽選の復旧に使うため、レアリティ変更後も既存値を維持する。
@@ -983,12 +983,12 @@ def item_gacha_panel_embed() -> discord.Embed:
     )
     embed.add_field(
         name=f"通常 · {ITEM_GACHA_NORMAL_COST_XP:,} XP",
-        value="`N 55%` `R 28%` `SR 11%`\n`SSR 4%` `UR 1.75%` `幻 0.25%`",
+        value="`N 52%` `R 29%` `SR 12%`\n`SSR 4.5%` `UR 2%` `幻 0.5%`",
         inline=False,
     )
     embed.add_field(
         name=f"R以上確定 · {ITEM_GACHA_PREMIUM_COST_XP:,} XP",
-        value="`R 70%` `SR 20%` `SSR 7%`\n`UR 2.5%` `幻 0.5%`",
+        value="`R 65%` `SR 22%` `SSR 8%`\n`UR 4%` `幻 1%`",
         inline=False,
     )
     embed.add_field(
