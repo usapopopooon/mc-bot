@@ -37,12 +37,17 @@ def test_minecraft_xp_shop_panel_lists_api_packs() -> None:
         "`サーバーXP 100` → `Minecraft 500 XP`\n"
         "`サーバーXP 1,000` → `Minecraft 5,000 XP (Lv.0からLv.50近く)`"
     )
-    assert embed.fields[1].name == "⚠️ 交換前にご確認ください"
-    assert "参加していない状態ではMinecraft XPは加算されません" in str(embed.fields[1].value)
-    assert "サーバーXPも消費されません" in str(embed.fields[1].value)
-    assert embed.fields[2].name == "📢 交換完了時の通知"
-    assert "Discordのログチャンネル" in str(embed.fields[2].value)
-    assert "Minecraft内チャット" in str(embed.fields[2].value)
+    assert embed.fields[1].name == "🎮 ゲーム内コマンド"
+    assert "`/exchange`" in str(embed.fields[1].value)
+    assert "`/exchange xp <50|250|500|5000>`" in str(embed.fields[1].value)
+    assert "`/exchange balance`" in str(embed.fields[1].value)
+    assert "受け取りたいMinecraft XP量" in str(embed.fields[1].value)
+    assert embed.fields[2].name == "⚠️ 交換前にご確認ください"
+    assert "参加していない状態ではMinecraft XPは加算されません" in str(embed.fields[2].value)
+    assert "サーバーXPも消費されません" in str(embed.fields[2].value)
+    assert embed.fields[3].name == "📢 交換完了時の通知"
+    assert "Discordのログチャンネル" in str(embed.fields[3].value)
+    assert "Minecraft内チャット" in str(embed.fields[3].value)
     assert embed.footer.text == "残高・選択・確認画面は本人にのみ表示されます"
 
 

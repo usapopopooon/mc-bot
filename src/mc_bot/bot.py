@@ -5,7 +5,8 @@ import logging
 import re
 import time
 import uuid
-from dataclasses import replace
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from urllib.parse import quote
@@ -33,6 +34,7 @@ from mc_bot.emerald_exchange import (
     parse_emerald_diamond_exchange_result,
 )
 from mc_bot.events import EventType, LogEvent, parse_log_line
+from mc_bot.exchange_request import MinecraftExchangeRequest, parse_exchange_request
 from mc_bot.experience import (
     ADVANCEMENT_REWARD_IN_GAME_XP,
     ADVANCEMENT_REWARD_LEVEL_BOT_SOURCE_XP,
@@ -70,6 +72,7 @@ from mc_bot.formatting import (
     format_woodcutting_combo_milestone,
     format_xp_exchange,
 )
+from mc_bot.game_messages import private_tellraw_command
 from mc_bot.item_gacha import (
     ITEM_GACHA_COST_XP,
     ITEM_GACHA_DAILY_LIMIT,
@@ -88,6 +91,10 @@ from mc_bot.item_gacha import (
     item_gacha_result_embed,
     item_gacha_tellraw_command,
     item_gacha_tier_label,
+)
+from mc_bot.item_gacha_request import (
+    MinecraftItemGachaRequest,
+    parse_item_gacha_request,
 )
 from mc_bot.player_count import (
     PLAYER_COUNT_CHANNEL_NAME,
@@ -172,6 +179,29 @@ _GEYSER_XUID_URL = "https://api.geysermc.org/v2/xbox/xuid/"
 _PLAYERDB_XBOX_URL = "https://playerdb.co/api/player/xbox/"
 _STATUS_PANEL_REFRESH_SECONDS = 5 * 60
 _VOICE_BONUS_NOTIFICATION_COOLDOWN_SECONDS = 60.0
+_GAME_REQUEST_MAX_AGE = timedelta(minutes=5)
+_GAME_REQUEST_CLOCK_SKEW = timedelta(minutes=1)
+
+
+@dataclass(frozen=True, slots=True)
+class _GameCommandUser:
+    id: int
+
+
+class _GameCommandFollowup:
+    def __init__(self, send_message: Callable[[str], Awaitable[None]]) -> None:
+        self._send_message = send_message
+
+    async def send(self, message: str, *, ephemeral: bool = True) -> None:
+        del ephemeral
+        await self._send_message(message)
+
+
+@dataclass(frozen=True, slots=True)
+class _GameCommandInteraction:
+    guild_id: int
+    user: _GameCommandUser
+    followup: _GameCommandFollowup
 
 
 class MinecraftDiscordBot(discord.Client):
@@ -1270,6 +1300,9 @@ class MinecraftDiscordBot(discord.Client):
         draw_kind: ItemGachaKind = "normal",
         expected_cost_xp: int = ITEM_GACHA_COST_XP,
         response_ready: bool = False,
+        request_id: str | None = None,
+        known_account: MinecraftAccount | None = None,
+        draw_time: datetime | None = None,
     ) -> None:
         if interaction.guild_id is None:
             sender = (
@@ -1286,16 +1319,19 @@ class MinecraftDiscordBot(discord.Client):
             )
             return
         async with self._item_gacha_lock:
-            try:
-                account, reason = await self._online_exchange_account(interaction.user.id)
-            except (OSError, RconError, RuntimeError, ValueError) as error:
-                LOGGER.warning("Could not verify player for item gacha: %s", error)
-                await interaction.followup.send(
-                    "Minecraftサーバーへの参加状況を確認できませんでした。"
-                    "少し待ってから再度お試しください。",
-                    ephemeral=True,
-                )
-                return
+            account = known_account
+            reason = None
+            if account is None:
+                try:
+                    account, reason = await self._online_exchange_account(interaction.user.id)
+                except (OSError, RconError, RuntimeError, ValueError) as error:
+                    LOGGER.warning("Could not verify player for item gacha: %s", error)
+                    await interaction.followup.send(
+                        "Minecraftサーバーへの参加状況を確認できませんでした。"
+                        "少し待ってから再度お試しください。",
+                        ephemeral=True,
+                    )
+                    return
             if account is None:
                 message = (
                     "連携したMinecraftアカウントが複数同時にオンラインです。"
@@ -1307,11 +1343,11 @@ class MinecraftDiscordBot(discord.Client):
                 return
 
             reward = draw_item_gacha_reward(draw_kind)
-            draw_day = item_gacha_day(datetime.now(UTC))
+            draw_day = item_gacha_day(draw_time or datetime.now(UTC))
             try:
                 draw, created = await asyncio.to_thread(
                     self._accounts.reserve_minecraft_item_gacha_draw,
-                    draw_id=str(uuid.uuid4()),
+                    draw_id=request_id or str(uuid.uuid4()),
                     guild_id=interaction.guild_id,
                     discord_user_id=interaction.user.id,
                     account_id=account.id,
@@ -1336,6 +1372,17 @@ class MinecraftDiscordBot(discord.Client):
                 LOGGER.error("Could not reserve Minecraft item gacha draw: %s", error)
                 await interaction.followup.send(
                     "抽選を開始できませんでした。少し待ってから再度お試しください。",
+                    ephemeral=True,
+                )
+                return
+
+            if draw.draw_kind != draw_kind or draw.cost_xp != expected_cost_xp:
+                pending_kind: ItemGachaKind = "premium" if draw.draw_kind == "premium" else "normal"
+                pending_argument = "rare" if pending_kind == "premium" else "normal"
+                await interaction.followup.send(
+                    f"未完了の{item_gacha_kind_label(pending_kind)}ガチャ"
+                    f" ({draw.cost_xp:,} XP) があります。今回はXPを使っていません。"
+                    f"/gacha {pending_argument} で同じ景品の抽選を再開してください。",
                     ephemeral=True,
                 )
                 return
@@ -1576,6 +1623,350 @@ class MinecraftDiscordBot(discord.Client):
             await interaction.followup.send(
                 self._item_gacha_received_text(draw, already=False),
                 ephemeral=True,
+            )
+
+    async def _handle_minecraft_item_gacha_request(
+        self,
+        request: MinecraftItemGachaRequest,
+    ) -> None:
+        requested_at = self._fresh_game_request_time(request.requested_at)
+        if requested_at is None:
+            await self._send_minecraft_private_message(
+                request.player_name,
+                "このガチャ要求は期限切れです。もう一度 /gacha を実行してください。",
+            )
+            return
+        guild_id = self._settings.guild_id
+        if (
+            guild_id is None
+            or not self._config.level_bot_api_url
+            or not self._config.level_bot_api_token
+            or self._rcon is None
+        ):
+            await self._send_minecraft_private_message(
+                request.player_name,
+                "アイテムガチャは現在準備中です。少し待ってからお試しください。",
+            )
+            return
+        current_cost_xp = item_gacha_cost_xp(request.draw_kind)
+        if request.expected_cost_xp != current_cost_xp:
+            await self._send_minecraft_private_message(
+                request.player_name,
+                "ガチャ料金が更新されました。今回はXPを使っていません。"
+                "Minecraftサーバー更新後にもう一度 /gacha を実行してください。",
+            )
+            return
+        try:
+            account = await asyncio.to_thread(
+                self._accounts.get_by_player_uuid,
+                request.player_uuid,
+            )
+        except ValueError as error:
+            LOGGER.error(
+                "Could not identify item gacha account request=%s player_uuid=%s: %s",
+                request.request_id,
+                request.player_uuid,
+                error,
+            )
+            await self._send_minecraft_private_message(
+                request.player_name,
+                "アカウント連携を安全に確認できませんでした。管理者へご連絡ください。",
+            )
+            return
+        if account is None or account.status != "active" or account.discord_user_id is None:
+            await self._send_minecraft_private_message(
+                request.player_name,
+                "アイテムガチャにはDiscordアカウントとの連携が必要です。",
+            )
+            return
+
+        # Paperが記録したUUIDを本人確認に使い、現在オンラインの実名を付与先にする。
+        delivery_account = replace(account, server_player_name=request.player_name)
+        interaction = _GameCommandInteraction(
+            guild_id=guild_id,
+            user=_GameCommandUser(account.discord_user_id),
+            followup=_GameCommandFollowup(
+                lambda message: self._send_minecraft_private_message(
+                    request.player_name,
+                    message,
+                )
+            ),
+        )
+        await self.draw_minecraft_item_gacha(
+            interaction,  # type: ignore[arg-type]
+            draw_kind=request.draw_kind,
+            expected_cost_xp=current_cost_xp,
+            response_ready=True,
+            request_id=request.request_id,
+            known_account=delivery_account,
+            draw_time=requested_at,
+        )
+
+    async def _handle_minecraft_exchange_request(
+        self,
+        request: MinecraftExchangeRequest,
+    ) -> None:
+        if self._fresh_game_request_time(request.requested_at) is None:
+            await self._send_minecraft_private_message(
+                request.player_name,
+                "この交換要求は期限切れです。もう一度 /exchange を実行してください。",
+            )
+            return
+        guild_id = self._settings.guild_id
+        if guild_id is None or self._rcon is None:
+            await self._send_minecraft_private_message(
+                request.player_name,
+                "交換所は現在準備中です。少し待ってからお試しください。",
+            )
+            return
+        if request.kind != "emerald_diamond" and (
+            not self._config.level_bot_api_url or not self._config.level_bot_api_token
+        ):
+            await self._send_minecraft_private_message(
+                request.player_name,
+                "交換所は現在準備中です。少し待ってからお試しください。",
+            )
+            return
+        try:
+            account = await asyncio.to_thread(
+                self._accounts.get_by_player_uuid,
+                request.player_uuid,
+            )
+        except ValueError as error:
+            LOGGER.error(
+                "Could not identify exchange account request=%s player_uuid=%s: %s",
+                request.request_id,
+                request.player_uuid,
+                error,
+            )
+            await self._send_minecraft_private_message(
+                request.player_name,
+                "アカウント連携を安全に確認できませんでした。管理者へご連絡ください。",
+            )
+            return
+        if account is None or account.status != "active" or account.discord_user_id is None:
+            await self._send_minecraft_private_message(
+                request.player_name,
+                "交換所の利用にはDiscordアカウントとの連携が必要です。",
+            )
+            return
+
+        # Paperが記録したUUIDを本人確認に使い、非同期配布でも現在の実名を参照できるようにする。
+        if account.server_player_name != request.player_name:
+            minecraft_name = (
+                request.player_name.removeprefix(self._config.floodgate_username_prefix)
+                if account.edition == "bedrock"
+                else request.player_name
+            )
+            try:
+                account = await asyncio.to_thread(
+                    self._accounts.update_player_profile,
+                    account.id,
+                    minecraft_name=minecraft_name,
+                    server_player_name=request.player_name,
+                    player_uuid=request.player_uuid,
+                )
+            except ValueError as error:
+                LOGGER.error(
+                    "Could not update exchange player profile request=%s player_uuid=%s: %s",
+                    request.request_id,
+                    request.player_uuid,
+                    error,
+                )
+                await self._send_minecraft_private_message(
+                    request.player_name,
+                    "現在のプレイヤー名を安全に確認できませんでした。管理者へご連絡ください。",
+                )
+                return
+
+        user_id = account.discord_user_id
+        if request.kind == "balance":
+            shop = await self._level_bot_xp.fetch_xp_shop(guild_id, user_id)
+            message = (
+                "XP残高を取得できませんでした。少し待ってから再度お試しください。"
+                if shop is None
+                else (
+                    f"現在XP: {shop.wallet.available_xp:,} XP / "
+                    f"獲得 {shop.wallet.total_xp:,} XP / "
+                    f"消費済み {shop.wallet.spent_xp:,} XP"
+                )
+            )
+            await self._send_minecraft_private_message(request.player_name, message)
+            return
+        if request.kind == "xp":
+            await self._handle_minecraft_xp_exchange_request(
+                request,
+                guild_id=guild_id,
+                user_id=user_id,
+            )
+            return
+        if request.kind == "resource":
+            await self._handle_minecraft_resource_exchange_request(
+                request,
+                guild_id=guild_id,
+                user_id=user_id,
+            )
+            return
+        await self._handle_minecraft_emerald_exchange_request(request)
+
+    async def _handle_minecraft_xp_exchange_request(
+        self,
+        request: MinecraftExchangeRequest,
+        *,
+        guild_id: int,
+        user_id: int,
+    ) -> None:
+        shop = await self._level_bot_xp.fetch_xp_shop(guild_id, user_id)
+        pack = (
+            next(
+                (
+                    candidate
+                    for candidate in shop.packs
+                    if candidate.cost_xp == request.expected_cost_xp
+                    and candidate.reward_xp == request.expected_reward
+                ),
+                None,
+            )
+            if shop is not None
+            else None
+        )
+        if pack is None:
+            await self._send_minecraft_private_message(
+                request.player_name,
+                "XP交換の価格が更新されたか、交換所を取得できませんでした。"
+                "もう一度 /exchange を開いてください。",
+            )
+            return
+        result = await self._level_bot_xp.request_xp_exchange(
+            guild_id,
+            user_id,
+            request.request_id,
+            pack.cost_xp,
+            pack.reward_xp,
+        )
+        await self._send_minecraft_private_message(
+            request.player_name,
+            result.message
+            if result is not None
+            else "XP交換結果を確認できませんでした。少し待ってから再度お試しください。",
+        )
+
+    async def _handle_minecraft_resource_exchange_request(
+        self,
+        request: MinecraftExchangeRequest,
+        *,
+        guild_id: int,
+        user_id: int,
+    ) -> None:
+        shop = await self._level_bot_xp.fetch_resource_shop(guild_id, user_id)
+        pack = (
+            next(
+                (
+                    candidate
+                    for candidate in shop.packs
+                    if candidate.item_id == request.target
+                    and candidate.item_count == request.amount
+                    and candidate.cost_xp == request.expected_cost_xp
+                ),
+                None,
+            )
+            if shop is not None
+            else None
+        )
+        if pack is None:
+            await self._send_minecraft_private_message(
+                request.player_name,
+                "資源交換の価格が更新されたか、交換所を取得できませんでした。"
+                "もう一度 /exchange を開いてください。",
+            )
+            return
+        result = await self._level_bot_xp.request_resource_exchange(
+            guild_id,
+            user_id,
+            request.request_id,
+            pack.item_id,
+            pack.item_count,
+            pack.cost_xp,
+        )
+        await self._send_minecraft_private_message(
+            request.player_name,
+            result.message
+            if result is not None
+            else "資源交換結果を確認できませんでした。少し待ってから再度お試しください。",
+        )
+
+    async def _handle_minecraft_emerald_exchange_request(
+        self,
+        request: MinecraftExchangeRequest,
+    ) -> None:
+        try:
+            response = await self._execute_rcon(
+                emerald_diamond_exchange_command(
+                    request.player_uuid,
+                    request.amount,
+                    request.request_id,
+                )
+            )
+            result = parse_emerald_diamond_exchange_result(
+                response,
+                expected_request_id=request.request_id,
+                expected_emerald_count=request.amount,
+            )
+        except (OSError, RconError, RuntimeError, ValueError) as error:
+            LOGGER.warning(
+                "Could not complete game-command emerald exchange request=%s: %s",
+                request.request_id,
+                error,
+            )
+            await self._send_minecraft_private_message(
+                request.player_name,
+                "エメラルド交換結果を確認できませんでした。アイテム欄を確認し、"
+                "不明な場合は管理者へご連絡ください。",
+            )
+            return
+        messages = {
+            "completed": (
+                "この交換は完了済みです。"
+                if result.duplicate
+                else (
+                    f"交換完了: エメラルド x{result.emerald_count} → "
+                    f"ダイヤモンド x{result.diamond_count}"
+                )
+            ),
+            "insufficient_emeralds": "手持ちのエメラルドが不足しています。",
+            "inventory_full": "ダイヤモンドを受け取る空きがありません。",
+            "player_offline": "プレイヤーのオンライン状態を確認できませんでした。",
+        }
+        await self._send_minecraft_private_message(
+            request.player_name,
+            messages[result.status],
+        )
+
+    @staticmethod
+    def _fresh_game_request_time(value: str) -> datetime | None:
+        requested_at = datetime.fromisoformat(value)
+        if requested_at.utcoffset() is None:
+            return None
+        now = datetime.now(UTC)
+        if (
+            requested_at < now - _GAME_REQUEST_MAX_AGE
+            or requested_at > now + _GAME_REQUEST_CLOCK_SKEW
+        ):
+            return None
+        return requested_at
+
+    async def _send_minecraft_private_message(
+        self,
+        player_name: str,
+        message: str,
+    ) -> None:
+        try:
+            await self._execute_checked_rcon(private_tellraw_command(player_name, message))
+        except (OSError, RconError, RuntimeError, ValueError) as error:
+            LOGGER.warning(
+                "Could not send private Minecraft response to %s: %s",
+                player_name,
+                error,
             )
 
     @staticmethod
@@ -3700,6 +4091,40 @@ class MinecraftDiscordBot(discord.Client):
 
     async def _forward_logs(self) -> None:
         async for pending_line in self._tailer.lines():
+            try:
+                exchange_request = parse_exchange_request(pending_line.text)
+            except ValueError as error:
+                LOGGER.warning("Ignored malformed Minecraft exchange request: %s", error)
+                await asyncio.to_thread(self._tailer.acknowledge, pending_line)
+                continue
+            if exchange_request is not None:
+                try:
+                    await self._handle_minecraft_exchange_request(exchange_request)
+                except Exception:
+                    LOGGER.exception(
+                        "Minecraft exchange request failed request=%s player_uuid=%s",
+                        exchange_request.request_id,
+                        exchange_request.player_uuid,
+                    )
+                await asyncio.to_thread(self._tailer.acknowledge, pending_line)
+                continue
+            try:
+                item_gacha_request = parse_item_gacha_request(pending_line.text)
+            except ValueError as error:
+                LOGGER.warning("Ignored malformed Minecraft item gacha request: %s", error)
+                await asyncio.to_thread(self._tailer.acknowledge, pending_line)
+                continue
+            if item_gacha_request is not None:
+                try:
+                    await self._handle_minecraft_item_gacha_request(item_gacha_request)
+                except Exception:
+                    LOGGER.exception(
+                        "Minecraft item gacha request failed request=%s player_uuid=%s",
+                        item_gacha_request.request_id,
+                        item_gacha_request.player_uuid,
+                    )
+                await asyncio.to_thread(self._tailer.acknowledge, pending_line)
+                continue
             try:
                 emerald_exchange = parse_emerald_diamond_exchange_event(pending_line.text)
             except ValueError as error:

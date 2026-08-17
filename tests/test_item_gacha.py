@@ -18,6 +18,7 @@ from mc_bot.experience import (
     MinecraftItemGachaSpendRequest,
     MinecraftXpWallet,
 )
+from mc_bot.game_messages import private_tellraw_command
 from mc_bot.item_gacha import (
     ITEM_GACHA_COST_XP,
     ITEM_GACHA_DAILY_LIMIT,
@@ -51,6 +52,8 @@ class GachaRcon:
             return result
         if command.startswith("tellraw @a "):
             return ""
+        if command.startswith("tellraw Steve "):
+            return ""
         raise AssertionError(f"unexpected RCON command: {command}")
 
 
@@ -76,10 +79,11 @@ def _reserve(
     *,
     reward_key: str = "n_iron",
     draw_kind: str = "normal",
+    draw_id: str | None = None,
 ):
     reward = get_item_gacha_reward(reward_key)
     return store.reserve_minecraft_item_gacha_draw(
-        draw_id=str(uuid.uuid4()),
+        draw_id=draw_id or str(uuid.uuid4()),
         guild_id=456,
         discord_user_id=123,
         account_id=account_id,
@@ -484,6 +488,10 @@ def test_panel_publishes_only_tier_rates_and_keeps_rewards_secret() -> None:
     assert "1,000 XP" in rendered
     assert "1日 **3回**" in rendered
     assert "日本時間0:00" in rendered
+    command_field = next(field for field in embed.fields if field.name == "🎮 ゲーム内コマンド")
+    assert "`/gacha`" in str(command_field.value)
+    assert "`/gacha normal`" in str(command_field.value)
+    assert "`/gacha rare`" in str(command_field.value)
     for reward in ITEM_GACHA_REWARDS:
         assert reward.item_name not in rendered
         assert reward.item_spec not in rendered
@@ -624,6 +632,7 @@ def test_commands_use_only_catalog_rewards_and_safe_player_names() -> None:
     assert item_gacha_give_command("Steve", "r_healing_splash_potion") == (
         'give Steve minecraft:splash_potion[potion_contents="minecraft:strong_healing"] 4'
     )
+    assert item_gacha_give_command("*Steve", "n_iron") == ("give *Steve minecraft:iron_ingot 24")
     assert "lunge:3" in item_gacha_give_command("Steve", "mythic_spear")
     tellraw = item_gacha_tellraw_command("Steve", "n_iron")
     assert tellraw.startswith("tellraw @a ")
@@ -633,6 +642,21 @@ def test_commands_use_only_catalog_rewards_and_safe_player_names() -> None:
         item_gacha_give_command("@a", "n_iron")
     with pytest.raises(ValueError):
         item_gacha_give_command("Steve", "unknown")
+
+
+def test_private_game_response_targets_only_the_requesting_player() -> None:
+    command = private_tellraw_command(
+        "Steve",
+        "受け取りました: **【R】ダイヤモンド x3**\n本日 1/3回",
+    )
+
+    assert command.startswith('tellraw Steve {"text":')
+    assert "@a" not in command
+    assert "**" not in command
+    assert "本日 1/3回" in command
+    assert private_tellraw_command("*Steve", "完了").startswith('tellraw *Steve {"text":')
+    with pytest.raises(ValueError):
+        private_tellraw_command("@a", "だめ")
 
 
 def test_result_embed_uses_minecraft_name_and_discord_mention() -> None:
@@ -684,6 +708,51 @@ def test_store_reuses_incomplete_draw_and_allows_three_completed_draws_per_day(
         )
         == 3
     )
+
+
+def test_store_replays_the_same_request_id_without_a_second_draw(tmp_path) -> None:
+    store, account_id = _store_with_account(tmp_path)
+    request_id = "11111111-1111-4111-8111-111111111111"
+    first, created = _reserve(store, account_id, draw_id=request_id)
+    assert created
+    store.mark_minecraft_item_gacha_status(first.draw_id, "delivered")
+
+    replayed, created = _reserve(
+        store,
+        account_id,
+        draw_id=request_id,
+        reward_key="r_diamond",
+    )
+
+    assert not created
+    assert replayed.draw_id == first.draw_id
+    assert replayed.reward_key == "n_iron"
+    assert replayed.status == "delivered"
+    assert (
+        store.count_minecraft_item_gacha_draws(
+            guild_id=456,
+            discord_user_id=123,
+            draw_day="2026-08-14",
+        )
+        == 1
+    )
+    reward = get_item_gacha_reward("n_iron")
+    with pytest.raises(ValueError, match="request ID was reused"):
+        store.reserve_minecraft_item_gacha_draw(
+            draw_id=request_id,
+            guild_id=456,
+            discord_user_id=999,
+            account_id=account_id,
+            player_name="Steve",
+            draw_day="2026-08-14",
+            draw_kind="normal",
+            cost_xp=100,
+            tier=reward.tier,
+            reward_key=reward.key,
+            item_spec=reward.item_spec,
+            item_name=reward.item_name,
+            item_count=reward.item_count,
+        )
 
 
 def test_store_tracks_delivery_and_each_public_notification(tmp_path) -> None:

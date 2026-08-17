@@ -123,10 +123,16 @@ def test_resource_panel_lists_server_rates_and_is_persistent() -> None:
     assert "**手持ち資源 → 資源**" in str(embed.fields[0].value)
     assert "`エメラルド x32` → `ダイヤモンド x1`" in str(embed.fields[0].value)
     assert "`エメラルド x64` → `ダイヤモンド x2`" in str(embed.fields[0].value)
-    assert "足元へドロップ" in str(embed.fields[1].value)
-    assert embed.fields[2].name == "📢 交換完了時の通知"
-    assert "**Discordのログチャンネル**" in str(embed.fields[2].value)
-    assert "**Minecraft内チャット**" in str(embed.fields[2].value)
+    assert embed.fields[1].name == "🎮 ゲーム内コマンド"
+    assert "`/exchange`" in str(embed.fields[1].value)
+    assert "`/exchange resource <diamond|emerald> <個数>`" in str(embed.fields[1].value)
+    assert "`/exchange emerald-diamond <32|64>`" in str(embed.fields[1].value)
+    assert "`/exchange balance`" in str(embed.fields[1].value)
+    assert "diamondは `1|3|8|16|32|64`" in str(embed.fields[1].value)
+    assert "足元へドロップ" in str(embed.fields[2].value)
+    assert embed.fields[3].name == "📢 交換完了時の通知"
+    assert "**Discordのログチャンネル**" in str(embed.fields[3].value)
+    assert "**Minecraft内チャット**" in str(embed.fields[3].value)
     assert embed.footer.text == "残高・選択・確認画面は本人にのみ表示されます"
     assert panel.timeout is None
     assert [child.custom_id for child in panel.children] == [
@@ -222,6 +228,9 @@ def test_open_resource_shop_refreshes_public_panel_and_private_menu_from_same_ra
 def test_resource_commands_allow_only_fixed_items_and_recipient() -> None:
     assert resource_give_command("Steve", "minecraft:diamond", 3) == (
         "give Steve minecraft:diamond 3"
+    )
+    assert resource_give_command("*Steve", "minecraft:diamond", 1) == (
+        "give *Steve minecraft:diamond 1"
     )
     actionbar = resource_exchange_actionbar_command("Steve", "minecraft:emerald", 4, 100)
     assert actionbar.startswith("title Steve actionbar ")

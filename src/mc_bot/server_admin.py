@@ -9,8 +9,9 @@ from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 
+from mc_bot.player_names import is_safe_server_player_name
+
 _FORMATTING_CODE = re.compile(r"§[0-9A-FK-OR]", re.IGNORECASE)
-_PLAYER_NAME = re.compile(r"[A-Za-z0-9_.-]{1,32}")
 _PLAYER_LIST = re.compile(
     r"There are\s+(\d+)\s+of a max of\s+\d+\s+players online:(?:\s*(.*))?",
     re.IGNORECASE,
@@ -47,7 +48,7 @@ def parse_online_players(response: str) -> list[str]:
     declared_count = int(match[1])
     names = match[2] or ""
     players = [name.strip() for name in names.split(",") if name.strip()]
-    if any(not _PLAYER_NAME.fullmatch(name) for name in players):
+    if any(not is_safe_server_player_name(name) for name in players):
         raise ValueError("Minecraftのオンラインプレイヤーを読み取れませんでした")
     if declared_count != len(players):
         raise ValueError("Minecraftのオンライン人数とプレイヤー一覧が一致しません")
@@ -71,7 +72,7 @@ def read_whitelisted_profiles(whitelist_path: Path) -> list[WhitelistedPlayer]:
             raise ValueError("whitelist.jsonの登録者を読み取れませんでした")
         name = entry["name"].strip()
         raw_uuid = entry["uuid"].strip()
-        if not _PLAYER_NAME.fullmatch(name):
+        if not is_safe_server_player_name(name):
             raise ValueError("whitelist.jsonの登録者を読み取れませんでした")
         if not raw_uuid:
             raise ValueError(f"whitelist.jsonのUUIDが正しくありません: {name}")
@@ -270,7 +271,7 @@ def read_whitelist_enabled(properties_path: Path) -> bool:
 
 
 def kick_command(player_name: str, reason: str) -> str:
-    if not _PLAYER_NAME.fullmatch(player_name):
+    if not is_safe_server_player_name(player_name):
         raise ValueError("無効なMinecraftプレイヤー名です")
     normalized_reason = " ".join(reason.split()).strip()
     if not 1 <= len(normalized_reason) <= 200:

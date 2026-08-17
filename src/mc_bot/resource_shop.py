@@ -2,13 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import json
-import re
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
 import discord
 
 from mc_bot.experience import MinecraftResourcePack, MinecraftResourceShop
+from mc_bot.player_names import is_safe_server_player_name
 from mc_bot.xp_shop import wallet_text
 
 if TYPE_CHECKING:
@@ -18,12 +18,11 @@ _RESOURCE_NAMES = {
     "minecraft:diamond": "ダイヤモンド",
     "minecraft:emerald": "エメラルド",
 }
-_SAFE_PLAYER_NAME = re.compile(r"\.?[A-Za-z0-9_]{1,32}")
 EMERALD_DIAMOND_PACKS = ((32, 1), (64, 2))
 
 
 def resource_give_command(player_name: str, item_id: str, item_count: int) -> str:
-    if _SAFE_PLAYER_NAME.fullmatch(player_name) is None:
+    if not is_safe_server_player_name(player_name):
         raise ValueError("player_name contains unsafe RCON characters")
     if item_id not in _RESOURCE_NAMES:
         raise ValueError("resource item is not allowed")
@@ -103,6 +102,17 @@ def minecraft_resource_shop_embed(
                 f"`エメラルド x{emeralds}` → `ダイヤモンド x{diamonds}`"
                 for emeralds, diamonds in EMERALD_DIAMOND_PACKS
             )
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="🎮 ゲーム内コマンド",
+        value=(
+            "スマホ版・Bedrock版: `/exchange` で交換メニューを開く\n"
+            "XP→資源: `/exchange resource <diamond|emerald> <個数>`\n"
+            "手持ち交換: `/exchange emerald-diamond <32|64>`\n"
+            "XP残高: `/exchange balance`\n"
+            "個数: diamondは `1|3|8|16|32|64`、emeraldは `4|16|32|64`"
         ),
         inline=False,
     )

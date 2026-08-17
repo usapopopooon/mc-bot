@@ -124,9 +124,9 @@ class FakeInteraction:
 
 
 def test_parses_online_players_from_rcon_list() -> None:
-    response = "There are 3 of a max of 20 players online: Steve, .Bedrock_User, Alex"
+    response = "There are 4 of a max of 20 players online: Steve, .Bedrock_User, *Other_User, Alex"
 
-    assert parse_online_players(response) == ["Steve", ".Bedrock_User", "Alex"]
+    assert parse_online_players(response) == ["Steve", ".Bedrock_User", "*Other_User", "Alex"]
 
 
 def test_parses_empty_online_player_list() -> None:

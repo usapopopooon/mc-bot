@@ -377,6 +377,9 @@ def test_builds_safe_experience_add_points_command() -> None:
     assert experience_add_points_command(".Bedrock_User", 25) == (
         "experience add .Bedrock_User 25 points"
     )
+    assert experience_add_points_command("*Bedrock_User", 25) == (
+        "experience add *Bedrock_User 25 points"
+    )
 
 
 def test_rejects_invalid_experience_add_points_command() -> None:

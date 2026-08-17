@@ -2,14 +2,14 @@ from __future__ import annotations
 
 import base64
 import binascii
-import re
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
 
+from mc_bot.player_names import is_safe_server_player_name
+
 _PREFIX = "[UsapoEventBridge] USAPO_ACTIVITY|1|"
-_PLAYER_NAME = re.compile(r"\.?[A-Za-z0-9_]{1,32}")
 
 
 class ActivityKind(StrEnum):
@@ -66,7 +66,7 @@ def parse_activity_event(line: str) -> MinecraftActivityEvent | None:
     ) as error:
         raise ValueError("Minecraft activity event contains an invalid value") from error
     if (
-        _PLAYER_NAME.fullmatch(player_name) is None
+        not is_safe_server_player_name(player_name)
         or amount <= 0
         or milliseconds < 0
         or (kind is not ActivityKind.EXPERIENCE and amount != 1)

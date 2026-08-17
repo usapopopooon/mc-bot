@@ -2,17 +2,17 @@ from __future__ import annotations
 
 import base64
 import binascii
-import re
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
+
+from mc_bot.player_names import is_safe_server_player_name
 
 _EVENT_PREFIXES = {
     1: "[UsapoEventBridge] USAPO_EMERALD_EXCHANGE|1|",
     2: "[UsapoEventBridge] USAPO_EMERALD_EXCHANGE|2|",
 }
 _RESULT_PREFIX = "USAPO_EMERALD_EXCHANGE_RESULT|2|"
-_PLAYER_NAME = re.compile(r"\.?[A-Za-z0-9_]{1,32}")
 _ALLOWED_EMERALD_COUNTS = frozenset({32, 64})
 _RESULT_STATUSES = frozenset(
     {"completed", "insufficient_emeralds", "inventory_full", "player_offline"}
@@ -125,7 +125,7 @@ def parse_emerald_diamond_exchange_event(
     ) as error:
         raise ValueError("Minecraft emerald exchange event contains an invalid value") from error
     if (
-        _PLAYER_NAME.fullmatch(player_name) is None
+        not is_safe_server_player_name(player_name)
         or (
             version == 1
             and (emerald_count not in {16, 32, 64} or diamond_count != emerald_count // 16)

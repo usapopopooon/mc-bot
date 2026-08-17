@@ -1695,6 +1695,22 @@ class AccountStore:
         now = _now()
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            existing_request = connection.execute(
+                "SELECT * FROM minecraft_item_gacha_draws WHERE draw_id = ?",
+                (normalized_draw_id,),
+            ).fetchone()
+            if existing_request is not None:
+                existing_draw = _minecraft_item_gacha_draw(existing_request)
+                if (
+                    existing_draw.guild_id != guild_id
+                    or existing_draw.discord_user_id != discord_user_id
+                    or existing_draw.account_id != account_id
+                    or existing_draw.draw_day != normalized_day
+                    or existing_draw.draw_kind != draw_kind
+                    or existing_draw.cost_xp != cost_xp
+                ):
+                    raise ValueError("Minecraft item gacha request ID was reused")
+                return existing_draw, False
             existing = connection.execute(
                 """
                 SELECT * FROM minecraft_item_gacha_draws

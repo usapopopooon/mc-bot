@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import re
 import secrets
 from dataclasses import dataclass
 from datetime import datetime
@@ -11,11 +10,12 @@ from zoneinfo import ZoneInfo
 
 import discord
 
+from mc_bot.player_names import is_safe_server_player_name
+
 if TYPE_CHECKING:
     from mc_bot.bot import MinecraftDiscordBot
 
 _JST = ZoneInfo("Asia/Tokyo")
-_SAFE_PLAYER_NAME = re.compile(r"\.?[A-Za-z0-9_]{1,32}")
 ITEM_GACHA_NORMAL_COST_XP = 100
 ITEM_GACHA_PREMIUM_COST_XP = 1_000
 ITEM_GACHA_DAILY_LIMIT = 3
@@ -767,14 +767,14 @@ def get_item_gacha_reward(reward_key: str) -> ItemGachaReward:
 
 
 def item_gacha_give_command(player_name: str, reward_key: str) -> str:
-    if _SAFE_PLAYER_NAME.fullmatch(player_name) is None:
+    if not is_safe_server_player_name(player_name):
         raise ValueError("player_name contains unsafe RCON characters")
     reward = get_item_gacha_reward(reward_key)
     return f"give {player_name} {reward.item_spec} {reward.item_count}"
 
 
 def item_gacha_tellraw_command(player_name: str, reward_key: str) -> str:
-    if _SAFE_PLAYER_NAME.fullmatch(player_name) is None:
+    if not is_safe_server_player_name(player_name):
         raise ValueError("player_name contains unsafe RCON characters")
     reward = get_item_gacha_reward(reward_key)
     tier = item_gacha_tier_label(reward.tier)
@@ -850,6 +850,15 @@ def item_gacha_panel_embed() -> discord.Embed:
     embed.add_field(
         name=f"R以上確定 · {ITEM_GACHA_PREMIUM_COST_XP:,} XP",
         value="`R 70%` `SR 20%` `SSR 7%`\n`UR 2.5%` `幻 0.5%`",
+        inline=False,
+    )
+    embed.add_field(
+        name="🎮 ゲーム内コマンド",
+        value=(
+            "スマホ版・Bedrock版: `/gacha` で選択メニューを開く\n"
+            "通常: `/gacha normal`\n"
+            "R以上確定: `/gacha rare`"
+        ),
         inline=False,
     )
     embed.add_field(

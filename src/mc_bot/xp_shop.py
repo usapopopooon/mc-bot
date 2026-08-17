@@ -41,6 +41,16 @@ def minecraft_xp_shop_embed(packs: tuple[MinecraftXpPack, ...]) -> discord.Embed
         inline=False,
     )
     embed.add_field(
+        name="🎮 ゲーム内コマンド",
+        value=(
+            "スマホ版・Bedrock版: `/exchange` で交換メニューを開く\n"
+            "Java版: `/exchange xp <50|250|500|5000>`\n"
+            "XP残高: `/exchange balance`\n"
+            "※ `xp` の数値には、受け取りたいMinecraft XP量を指定します。"
+        ),
+        inline=False,
+    )
+    embed.add_field(
         name="⚠️ 交換前にご確認ください",
         value=(
             "交換するときは、連携したアカウントでMinecraftサーバーに"

@@ -1,11 +1,10 @@
 from __future__ import annotations
 
 import json
-import re
+
+from mc_bot.player_names import is_safe_server_player_name
 
 FISHING_COMBO_WINDOW_SECONDS = 90
-
-_SAFE_PLAYER_NAME = re.compile(r"\.?[A-Za-z0-9_]{1,32}")
 
 
 def fishing_reward_xp(combo_count: int) -> int:
@@ -72,5 +71,5 @@ def fishing_combo_tellraw_command(
 
 
 def _validate_player_name(player_name: str) -> None:
-    if _SAFE_PLAYER_NAME.fullmatch(player_name) is None:
+    if not is_safe_server_player_name(player_name):
         raise ValueError("player_name contains unsafe RCON characters")

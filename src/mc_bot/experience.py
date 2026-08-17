@@ -13,6 +13,7 @@ from mc_bot.accounts import (
     MinecraftXpOutboxEvent,
     WoodcuttingComboRewardEvent,
 )
+from mc_bot.player_names import is_safe_server_player_name
 
 ADVANCEMENT_REWARD_LEVEL_BOT_XP = 100
 MINECRAFT_XP_PER_LEVEL_BOT_XP = 100
@@ -23,7 +24,6 @@ ADVANCEMENT_REWARD_IN_GAME_XP = 100
 
 LOGGER = logging.getLogger(__name__)
 _QUERY_RESULT = re.compile(r"\bhas\s+(\d+)\s+experience\s+(levels?|points?)\b", re.I)
-_SAFE_PLAYER_NAME = re.compile(r"\.?[A-Za-z0-9_]{1,32}")
 _RESOURCE_ITEM_NAMES = {
     "minecraft:diamond": "ダイヤモンド",
     "minecraft:emerald": "エメラルド",
@@ -178,13 +178,13 @@ def total_experience_points(level: int, points_into_level: int) -> int:
 def experience_query_command(player_name: str, unit: str) -> str:
     if unit not in {"levels", "points"}:
         raise ValueError("unit must be levels or points")
-    if _SAFE_PLAYER_NAME.fullmatch(player_name) is None:
+    if not is_safe_server_player_name(player_name):
         raise ValueError("player_name contains unsafe RCON characters")
     return f"experience query {player_name} {unit}"
 
 
 def experience_add_points_command(player_name: str, points: int) -> str:
-    if _SAFE_PLAYER_NAME.fullmatch(player_name) is None:
+    if not is_safe_server_player_name(player_name):
         raise ValueError("player_name contains unsafe RCON characters")
     if points <= 0:
         raise ValueError("points must be positive")
@@ -198,7 +198,7 @@ def voice_bonus_state_command(player_uuid: str, *, active: bool) -> str:
 
 
 def actionbar_clear_command(player_name: str) -> str:
-    if _SAFE_PLAYER_NAME.fullmatch(player_name) is None:
+    if not is_safe_server_player_name(player_name):
         raise ValueError("player_name contains unsafe RCON characters")
     return f'title {player_name} actionbar {{"text":""}}'
 

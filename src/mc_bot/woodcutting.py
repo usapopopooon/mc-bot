@@ -1,11 +1,10 @@
 from __future__ import annotations
 
 import json
-import re
+
+from mc_bot.player_names import is_safe_server_player_name
 
 WOODCUTTING_COMBO_WINDOW_SECONDS = 30
-
-_SAFE_PLAYER_NAME = re.compile(r"\.?[A-Za-z0-9_]{1,32}")
 
 
 def woodcutting_reward_xp(combo_count: int) -> int:
@@ -62,5 +61,5 @@ def woodcutting_xp_sound_command(player_name: str) -> str:
 
 
 def _validate_player_name(player_name: str) -> None:
-    if _SAFE_PLAYER_NAME.fullmatch(player_name) is None:
+    if not is_safe_server_player_name(player_name):
         raise ValueError("player_name contains unsafe RCON characters")
