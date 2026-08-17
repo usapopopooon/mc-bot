@@ -308,9 +308,16 @@ def test_reward_table_uses_current_nontrivial_rewards() -> None:
     assert {
         "minecraft:breeze_rod",
         "minecraft:wither_skeleton_skull",
-        "minecraft:ominous_trial_key",
         "minecraft:heavy_core",
     } <= item_ids
+    assert {
+        "minecraft:trial_key",
+        "minecraft:ominous_trial_key",
+        "minecraft:shulker_shell",
+        "minecraft:nautilus_shell",
+        "minecraft:echo_shard",
+        "minecraft:heart_of_the_sea",
+    }.isdisjoint(item_ids)
     assert {
         "minecraft:sulfur",
         "minecraft:cinnabar",
@@ -328,10 +335,15 @@ def test_reward_table_uses_current_nontrivial_rewards() -> None:
         "minecraft:dragon_head",
         "minecraft:conduit",
     } <= item_ids
-    assert get_item_gacha_reward("r_breeze_rod").item_count == 8
+    assert get_item_gacha_reward("r_breeze_rod_bulk").item_count == 12
     assert get_item_gacha_reward("r_wither_skull").item_count == 2
     assert get_item_gacha_reward("r_wither_skull").tier == "SR"
-    assert get_item_gacha_reward("r_ominous_trial_key").item_count == 1
+    assert get_item_gacha_reward("r_rocket_crate").item_count == 128
+    assert get_item_gacha_reward("r_xp_bottle_crate").item_count == 64
+    assert get_item_gacha_reward("r_shulker_box").item_count == 2
+    assert get_item_gacha_reward("r_iron_block_crate").item_count == 16
+    assert get_item_gacha_reward("r_ender_pearl_crate").item_count == 32
+    assert get_item_gacha_reward("r_obsidian_crate").item_count == 64
     assert get_item_gacha_reward("sr_heavy_core").item_count == 1
     assert get_item_gacha_reward("sr_heavy_core").tier == "SSR"
     assert get_item_gacha_reward("sr_dragon_head").tier == "SSR"
@@ -340,94 +352,112 @@ def test_reward_table_uses_current_nontrivial_rewards() -> None:
     assert get_item_gacha_reward("ur_bow").tier == "SSR"
     assert get_item_gacha_reward("r_diamond_spear").tier == "N"
     assert get_item_gacha_reward("r_sulfur_cube_bucket").tier == "N"
-    assert get_item_gacha_reward("n_nautilus_shell").tier == "R"
     assert get_item_gacha_reward("sr_music_creator_box").tier == "R"
     assert get_item_gacha_reward("n_redstone").item_name == "レッドストーンダスト"
     assert get_item_gacha_reward("n_sulfur").item_name == "硫黄"
     assert get_item_gacha_reward("r_music_5").item_name == "レコード: Samuel Åberg - 5"
 
 
-def test_reward_table_has_food_and_potions_for_different_uses() -> None:
+def test_reward_table_has_generous_consumable_quantities() -> None:
+    expected_counts = {
+        "n_rocket_bulk": 64,
+        "n_xp_bottle_bulk": 64,
+        "n_golden_carrot_bulk": 64,
+        "n_ender_pearl_bulk": 16,
+        "n_wind_charge_bulk": 64,
+        "n_chorus_fruit_bulk": 64,
+        "r_golden_apple_bulk": 6,
+        "r_breeze_rod_bulk": 12,
+        "r_shulker_box": 2,
+        "r_iron_block_crate": 16,
+        "r_ender_pearl_crate": 32,
+        "r_obsidian_crate": 64,
+        "r_rocket_crate": 128,
+        "r_xp_bottle_crate": 64,
+    }
     expected = {
-        "n_steak": ("N", "minecraft:cooked_beef", "ステーキ", 32),
-        "n_cooked_porkchop": ("N", "minecraft:cooked_porkchop", "焼き豚", 32),
-        "n_pumpkin_pie": ("N", "minecraft:pumpkin_pie", "パンプキンパイ", 32),
-        "n_honey_bottle": ("N", "minecraft:honey_bottle", "ハチミツ入りの瓶", 16),
+        "n_steak_bulk": ("N", "minecraft:cooked_beef", "ステーキ", 64),
+        "n_cooked_porkchop_bulk": ("N", "minecraft:cooked_porkchop", "焼き豚", 64),
+        "n_pumpkin_pie_bulk": ("N", "minecraft:pumpkin_pie", "パンプキンパイ", 64),
+        "n_honey_bottle_bulk": ("N", "minecraft:honey_bottle", "ハチミツ入りの瓶", 24),
         "n_cookie": ("N", "minecraft:cookie", "クッキー", 64),
-        "n_night_vision_potion": (
+        "n_night_vision_potion_bulk": (
             "N",
             'minecraft:potion[potion_contents="minecraft:long_night_vision"]',
             "暗視のポーション 8:00",
-            3,
+            6,
         ),
-        "n_water_breathing_potion": (
+        "n_water_breathing_potion_bulk": (
             "N",
             'minecraft:potion[potion_contents="minecraft:long_water_breathing"]',
             "水中呼吸のポーション 8:00",
-            3,
+            6,
         ),
-        "r_fire_resistance_potion": (
+        "r_fire_resistance_potion_bulk": (
             "R",
             'minecraft:potion[potion_contents="minecraft:long_fire_resistance"]',
             "耐火のポーション 8:00",
-            3,
+            6,
         ),
-        "r_slow_falling_potion": (
+        "r_slow_falling_potion_bulk": (
             "R",
             'minecraft:potion[potion_contents="minecraft:long_slow_falling"]',
             "低速落下のポーション 4:00",
-            3,
+            6,
         ),
-        "r_healing_splash_potion": (
+        "r_healing_splash_potion_bulk": (
             "R",
             'minecraft:splash_potion[potion_contents="minecraft:strong_healing"]',
             "治癒のスプラッシュポーション II",
-            4,
+            8,
         ),
-        "r_strength_potion": (
+        "r_strength_potion_bulk": (
             "R",
             'minecraft:potion[potion_contents="minecraft:strong_strength"]',
             "力のポーション II",
-            3,
+            6,
         ),
-        "r_regeneration_potion": (
+        "r_regeneration_potion_bulk": (
             "R",
             'minecraft:potion[potion_contents="minecraft:strong_regeneration"]',
             "再生のポーション II",
-            3,
+            6,
         ),
-        "r_oozing_splash_potion": (
+        "r_swiftness_potion": (
             "R",
-            'minecraft:splash_potion[potion_contents="minecraft:oozing"]',
-            "滲出のスプラッシュポーション",
-            3,
+            'minecraft:potion[potion_contents="minecraft:strong_swiftness"]',
+            "俊敏のポーション II 1:30",
+            6,
         ),
-        "sr_harming_lingering_potion": (
+        "sr_harming_lingering_potion_bulk": (
             "SR",
             'minecraft:lingering_potion[potion_contents="minecraft:strong_harming"]',
             "負傷の残留ポーション II",
-            4,
+            8,
         ),
-        "sr_turtle_master_splash_potion": (
+        "sr_turtle_master_splash_potion_bulk": (
             "SR",
             'minecraft:splash_potion[potion_contents="minecraft:strong_turtle_master"]',
             "タートルマスターのスプラッシュポーション II",
-            3,
+            6,
         ),
-        "sr_wind_charged_lingering_potion": (
+        "sr_wind_charged_lingering_potion_bulk": (
             "SR",
             'minecraft:lingering_potion[potion_contents="minecraft:wind_charged"]',
             "蓄風の残留ポーション",
-            3,
+            6,
         ),
-        "sr_weaving_lingering_potion": (
+        "sr_weaving_lingering_potion_bulk": (
             "SR",
             'minecraft:lingering_potion[potion_contents="minecraft:weaving"]',
             "巣張りの残留ポーション",
-            3,
+            6,
         ),
     }
 
+    assert {
+        key: get_item_gacha_reward(key).item_count for key in expected_counts
+    } == expected_counts
     assert Counter(tier for tier, *_ in expected.values()) == {"N": 7, "R": 6, "SR": 4}
     for key, (tier, item_spec, item_name, item_count) in expected.items():
         reward = get_item_gacha_reward(key)
@@ -437,6 +467,118 @@ def test_reward_table_has_food_and_potions_for_different_uses() -> None:
             item_name,
             item_count,
         )
+
+
+def test_retired_rewards_are_recoverable_but_cannot_be_drawn() -> None:
+    active_keys = {reward.key for reward in ITEM_GACHA_REWARDS}
+    active_r_weight = sum(reward.weight for reward in ITEM_GACHA_REWARDS if reward.tier == "R")
+    drawn_keys = {
+        draw_item_gacha_reward("premium", roll=0, reward_roll=reward_roll).key
+        for reward_roll in range(active_r_weight)
+    }
+    retired_rewards = {
+        "r_trial_key": ("minecraft:trial_key", 2),
+        "r_ominous_trial_key": ("minecraft:ominous_trial_key", 1),
+        "n_rocket": ("minecraft:firework_rocket", 48),
+        "n_xp_bottle": ("minecraft:experience_bottle", 24),
+        "n_golden_carrot": ("minecraft:golden_carrot", 32),
+        "n_ender_pearl": ("minecraft:ender_pearl", 12),
+        "n_wind_charge": ("minecraft:wind_charge", 16),
+        "n_chorus_fruit": ("minecraft:chorus_fruit", 32),
+        "n_steak": ("minecraft:cooked_beef", 32),
+        "n_cooked_porkchop": ("minecraft:cooked_porkchop", 32),
+        "n_pumpkin_pie": ("minecraft:pumpkin_pie", 32),
+        "n_honey_bottle": ("minecraft:honey_bottle", 16),
+        "n_night_vision_potion": (
+            'minecraft:potion[potion_contents="minecraft:long_night_vision"]',
+            3,
+        ),
+        "n_water_breathing_potion": (
+            'minecraft:potion[potion_contents="minecraft:long_water_breathing"]',
+            3,
+        ),
+        "r_golden_apple": ("minecraft:golden_apple", 3),
+        "r_breeze_rod": ("minecraft:breeze_rod", 8),
+        "r_fire_resistance_potion": (
+            'minecraft:potion[potion_contents="minecraft:long_fire_resistance"]',
+            3,
+        ),
+        "r_slow_falling_potion": (
+            'minecraft:potion[potion_contents="minecraft:long_slow_falling"]',
+            3,
+        ),
+        "r_healing_splash_potion": (
+            'minecraft:splash_potion[potion_contents="minecraft:strong_healing"]',
+            4,
+        ),
+        "r_strength_potion": (
+            'minecraft:potion[potion_contents="minecraft:strong_strength"]',
+            3,
+        ),
+        "r_regeneration_potion": (
+            'minecraft:potion[potion_contents="minecraft:strong_regeneration"]',
+            3,
+        ),
+        "sr_harming_lingering_potion": (
+            'minecraft:lingering_potion[potion_contents="minecraft:strong_harming"]',
+            4,
+        ),
+        "sr_turtle_master_splash_potion": (
+            'minecraft:splash_potion[potion_contents="minecraft:strong_turtle_master"]',
+            3,
+        ),
+        "sr_wind_charged_lingering_potion": (
+            'minecraft:lingering_potion[potion_contents="minecraft:wind_charged"]',
+            3,
+        ),
+        "sr_weaving_lingering_potion": (
+            'minecraft:lingering_potion[potion_contents="minecraft:weaving"]',
+            3,
+        ),
+        "r_shulker_shell": ("minecraft:shulker_shell", 2),
+        "n_nautilus_shell": ("minecraft:nautilus_shell", 4),
+        "r_echo_shard": ("minecraft:echo_shard", 4),
+        "r_heart_of_the_sea": ("minecraft:heart_of_the_sea", 1),
+        "r_oozing_splash_potion": (
+            'minecraft:splash_potion[potion_contents="minecraft:oozing"]',
+            3,
+        ),
+    }
+
+    assert retired_rewards.keys().isdisjoint(active_keys)
+    assert retired_rewards.keys().isdisjoint(drawn_keys)
+    assert {
+        key: (get_item_gacha_reward(key).item_spec, get_item_gacha_reward(key).item_count)
+        for key in retired_rewards
+    } == retired_rewards
+
+
+@pytest.mark.parametrize(
+    ("reward_key", "draw_kind", "cost_xp", "expected_command"),
+    [
+        ("n_rocket", "normal", 100, "give Steve minecraft:firework_rocket 48"),
+        ("n_nautilus_shell", "premium", 1_000, "give Steve minecraft:nautilus_shell 4"),
+    ],
+)
+def test_retired_reward_records_remain_deliverable(
+    reward_key: str,
+    draw_kind: str,
+    cost_xp: int,
+    expected_command: str,
+) -> None:
+    reward = get_item_gacha_reward(reward_key)
+    draw = SimpleNamespace(
+        reward_key=reward_key,
+        tier=reward.tier,
+        item_spec=reward.item_spec,
+        item_name=reward.item_name,
+        item_count=reward.item_count,
+        draw_kind=draw_kind,
+        cost_xp=cost_xp,
+    )
+
+    assert MinecraftDiscordBot._item_gacha_draw_matches_catalog(draw)
+    assert item_gacha_give_command("Steve", reward_key) == expected_command
 
 
 def test_reward_table_has_every_current_smithing_template() -> None:
@@ -629,8 +771,8 @@ def test_commands_use_only_catalog_rewards_and_safe_player_names() -> None:
     assert item_gacha_give_command("Steve", "r_diamond_spear") == (
         "give Steve minecraft:diamond_spear 1"
     )
-    assert item_gacha_give_command("Steve", "r_healing_splash_potion") == (
-        'give Steve minecraft:splash_potion[potion_contents="minecraft:strong_healing"] 4'
+    assert item_gacha_give_command("Steve", "r_healing_splash_potion_bulk") == (
+        'give Steve minecraft:splash_potion[potion_contents="minecraft:strong_healing"] 8'
     )
     assert item_gacha_give_command("*Steve", "n_iron") == ("give *Steve minecraft:iron_ingot 24")
     assert "lunge:3" in item_gacha_give_command("Steve", "mythic_spear")
