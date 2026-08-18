@@ -2040,6 +2040,8 @@ class MinecraftDiscordBot(discord.Client):
         )
         if created or listing.discord_message_id is None:
             await self._post_market_listing(listing)
+        else:
+            await self._refresh_market_listing(listing.listing_id, move_panel=False)
 
     async def _handle_market_request(self, request: MinecraftMarketRequest) -> None:
         if self._fresh_game_request_time(request.requested_at) is None:

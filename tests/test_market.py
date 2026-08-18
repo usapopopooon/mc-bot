@@ -134,6 +134,60 @@ def test_store_serializes_purchase_and_preserves_party_mapping(tmp_path) -> None
     )
 
 
+def test_store_refreshes_presentation_fields_without_weakening_listing_identity(
+    tmp_path,
+) -> None:
+    store = MarketStore(tmp_path / "accounts.db")
+    store.initialize()
+    store.add_listing(
+        listing_id=17,
+        event_id=REQUEST_ID,
+        seller_account_id=2,
+        seller_discord_user_id=2002,
+        seller_uuid=SELLER_UUID,
+        seller_name="OldSeller",
+        item_id="minecraft:ancient_debris",
+        item_name="ancient debris",
+        item_count=2,
+        price_xp=3_000,
+        created_at="2026-08-18T00:00:00+00:00",
+    )
+    store.set_discord_message(17, 901)
+
+    refreshed, created = store.add_listing(
+        listing_id=17,
+        event_id=REQUEST_ID,
+        seller_account_id=2,
+        seller_discord_user_id=2002,
+        seller_uuid=SELLER_UUID,
+        seller_name="Seller",
+        item_id="minecraft:ancient_debris",
+        item_name="古代の残骸",
+        item_count=2,
+        price_xp=3_000,
+        created_at="2026-08-18T00:00:00+00:00",
+    )
+
+    assert not created
+    assert refreshed.seller_name == "Seller"
+    assert refreshed.item_name == "古代の残骸"
+    assert refreshed.discord_message_id == 901
+    with pytest.raises(ValueError, match="idempotency conflict"):
+        store.add_listing(
+            listing_id=17,
+            event_id=REQUEST_ID,
+            seller_account_id=2,
+            seller_discord_user_id=2002,
+            seller_uuid=SELLER_UUID,
+            seller_name="Seller",
+            item_id="minecraft:ancient_debris",
+            item_name="古代の残骸",
+            item_count=2,
+            price_xp=3_001,
+            created_at="2026-08-18T00:00:00+00:00",
+        )
+
+
 def test_market_rcon_protocol_and_card() -> None:
     command = market_transfer_command("deliver", 17, BUYER_UUID, REQUEST_ID)
     result = parse_market_transfer_result(

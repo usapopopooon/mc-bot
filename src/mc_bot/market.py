@@ -124,20 +124,33 @@ class MarketStore:
             ).fetchone()
             if existing is not None:
                 listing = _listing(existing)
-                same = (
+                same_listing = (
                     listing.listing_id == listing_id
                     and listing.event_id == normalized_event
                     and listing.seller_account_id == seller_account_id
                     and listing.seller_discord_user_id == seller_discord_user_id
                     and listing.seller_uuid == normalized_uuid
-                    and listing.seller_name == seller_name
                     and listing.item_id == item_id
-                    and listing.item_name == item_name
                     and listing.item_count == item_count
                     and listing.price_xp == price_xp
                 )
-                if not same:
+                if not same_listing:
                     raise ValueError("market listing idempotency conflict")
+                if listing.seller_name != seller_name or listing.item_name != item_name:
+                    connection.execute(
+                        """
+                        UPDATE minecraft_market_listings
+                        SET seller_name = ?, item_name = ?, updated_at = ?
+                        WHERE listing_id = ?
+                        """,
+                        (seller_name, item_name, _now(), listing_id),
+                    )
+                    updated = connection.execute(
+                        "SELECT * FROM minecraft_market_listings WHERE listing_id = ?",
+                        (listing_id,),
+                    ).fetchone()
+                    assert updated is not None
+                    listing = _listing(updated)
                 return listing, False
             connection.execute(
                 """
