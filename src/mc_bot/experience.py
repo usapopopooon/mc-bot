@@ -143,6 +143,15 @@ class MinecraftItemGachaSpendRequest:
     wallet_after: MinecraftXpWallet
 
 
+@dataclass(frozen=True, slots=True)
+class MinecraftMarketPurchaseRequest:
+    status: str
+    message: str
+    request_id: str | None
+    wallet_before: MinecraftXpWallet
+    wallet_after: MinecraftXpWallet
+
+
 def parse_experience_query(response: str, unit: str) -> int:
     """``experience query`` の英語RCON応答から値を取り出す。"""
     match = _QUERY_RESULT.search(response)
@@ -568,6 +577,111 @@ class LevelBotXpClient:
         ) as error:
             LOGGER.warning("Could not fetch XP shop from level-bot: %s", error)
             return None
+
+    async def fetch_market_wallet(self, guild_id: int, user_id: int) -> MinecraftXpWallet | None:
+        if not self._token:
+            return None
+        session = self._require_session()
+        try:
+            async with session.get(
+                f"{self._base_url}/api/v1/integrations/minecraft/market/wallet",
+                headers={"Authorization": f"Bearer {self._token}"},
+                params={"guild_id": str(guild_id), "user_id": str(user_id)},
+            ) as response:
+                if response.status != 200:
+                    body = await response.text()
+                    LOGGER.warning(
+                        "level-bot market wallet rejected status=%d body=%s",
+                        response.status,
+                        body[:300],
+                    )
+                    return None
+                payload = await response.json()
+            if not isinstance(payload, dict):
+                raise ValueError("market wallet response must be an object")
+            return self._parse_wallet(payload["wallet"])
+        except (
+            aiohttp.ClientError,
+            TimeoutError,
+            KeyError,
+            TypeError,
+            ValueError,
+        ) as error:
+            LOGGER.warning("Could not fetch market wallet from level-bot: %s", error)
+            return None
+
+    async def request_market_purchase(
+        self,
+        *,
+        request_id: str,
+        guild_id: int,
+        listing_id: int,
+        buyer_user_id: int,
+        seller_user_id: int,
+        buyer_account_id: int,
+        seller_account_id: int,
+        expected_cost_xp: int,
+    ) -> MinecraftMarketPurchaseRequest | None:
+        if not self._token:
+            return None
+        session = self._require_session()
+        try:
+            async with session.post(
+                f"{self._base_url}/api/v1/integrations/minecraft/market/purchases",
+                headers={"Authorization": f"Bearer {self._token}"},
+                json={
+                    "request_id": request_id,
+                    "guild_id": str(guild_id),
+                    "listing_id": listing_id,
+                    "buyer_user_id": str(buyer_user_id),
+                    "seller_user_id": str(seller_user_id),
+                    "buyer_minecraft_account_id": f"mc-bot:{buyer_account_id}",
+                    "seller_minecraft_account_id": f"mc-bot:{seller_account_id}",
+                    "expected_cost_xp": expected_cost_xp,
+                },
+            ) as response:
+                if response.status != 200:
+                    body = await response.text()
+                    LOGGER.warning(
+                        "level-bot market purchase rejected status=%d body=%s",
+                        response.status,
+                        body[:300],
+                    )
+                    return None
+                return self._parse_market_purchase_request(await response.json())
+        except (
+            aiohttp.ClientError,
+            TimeoutError,
+            KeyError,
+            TypeError,
+            ValueError,
+        ) as error:
+            LOGGER.warning("Could not request market purchase from level-bot: %s", error)
+            return None
+
+    async def update_market_purchase(self, *, request_id: str, guild_id: int, action: str) -> bool:
+        if action not in {"complete", "cancel"} or not self._token:
+            return False
+        session = self._require_session()
+        try:
+            async with session.post(
+                f"{self._base_url}/api/v1/integrations/minecraft/market/"
+                f"purchases/{request_id}/{action}",
+                headers={"Authorization": f"Bearer {self._token}"},
+                json={"guild_id": str(guild_id)},
+            ) as response:
+                if response.status == 204:
+                    return True
+                body = await response.text()
+                LOGGER.warning(
+                    "level-bot market purchase %s rejected status=%d body=%s",
+                    action,
+                    response.status,
+                    body[:300],
+                )
+        except (aiohttp.ClientError, TimeoutError) as error:
+            LOGGER.warning("Could not %s market purchase: %s", action, error)
+        return False
 
     async def fetch_resource_shop(
         self, guild_id: int, user_id: int
@@ -1118,3 +1232,20 @@ class LevelBotXpClient:
         if result.cost_xp <= 0:
             raise ValueError("item gacha spend has invalid cost")
         return result
+
+    @classmethod
+    def _parse_market_purchase_request(cls, item: object) -> MinecraftMarketPurchaseRequest:
+        if not isinstance(item, dict):
+            raise ValueError("market purchase must be an object")
+        status = str(item["status"])
+        if status not in {"reserved", "insufficient_xp", "unavailable", "conflict"}:
+            raise ValueError("market purchase has invalid status")
+        request_id = item.get("request_id")
+        normalized_request = str(uuid.UUID(str(request_id))) if request_id is not None else None
+        return MinecraftMarketPurchaseRequest(
+            status=status,
+            message=str(item["message"]),
+            request_id=normalized_request,
+            wallet_before=cls._parse_wallet(item["wallet_before"]),
+            wallet_after=cls._parse_wallet(item["wallet_after"]),
+        )

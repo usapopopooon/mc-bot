@@ -118,6 +118,18 @@ R 65%、SR 22%、SSR 8%、UR 4%、幻 1%です。景品内容と個別確率は�
 レシピ・ルートテーブル・エンチャント定義と照合します。安価にクラフトできる名札などは
 レア景品へ含めません。
 
+プレイヤーマーケットでは、連携済みプレイヤーがゲーム内の `/market` からメインハンドの
+スタックを任意の合計XP価格で出品できます。Floodgate/Bedrockでは商品一覧、出品、購入確認、
+自分の出品、所持XP確認をフォームで操作でき、Java版では `/market list [ページ]`、
+`/market sell <合計価格XP>`、`/market buy <出品番号>`、`/market mine`、
+`/market cancel <出品番号>`、`/market balance` を使います。Discordでは設定したチャンネルへ
+商品カードを投稿し、「購入」「出品取消」「自分のXP」をエフェメラル画面から操作できます。
+購入確認には現在XPと購入後XPを表示します。手数料はなく、受取成功後に表示価格の全額を
+買い手から差し引いて売り手へ加算します。Discordからの購入、出品取消、アイテム返却には
+対象のMinecraftアカウントがオンラインで、インベントリに空きがある必要があります。
+取引中はXPを予約し、明確な配布失敗では予約を解放します。応答が不明な場合は自動で二重配布
+せず、同じ取引IDで再確認できる状態を保持します。
+
 ```text
 client.jar: 2dc72797acbc1b63fc16a11c4ac393605f453754
 ja_jp.json: 53e15b2f69a51d0c4291d4d453acd81a1828f416
@@ -164,6 +176,7 @@ mc-botコンテナ
 /mc-config approval mode:管理者承認 channel:#minecraft申請
 /mc-config player-count action:有効化
 /mc-config item-gacha-panel channel:#minecraftガチャ
+/mc-config market-channel channel:#minecraftマーケット
 /mc-config show
 ```
 

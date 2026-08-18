@@ -96,6 +96,25 @@ from mc_bot.item_gacha_request import (
     MinecraftItemGachaRequest,
     parse_item_gacha_request,
 )
+from mc_bot.market import (
+    MarketListing,
+    MarketStore,
+    market_listing_embed,
+    market_transfer_command,
+    parse_market_transfer_result,
+)
+from mc_bot.market_request import (
+    MinecraftMarketListingEvent,
+    MinecraftMarketRequest,
+    parse_market_listing,
+    parse_market_request,
+)
+from mc_bot.market_ui import (
+    MarketListingView,
+    MarketPurchaseConfirmView,
+    market_balance_text,
+    market_purchase_confirmation_embed,
+)
 from mc_bot.player_count import (
     PLAYER_COUNT_CHANNEL_NAME,
     PLAYER_COUNT_DISABLED_STATUS,
@@ -181,6 +200,7 @@ _STATUS_PANEL_REFRESH_SECONDS = 5 * 60
 _VOICE_BONUS_NOTIFICATION_COOLDOWN_SECONDS = 60.0
 _GAME_REQUEST_MAX_AGE = timedelta(minutes=5)
 _GAME_REQUEST_CLOCK_SKEW = timedelta(minutes=1)
+_MARKET_RECOVERY_INTERVAL_SECONDS = 30.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -219,6 +239,7 @@ class MinecraftDiscordBot(discord.Client):
         self._tailer = LogTailer(config.minecraft_log_path, config.cursor_path)
         self._settings_store = SettingsStore(config.settings_path)
         self._accounts = AccountStore(config.accounts_path)
+        self._market = MarketStore(config.accounts_path)
         self._voice_player = MinecraftVoicePlayer(
             self,
             api_url=config.voicevox_tts_api_url,
@@ -253,6 +274,7 @@ class MinecraftDiscordBot(discord.Client):
         self._status_panel_task: asyncio.Task[None] | None = None
         self._minecraft_xp_task: asyncio.Task[None] | None = None
         self._activity_delivery_task: asyncio.Task[None] | None = None
+        self._market_recovery_task: asyncio.Task[None] | None = None
         self._player_count_update_lock = asyncio.Lock()
         self._status_panel_update_lock = asyncio.Lock()
         self._whitelist_operation_lock = asyncio.Lock()
@@ -262,6 +284,7 @@ class MinecraftDiscordBot(discord.Client):
         self._activity_delivery_lock = asyncio.Lock()
         self._item_gacha_lock = asyncio.Lock()
         self._item_gacha_notification_lock = asyncio.Lock()
+        self._market_lock = asyncio.Lock()
         self._online_player_names: set[str] = set()
         self._voice_bonus_active_users: set[int] = set()
         self._voice_bonus_initialized_users: set[int] = set()
@@ -318,6 +341,10 @@ class MinecraftDiscordBot(discord.Client):
             description="1日3回までのMinecraftアイテムガチャパネルを設置します",
         )(self._configure_item_gacha_panel)
         group.command(
+            name="market-channel",
+            description="Minecraftプレイヤーマーケットの商品投稿先を設定します",
+        )(self._configure_market_channel)
+        group.command(
             name="show",
             description="現在のBot設定と稼働状態を表示します",
         )(self._show_configuration)
@@ -329,12 +356,23 @@ class MinecraftDiscordBot(discord.Client):
 
     async def setup_hook(self) -> None:
         await asyncio.to_thread(self._accounts.initialize)
+        await asyncio.to_thread(self._market.initialize)
         self._voice_player.start()
         self.add_view(AccessPanelView(self))
         self.add_view(AdminPanelView(self))
         self.add_view(MinecraftXpShopPanelView(self))
         self.add_view(MinecraftResourceShopPanelView(self))
         self.add_view(MinecraftItemGachaPanelView(self))
+        for listing in await asyncio.to_thread(self._market.list_open):
+            if listing.discord_message_id is not None:
+                self.add_view(
+                    MarketListingView(
+                        self,
+                        listing.listing_id,
+                        active=listing.status == "active",
+                    ),
+                    message_id=listing.discord_message_id,
+                )
         for account in await asyncio.to_thread(self._accounts.list_pending_approvals):
             if account.approval_message_id is not None:
                 self.add_view(
@@ -380,6 +418,8 @@ class MinecraftDiscordBot(discord.Client):
         if self._settings.voice_enabled:
             await self._restore_voice_connection()
         await self._refresh_online_player_cache()
+        await self._recover_market_transactions()
+        self._ensure_market_recovery_started()
         self._ensure_minecraft_xp_started()
         self._ensure_activity_delivery_started()
         if self._settings.guild_id is not None:
@@ -478,6 +518,10 @@ class MinecraftDiscordBot(discord.Client):
             self._activity_delivery_task.cancel()
             await asyncio.gather(self._activity_delivery_task, return_exceptions=True)
             self._activity_delivery_task = None
+        if self._market_recovery_task is not None:
+            self._market_recovery_task.cancel()
+            await asyncio.gather(self._market_recovery_task, return_exceptions=True)
+            self._market_recovery_task = None
         if self._tailer_task is not None:
             self._tailer_task.cancel()
             await asyncio.gather(self._tailer_task, return_exceptions=True)
@@ -788,6 +832,47 @@ class MinecraftDiscordBot(discord.Client):
             return
         await interaction.followup.send(
             f"Minecraftアイテムガチャパネルを {target.mention} に設置しました。",
+            ephemeral=True,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+    @app_commands.describe(channel="商品カードの投稿先。省略時は現在のチャンネル")
+    async def _configure_market_channel(
+        self,
+        interaction: discord.Interaction,
+        channel: discord.TextChannel | None = None,
+    ) -> None:
+        if not await self._require_server_manager(interaction):
+            return
+        target = channel or interaction.channel
+        if not isinstance(target, discord.TextChannel):
+            await interaction.response.send_message(
+                "商品投稿先にはテキストチャンネルを指定してください。",
+                ephemeral=True,
+            )
+            return
+        await interaction.response.defer(ephemeral=True)
+        try:
+            self._ensure_same_guild(target.guild.id)
+            await self._resolve_and_validate_channel(target.id, require_embeds=True)
+            await self._save_settings(
+                replace(
+                    self._settings,
+                    guild_id=target.guild.id,
+                    market_channel_id=target.id,
+                )
+            )
+            for listing in await asyncio.to_thread(self._market.list_open):
+                if listing.discord_message_id is None:
+                    await self._post_market_listing(listing)
+                else:
+                    await self._refresh_market_listing(listing.listing_id)
+        except (RuntimeError, discord.DiscordException) as error:
+            LOGGER.warning("Could not configure Minecraft market channel: %s", error)
+            await interaction.followup.send(f"設定できませんでした: {error}", ephemeral=True)
+            return
+        await interaction.followup.send(
+            f"Minecraftプレイヤーマーケットを {target.mention} に設定しました。",
             ephemeral=True,
             allowed_mentions=discord.AllowedMentions.none(),
         )
@@ -1808,6 +1893,556 @@ class MinecraftDiscordBot(discord.Client):
             )
             return
         await self._handle_minecraft_emerald_exchange_request(request)
+
+    async def _handle_market_listing(self, event: MinecraftMarketListingEvent) -> None:
+        try:
+            account = await asyncio.to_thread(self._accounts.get_by_player_uuid, event.seller_uuid)
+        except ValueError as error:
+            LOGGER.error(
+                "Could not identify market seller listing=%d uuid=%s: %s",
+                event.listing_id,
+                event.seller_uuid,
+                error,
+            )
+            account = None
+        if account is None or account.status != "active" or account.discord_user_id is None:
+            try:
+                response = await self._execute_rcon(
+                    market_transfer_command(
+                        "return",
+                        event.listing_id,
+                        event.seller_uuid,
+                        event.event_id,
+                    )
+                )
+                transfer = parse_market_transfer_result(
+                    response,
+                    request_id=event.event_id,
+                    listing_id=event.listing_id,
+                )
+            except (OSError, RconError, RuntimeError, ValueError) as error:
+                LOGGER.error(
+                    "Could not return unlinked market listing=%d: %s",
+                    event.listing_id,
+                    error,
+                )
+                raise RuntimeError("unlinked market escrow return is ambiguous") from error
+            if transfer.status != "completed":
+                raise RuntimeError(
+                    "unlinked market escrow return is incomplete: "
+                    f"status={transfer.status} listing_status={transfer.listing_status}"
+                )
+            await self._send_minecraft_private_message(
+                event.seller_name,
+                "マーケット利用にはDiscordアカウント連携が必要です。出品アイテムを返却しました。",
+            )
+            return
+        listing, created = await asyncio.to_thread(
+            self._market.add_listing,
+            listing_id=event.listing_id,
+            event_id=event.event_id,
+            seller_account_id=account.id,
+            seller_discord_user_id=account.discord_user_id,
+            seller_uuid=event.seller_uuid,
+            seller_name=event.seller_name,
+            item_id=event.item_id,
+            item_name=event.item_name,
+            item_count=event.item_count,
+            price_xp=event.price_xp,
+            created_at=event.created_at,
+        )
+        if created or listing.discord_message_id is None:
+            await self._post_market_listing(listing)
+
+    async def _handle_market_request(self, request: MinecraftMarketRequest) -> None:
+        if self._fresh_game_request_time(request.requested_at) is None:
+            await self._send_minecraft_private_message(
+                request.player_name,
+                "このマーケット操作は期限切れです。もう一度 /market を実行してください。",
+            )
+            return
+        guild_id = self._settings.guild_id
+        if guild_id is None or self._rcon is None:
+            await self._send_minecraft_private_message(
+                request.player_name,
+                "マーケットは現在準備中です。少し待ってからお試しください。",
+            )
+            return
+        try:
+            account = await asyncio.to_thread(
+                self._accounts.get_by_player_uuid, request.player_uuid
+            )
+        except ValueError as error:
+            LOGGER.error(
+                "Could not identify market account request=%s uuid=%s: %s",
+                request.request_id,
+                request.player_uuid,
+                error,
+            )
+            account = None
+        if account is None or account.status != "active" or account.discord_user_id is None:
+            await self._send_minecraft_private_message(
+                request.player_name,
+                "マーケット利用にはDiscordアカウントとの連携が必要です。",
+            )
+            return
+        if request.kind == "balance":
+            wallet = await self._level_bot_xp.fetch_market_wallet(guild_id, account.discord_user_id)
+            message = (
+                "XP残高を取得できませんでした。少し待ってから再度お試しください。"
+                if wallet is None
+                else (
+                    f"現在XP: {wallet.available_xp:,} XP / "
+                    f"獲得・売上 {wallet.total_xp:,} XP / "
+                    f"使用済み・予約中 {wallet.spent_xp:,} XP"
+                )
+            )
+        elif request.kind == "buy":
+            message = await self._purchase_market(
+                guild_id=guild_id,
+                listing_id=request.listing_id,
+                request_id=request.request_id,
+                expected_price_xp=request.expected_price_xp,
+                buyer=account,
+            )
+            if message is None:
+                message = "購入結果を安全に確認できませんでした。同じ商品でもう一度お試しください。"
+        else:
+            message = await self._cancel_market(
+                listing_id=request.listing_id,
+                request_id=request.request_id,
+                seller=account,
+            )
+            if message is None:
+                message = "返却結果を確認できませんでした。同じ出品でもう一度お試しください。"
+        await self._send_minecraft_private_message(request.player_name, message)
+
+    async def show_market_balance(self, interaction: discord.Interaction) -> None:
+        if interaction.guild_id is None:
+            await interaction.response.send_message(
+                "Discordサーバー内で利用してください。", ephemeral=True
+            )
+            return
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        wallet = await self._level_bot_xp.fetch_market_wallet(
+            interaction.guild_id, interaction.user.id
+        )
+        await interaction.followup.send(
+            market_balance_text(wallet)
+            if wallet is not None
+            else "XP残高を取得できませんでした。少し待ってから再度お試しください。",
+            ephemeral=True,
+        )
+
+    async def show_market_purchase_confirmation(
+        self, interaction: discord.Interaction, listing_id: int
+    ) -> None:
+        if interaction.guild_id is None:
+            await interaction.response.send_message(
+                "Discordサーバー内で利用してください。", ephemeral=True
+            )
+            return
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        listing = await asyncio.to_thread(self._market.get, listing_id)
+        if listing is None or listing.status != "active":
+            await interaction.followup.send("この商品は売り切れました。", ephemeral=True)
+            return
+        try:
+            account, reason = await self._online_exchange_account(interaction.user.id)
+        except (OSError, RconError, RuntimeError, ValueError) as error:
+            LOGGER.warning("Could not verify market buyer: %s", error)
+            await interaction.followup.send(
+                "Minecraftへの参加状況を確認できませんでした。", ephemeral=True
+            )
+            return
+        if account is None:
+            message = (
+                "連携アカウントが複数オンラインです。受取先を1つだけオンラインにしてください。"
+                if reason == "account_ambiguous"
+                else "連携したMinecraftアカウントで参加してから購入してください。"
+            )
+            await interaction.followup.send(message, ephemeral=True)
+            return
+        if listing.seller_discord_user_id == interaction.user.id:
+            await interaction.followup.send("自分の出品は購入できません。", ephemeral=True)
+            return
+        wallet = await self._level_bot_xp.fetch_market_wallet(
+            interaction.guild_id, interaction.user.id
+        )
+        if wallet is None:
+            await interaction.followup.send("XP残高を取得できませんでした。", ephemeral=True)
+            return
+        await interaction.followup.send(
+            embed=market_purchase_confirmation_embed(listing, wallet),
+            view=MarketPurchaseConfirmView(
+                self,
+                listing=listing,
+                buyer_account_id=account.id,
+                owner_id=interaction.user.id,
+                wallet=wallet,
+            ),
+            ephemeral=True,
+        )
+
+    async def purchase_market_listing(
+        self,
+        interaction: discord.Interaction,
+        *,
+        listing_id: int,
+        request_id: str,
+        buyer_account_id: int,
+    ) -> str | None:
+        if interaction.guild_id is None:
+            return "Discordサーバー内で利用してください。"
+        buyer = await asyncio.to_thread(self._accounts.get, buyer_account_id)
+        if (
+            buyer is None
+            or buyer.status != "active"
+            or buyer.discord_user_id != interaction.user.id
+            or buyer.player_uuid is None
+        ):
+            return "購入に使うMinecraftアカウントを確認できませんでした。"
+        listing = await asyncio.to_thread(self._market.get, listing_id)
+        if listing is None:
+            return "この商品は見つかりません。"
+        return await self._purchase_market(
+            guild_id=interaction.guild_id,
+            listing_id=listing_id,
+            request_id=request_id,
+            expected_price_xp=listing.price_xp,
+            buyer=buyer,
+        )
+
+    async def cancel_market_listing(
+        self, interaction: discord.Interaction, listing_id: int
+    ) -> None:
+        if interaction.guild_id is None:
+            await interaction.response.send_message(
+                "Discordサーバー内で利用してください。", ephemeral=True
+            )
+            return
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        listing = await asyncio.to_thread(self._market.get, listing_id)
+        if listing is None or listing.seller_discord_user_id != interaction.user.id:
+            await interaction.followup.send("取り消せるのは自分の出品だけです。", ephemeral=True)
+            return
+        seller = await asyncio.to_thread(self._accounts.get, listing.seller_account_id)
+        if seller is None:
+            await interaction.followup.send(
+                "出品者アカウントを確認できませんでした。", ephemeral=True
+            )
+            return
+        message = await self._cancel_market(
+            listing_id=listing_id,
+            request_id=str(uuid.uuid4()),
+            seller=seller,
+        )
+        await interaction.followup.send(
+            message or "返却結果を確認できませんでした。もう一度お試しください。",
+            ephemeral=True,
+        )
+
+    async def _purchase_market(
+        self,
+        *,
+        guild_id: int,
+        listing_id: int,
+        request_id: str,
+        expected_price_xp: int,
+        buyer: MinecraftAccount,
+    ) -> str | None:
+        if buyer.discord_user_id is None or buyer.player_uuid is None:
+            return "購入アカウントを確認できませんでした。"
+        async with self._market_lock:
+            listing = await asyncio.to_thread(
+                self._market.reserve_purchase,
+                listing_id=listing_id,
+                request_id=request_id,
+                expected_price_xp=expected_price_xp,
+                buyer_account_id=buyer.id,
+                buyer_discord_user_id=buyer.discord_user_id,
+            )
+            if listing is None or listing.purchase_request_id is None:
+                return "この商品は売り切れたか、価格が更新されました。"
+            effective_request_id = listing.purchase_request_id
+            purchase = await self._level_bot_xp.request_market_purchase(
+                request_id=effective_request_id,
+                guild_id=guild_id,
+                listing_id=listing.listing_id,
+                buyer_user_id=buyer.discord_user_id,
+                seller_user_id=listing.seller_discord_user_id,
+                buyer_account_id=buyer.id,
+                seller_account_id=listing.seller_account_id,
+                expected_cost_xp=listing.price_xp,
+            )
+            if purchase is None:
+                return None
+            if purchase.status != "reserved":
+                await asyncio.to_thread(
+                    self._market.set_status,
+                    listing.listing_id,
+                    effective_request_id,
+                    "active",
+                )
+                await self._refresh_market_listing(listing.listing_id)
+                return purchase.message
+            try:
+                response = await self._execute_rcon(
+                    market_transfer_command(
+                        "deliver",
+                        listing.listing_id,
+                        buyer.player_uuid,
+                        effective_request_id,
+                    )
+                )
+                transfer = parse_market_transfer_result(
+                    response,
+                    request_id=effective_request_id,
+                    listing_id=listing.listing_id,
+                )
+            except (OSError, RconError, RuntimeError, ValueError) as error:
+                LOGGER.warning(
+                    "Market item delivery is ambiguous listing=%d request=%s: %s",
+                    listing.listing_id,
+                    effective_request_id,
+                    error,
+                )
+                return None
+            if transfer.status != "completed":
+                if (
+                    transfer.delivery_recorded
+                    or transfer.status == "storage_error"
+                    or transfer.listing_status == "delivering"
+                ):
+                    return None
+                if transfer.status not in {
+                    "unavailable",
+                    "recipient_mismatch",
+                    "player_offline",
+                    "inventory_full",
+                }:
+                    return None
+                cancelled = await self._level_bot_xp.update_market_purchase(
+                    request_id=effective_request_id,
+                    guild_id=guild_id,
+                    action="cancel",
+                )
+                if not cancelled:
+                    return None
+                local_status = (
+                    transfer.listing_status
+                    if transfer.listing_status in {"sold", "cancelled"}
+                    else "active"
+                )
+                await asyncio.to_thread(
+                    self._market.set_status,
+                    listing.listing_id,
+                    effective_request_id,
+                    local_status,
+                )
+                await self._refresh_market_listing(listing.listing_id)
+                return {
+                    "player_offline": (
+                        "Minecraftへ参加してから購入してください。XPは消費していません。"
+                    ),
+                    "inventory_full": (
+                        "インベントリを空けてから購入してください。XPは消費していません。"
+                    ),
+                }.get(transfer.status, "商品を受け取れませんでした。XPは消費していません。")
+            completed = await self._level_bot_xp.update_market_purchase(
+                request_id=effective_request_id,
+                guild_id=guild_id,
+                action="complete",
+            )
+            if not completed:
+                return None
+            await asyncio.to_thread(
+                self._market.set_status,
+                listing.listing_id,
+                effective_request_id,
+                "sold",
+            )
+            await self._refresh_market_listing(listing.listing_id)
+            return (
+                f"購入完了: #{listing.listing_id} {listing.item_name} x{listing.item_count} / "
+                f"{listing.price_xp:,} XP。残り {purchase.wallet_after.available_xp:,} XPです。"
+            )
+
+    async def _cancel_market(
+        self, *, listing_id: int, request_id: str, seller: MinecraftAccount
+    ) -> str | None:
+        if seller.player_uuid is None:
+            return "出品者のMinecraft UUIDを確認できませんでした。"
+        async with self._market_lock:
+            listing = await asyncio.to_thread(
+                self._market.begin_cancel,
+                listing_id=listing_id,
+                seller_account_id=seller.id,
+                request_id=request_id,
+            )
+            if listing is None or listing.purchase_request_id is None:
+                return "その出品はすでに取引中か、取り消し済みです。"
+            effective_request_id = listing.purchase_request_id
+            try:
+                response = await self._execute_rcon(
+                    market_transfer_command(
+                        "return",
+                        listing.listing_id,
+                        listing.seller_uuid,
+                        effective_request_id,
+                    )
+                )
+                transfer = parse_market_transfer_result(
+                    response,
+                    request_id=effective_request_id,
+                    listing_id=listing.listing_id,
+                )
+            except (OSError, RconError, RuntimeError, ValueError) as error:
+                LOGGER.warning(
+                    "Market cancellation is ambiguous listing=%d request=%s: %s",
+                    listing.listing_id,
+                    effective_request_id,
+                    error,
+                )
+                return None
+            if transfer.status != "completed":
+                if (
+                    transfer.delivery_recorded
+                    or transfer.status == "storage_error"
+                    or transfer.listing_status == "delivering"
+                ):
+                    return None
+                local_status = "cancelled" if transfer.listing_status == "cancelled" else "active"
+                await asyncio.to_thread(
+                    self._market.set_status,
+                    listing.listing_id,
+                    effective_request_id,
+                    local_status,
+                )
+                await self._refresh_market_listing(listing.listing_id)
+                return {
+                    "player_offline": "Minecraftへ参加してから取り消してください。",
+                    "inventory_full": "インベントリを空けてから取り消してください。",
+                }.get(transfer.status, "アイテムを返却できませんでした。")
+            await asyncio.to_thread(
+                self._market.set_status,
+                listing.listing_id,
+                effective_request_id,
+                "cancelled",
+            )
+            await self._refresh_market_listing(listing.listing_id)
+            return f"出品を取り消し、{listing.item_name} x{listing.item_count}を返却しました。"
+
+    async def _post_market_listing(self, listing: MarketListing) -> None:
+        channel_id = self._settings.market_channel_id
+        if channel_id is None:
+            return
+        channel = await self._resolve_and_validate_channel(channel_id, require_embeds=True)
+        message = await channel.send(
+            embed=market_listing_embed(listing),
+            view=MarketListingView(self, listing.listing_id, active=True),
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+        await asyncio.to_thread(self._market.set_discord_message, listing.listing_id, message.id)
+
+    async def _refresh_market_listing(self, listing_id: int) -> None:
+        listing = await asyncio.to_thread(self._market.get, listing_id)
+        channel_id = self._settings.market_channel_id
+        if listing is None or channel_id is None:
+            return
+        try:
+            channel = await self._resolve_and_validate_channel(channel_id, require_embeds=True)
+            if listing.discord_message_id is None:
+                await self._post_market_listing(listing)
+                return
+            message = await channel.fetch_message(listing.discord_message_id)
+            await message.edit(
+                embed=market_listing_embed(listing),
+                view=MarketListingView(
+                    self,
+                    listing.listing_id,
+                    active=listing.status == "active",
+                ),
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+        except discord.NotFound:
+            await self._post_market_listing(listing)
+
+    async def _recover_market_transactions(self) -> None:
+        guild_id = self._settings.guild_id
+        if guild_id is None:
+            return
+        for listing in await asyncio.to_thread(self._market.list_open):
+            try:
+                if listing.status == "active":
+                    if listing.discord_message_id is None:
+                        await self._post_market_listing(listing)
+                    continue
+                if listing.purchase_request_id is None:
+                    continue
+                if listing.status == "reserved" and listing.buyer_account_id is not None:
+                    buyer = await asyncio.to_thread(self._accounts.get, listing.buyer_account_id)
+                    if buyer is not None:
+                        await self._purchase_market(
+                            guild_id=guild_id,
+                            listing_id=listing.listing_id,
+                            request_id=listing.purchase_request_id,
+                            expected_price_xp=listing.price_xp,
+                            buyer=buyer,
+                        )
+                elif listing.status == "cancelling":
+                    seller = await asyncio.to_thread(self._accounts.get, listing.seller_account_id)
+                    if seller is not None:
+                        await self._cancel_market(
+                            listing_id=listing.listing_id,
+                            request_id=listing.purchase_request_id,
+                            seller=seller,
+                        )
+            except RuntimeError, discord.DiscordException:
+                LOGGER.exception(
+                    "Could not recover market listing=%d status=%s",
+                    listing.listing_id,
+                    listing.status,
+                )
+
+    def _ensure_market_recovery_started(self) -> None:
+        if self._market_recovery_task is not None and not self._market_recovery_task.done():
+            return
+        self._market_recovery_task = asyncio.create_task(
+            self._market_recovery_loop(), name="minecraft-market-recovery"
+        )
+
+    async def _market_recovery_loop(self) -> None:
+        while not self.is_closed():
+            await asyncio.sleep(_MARKET_RECOVERY_INTERVAL_SECONDS)
+            try:
+                await self._recover_market_transactions()
+            except Exception:
+                LOGGER.exception("Could not run periodic Minecraft market recovery")
+
+    async def _retry_market_log_operation(
+        self,
+        *,
+        description: str,
+        operation: Callable[[], Awaitable[None]],
+    ) -> bool:
+        retry_delay = 1
+        while not self.is_closed():
+            try:
+                await operation()
+            except Exception:
+                self._delivery_healthy = False
+                LOGGER.exception(
+                    "Minecraft market %s failed; retrying in %ds",
+                    description,
+                    retry_delay,
+                )
+                await asyncio.sleep(retry_delay)
+                retry_delay = min(retry_delay * 2, 30)
+                continue
+            self._delivery_healthy = True
+            return True
+        return False
 
     async def _handle_minecraft_xp_exchange_request(
         self,
@@ -4091,6 +4726,37 @@ class MinecraftDiscordBot(discord.Client):
 
     async def _forward_logs(self) -> None:
         async for pending_line in self._tailer.lines():
+            try:
+                market_listing = parse_market_listing(pending_line.text)
+                market_request = (
+                    None if market_listing is not None else parse_market_request(pending_line.text)
+                )
+            except ValueError as error:
+                LOGGER.warning("Ignored malformed Minecraft market event: %s", error)
+                await asyncio.to_thread(self._tailer.acknowledge, pending_line)
+                continue
+            if market_listing is not None:
+                processed = await self._retry_market_log_operation(
+                    description=(
+                        f"listing={market_listing.listing_id} "
+                        f"seller_uuid={market_listing.seller_uuid}"
+                    ),
+                    operation=lambda event=market_listing: self._handle_market_listing(event),
+                )
+                if processed:
+                    await asyncio.to_thread(self._tailer.acknowledge, pending_line)
+                continue
+            if market_request is not None:
+                processed = await self._retry_market_log_operation(
+                    description=(
+                        f"request={market_request.request_id} "
+                        f"player_uuid={market_request.player_uuid}"
+                    ),
+                    operation=lambda request=market_request: self._handle_market_request(request),
+                )
+                if processed:
+                    await asyncio.to_thread(self._tailer.acknowledge, pending_line)
+                continue
             try:
                 exchange_request = parse_exchange_request(pending_line.text)
             except ValueError as error:
