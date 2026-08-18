@@ -13,6 +13,7 @@ SELLER_UUID = "22222222-2222-4222-8222-222222222222"
 BUYER_UUID = "33333333-3333-4333-8333-333333333333"
 LISTING_EVENT_ID = "11111111-1111-4111-8111-111111111111"
 PURCHASE_ID = "44444444-4444-4444-8444-444444444444"
+BALANCE_ID = "55555555-5555-4555-8555-555555555555"
 
 
 class LineTailer:
@@ -115,6 +116,9 @@ def test_game_market_wires_listing_buyer_seller_price_and_delivery(tmp_path) -> 
     bot._level_bot_xp.update_market_purchase = AsyncMock(  # type: ignore[method-assign]
         return_value=True
     )
+    bot._level_bot_xp.fetch_market_wallet = AsyncMock(  # type: ignore[method-assign]
+        return_value=wallet_after
+    )
     milliseconds = int(datetime.now(UTC).timestamp() * 1_000)
     lines = [
         _line(
@@ -127,6 +131,11 @@ def test_game_market_wires_listing_buyer_seller_price_and_delivery(tmp_path) -> 
             200,
             f"USAPO_MARKET_REQUEST|1|{PURCHASE_ID}|buy|17|{BUYER_UUID}|"
             f"{_encode('Buyer')}|3000|{milliseconds}",
+        ),
+        _line(
+            300,
+            f"USAPO_MARKET_REQUEST|1|{BALANCE_ID}|balance|0|{BUYER_UUID}|"
+            f"{_encode('Buyer')}|0|{milliseconds}",
         ),
     ]
     tailer = LineTailer(lines)
@@ -152,10 +161,15 @@ def test_game_market_wires_listing_buyer_seller_price_and_delivery(tmp_path) -> 
         guild_id=1001,
         action="complete",
     )
+    bot._level_bot_xp.fetch_market_wallet.assert_awaited_once_with(  # type: ignore[attr-defined]
+        1001,
+        2003,
+    )
     rcon = bot._rcon
     assert isinstance(rcon, MarketRcon)
     assert f"usapo-event-bridge market-deliver 17 {BUYER_UUID} {PURCHASE_ID}" in rcon.commands
-    assert any("残り 2,000 XP" in command for command in rcon.commands)
+    assert any("残りのサーバーXPは 2,000 XP" in command for command in rcon.commands)
+    assert any("現在のサーバーXP: 2,000 XP" in command for command in rcon.commands)
 
 
 def test_game_market_keeps_xp_reserved_when_delivery_was_recorded_but_save_failed(

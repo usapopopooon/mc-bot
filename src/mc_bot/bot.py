@@ -2076,12 +2076,12 @@ class MinecraftDiscordBot(discord.Client):
         if request.kind == "balance":
             wallet = await self._level_bot_xp.fetch_market_wallet(guild_id, account.discord_user_id)
             message = (
-                "XP残高を取得できませんでした。少し待ってから再度お試しください。"
+                "サーバーXP残高を取得できませんでした。少し待ってから再度お試しください。"
                 if wallet is None
                 else (
-                    f"現在XP: {wallet.available_xp:,} XP / "
-                    f"獲得・売上 {wallet.total_xp:,} XP / "
-                    f"使用済み・予約中 {wallet.spent_xp:,} XP"
+                    f"現在のサーバーXP: {wallet.available_xp:,} XP / "
+                    f"獲得・売上のサーバーXP: {wallet.total_xp:,} XP / "
+                    f"使用済み・予約中のサーバーXP: {wallet.spent_xp:,} XP"
                 )
             )
         elif request.kind == "buy":
@@ -2360,7 +2360,8 @@ class MinecraftDiscordBot(discord.Client):
             return (
                 f"購入完了: #{listing.listing_id} {listing.display_item_name} "
                 f"x{listing.item_count} / "
-                f"{listing.price_xp:,} XP。残り {purchase.wallet_after.available_xp:,} XPです。"
+                f"{listing.price_xp:,} サーバーXP。"
+                f"残りのサーバーXPは {purchase.wallet_after.available_xp:,} XPです。"
             )
 
     async def _cancel_market(
