@@ -43,11 +43,11 @@ _TIER_WEIGHTS_BY_KIND: dict[ItemGachaKind, dict[str, int]] = {
     },
     "premium": {
         "N": 0,
-        "R": 188,
-        "SR": 118,
-        "SSR": 50,
-        "UR": 30,
-        "MYTHIC": 14,
+        "R": 80,
+        "SR": 160,
+        "SSR": 92,
+        "UR": 48,
+        "MYTHIC": 20,
     },
 }
 
@@ -82,7 +82,7 @@ def _enchanted_book(
 
 # レアリティを先に公開確率で抽選し、そのランク内では既存weightを相対比として使う。
 # 通常は N 47% / R 25% / SR 14.5% / SSR 7% / UR 4% / 幻 2.5%、
-# R以上確定は R 47% / SR 29.5% / SSR 12.5% / UR 7.5% / 幻 3.5%。
+# R以上確定は R 20% / SR 40% / SSR 23% / UR 12% / 幻 5%。
 # Minecraft Java 26.2 の公式 recipe / loot_table / enchantment を基準に確認する。
 # パネルにはランク確率だけを出し、景品内容と個別確率は抽選まで公開しない。
 # keyは予約済み抽選の復旧に使うため、レアリティ変更後も既存値を維持する。
@@ -1163,7 +1163,7 @@ def item_gacha_panel_embed() -> discord.Embed:
     )
     embed.add_field(
         name=f"R以上確定 · {ITEM_GACHA_PREMIUM_COST_XP:,} XP",
-        value="`R 47%` `SR 29.5%` `SSR 12.5%`\n`UR 7.5%` `幻 3.5%`",
+        value="`R 20%` `SR 40%` `SSR 23%`\n`UR 12%` `幻 5%`",
         inline=False,
     )
     embed.add_field(

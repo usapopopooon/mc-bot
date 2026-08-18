@@ -174,11 +174,11 @@ def test_reward_table_has_exact_published_tier_probabilities() -> None:
         "MYTHIC": 10,
     }
     assert Counter(reward.tier for reward in premium) == {
-        "R": 188,
-        "SR": 118,
-        "SSR": 50,
-        "UR": 30,
-        "MYTHIC": 14,
+        "R": 80,
+        "SR": 160,
+        "SSR": 92,
+        "UR": 48,
+        "MYTHIC": 20,
     }
     with pytest.raises(ValueError):
         draw_item_gacha_reward("normal", -1)
@@ -216,11 +216,11 @@ def test_premium_draw_has_higher_cumulative_upper_tier_rates() -> None:
     normal = Counter(draw_item_gacha_reward("normal", roll, 0).tier for roll in range(400))
     premium = Counter(draw_item_gacha_reward("premium", roll, 0).tier for roll in range(400))
 
-    assert sum(premium[tier] for tier in ("SR", "SSR", "UR", "MYTHIC")) == 212
+    assert sum(premium[tier] for tier in ("SR", "SSR", "UR", "MYTHIC")) == 320
     assert sum(normal[tier] for tier in ("SR", "SSR", "UR", "MYTHIC")) == 112
-    assert sum(premium[tier] for tier in ("SSR", "UR", "MYTHIC")) == 94
+    assert sum(premium[tier] for tier in ("SSR", "UR", "MYTHIC")) == 160
     assert sum(normal[tier] for tier in ("SSR", "UR", "MYTHIC")) == 54
-    assert sum(premium[tier] for tier in ("UR", "MYTHIC")) == 44
+    assert sum(premium[tier] for tier in ("UR", "MYTHIC")) == 68
     assert sum(normal[tier] for tier in ("UR", "MYTHIC")) == 26
 
 
@@ -684,11 +684,11 @@ def test_panel_publishes_only_tier_rates_and_keeps_rewards_secret() -> None:
     assert "SSR 7%" in rendered
     assert "UR 4%" in rendered
     assert "幻 2.5%" in rendered
-    assert "R 47%" in rendered
-    assert "SR 29.5%" in rendered
-    assert "SSR 12.5%" in rendered
-    assert "UR 7.5%" in rendered
-    assert "幻 3.5%" in rendered
+    assert "R 20%" in rendered
+    assert "SR 40%" in rendered
+    assert "SSR 23%" in rendered
+    assert "UR 12%" in rendered
+    assert "幻 5%" in rendered
     assert "100 XP" in rendered
     assert "1,000 XP" in rendered
     assert "1日 **3回**" in rendered
