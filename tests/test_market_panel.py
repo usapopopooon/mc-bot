@@ -62,6 +62,21 @@ def test_market_listing_view_only_has_transaction_buttons() -> None:
     assert labels == {"購入", "出品取消"}
 
 
+def test_market_recovery_refreshes_existing_active_listing() -> None:
+    bot = MinecraftDiscordBot(Config(discord_token="secret"))
+    bot._settings = RuntimeSettings(guild_id=1)
+    bot._market.list_open = Mock(  # type: ignore[method-assign]
+        return_value=[SimpleNamespace(status="active", discord_message_id=901, listing_id=17)]
+    )
+    bot._refresh_market_listing = AsyncMock()  # type: ignore[method-assign]
+
+    asyncio.run(bot._recover_market_transactions())
+
+    bot._refresh_market_listing.assert_awaited_once_with(  # type: ignore[attr-defined]
+        17, move_panel=False
+    )
+
+
 def test_refresh_market_panel_creates_and_persists_message(tmp_path) -> None:
     bot = MinecraftDiscordBot(
         Config(discord_token="secret", settings_path=tmp_path / "settings.json")

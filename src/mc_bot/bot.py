@@ -2512,6 +2512,8 @@ class MinecraftDiscordBot(discord.Client):
                 if listing.status == "active":
                     if listing.discord_message_id is None:
                         await self._post_market_listing(listing)
+                    else:
+                        await self._refresh_market_listing(listing.listing_id, move_panel=False)
                     continue
                 if listing.purchase_request_id is None:
                     continue
