@@ -164,7 +164,7 @@ def test_market_transfer_result_preserves_ambiguous_recorded_delivery() -> None:
     assert result.delivery_recorded
 
 
-def test_listing_embed_shows_no_fee_market(tmp_path) -> None:
+def test_listing_embed_keeps_details_concise(tmp_path) -> None:
     store = MarketStore(tmp_path / "market.db")
     store.initialize()
     listing, _ = store.add_listing(
@@ -186,7 +186,7 @@ def test_listing_embed_shows_no_fee_market(tmp_path) -> None:
     assert isinstance(embed, discord.Embed)
     assert embed.title == "#1 ダイヤモンド x3"
     assert "720 XP" in (embed.description or "")
-    assert "手数料なし" in (embed.footer.text or "")
+    assert embed.footer.text is None
 
     custom_name_embed = market_listing_embed(replace(listing, item_name="Yukiのダイヤモンド"))
     assert custom_name_embed.title == "#1 Yukiのダイヤモンド x3"
@@ -208,7 +208,7 @@ def test_market_panel_keeps_summary_short_and_moves_details_to_guide() -> None:
     assert panel.title == "Minecraft フリマ"
     assert panel.description is not None
     assert len(panel.description) <= 100
-    assert "手数料なし" in panel.description
+    assert "手数料" not in panel.description
     assert "サーバーXP" in panel.description
     assert "/market sell" not in panel.description
     assert "/market sell" in str(guide.to_dict())
@@ -218,6 +218,8 @@ def test_market_panel_keeps_summary_short_and_moves_details_to_guide() -> None:
     assert "商品カード" in str(guide.to_dict())
     assert "サーバーXP" in str(guide.to_dict())
     assert "オンライン" in str(guide.to_dict())
+    assert "手数料" not in str(guide.to_dict())
+    assert "全額" not in str(guide.to_dict())
 
 
 def test_market_panel_balance_identifies_server_xp() -> None:

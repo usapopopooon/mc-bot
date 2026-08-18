@@ -93,7 +93,7 @@ def market_panel_embed() -> discord.Embed:
     return discord.Embed(
         title="Minecraft フリマ",
         description=(
-            "どんなアイテムでもサーバーXPで出品・購入できます。**手数料なし**。\n"
+            "どんなアイテムでもサーバーXPで出品・購入できます。\n"
             "詳しくは「使い方」を押してください。"
         ),
         color=discord.Color.gold(),
@@ -139,7 +139,7 @@ def market_guide_embed() -> discord.Embed:
         name="受け取り条件",
         value=(
             "購入と出品取消は、連携したMinecraftアカウントでオンラインになり、"
-            "インベントリに空きを作ってから操作してください。価格は全額出品者へ入ります。"
+            "インベントリに空きを作ってから操作してください。"
         ),
         inline=False,
     )

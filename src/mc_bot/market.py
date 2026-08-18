@@ -373,7 +373,6 @@ def market_listing_embed(listing: MarketListing) -> discord.Embed:
     )
     embed.add_field(name="出品者", value=f"<@{listing.seller_discord_user_id}>")
     embed.add_field(name="Minecraft", value=listing.seller_name)
-    embed.set_footer(text="手数料なし・表示価格の全額が出品者へ入ります")
     return embed
 
 
