@@ -83,18 +83,10 @@ class MarketListingView(discord.ui.View):
             label="出品取消",
             style=discord.ButtonStyle.danger,
         )
-        balance = _MarketButton(
-            bot,
-            listing_id,
-            action="balance",
-            label="自分のXP",
-            style=discord.ButtonStyle.secondary,
-        )
         buy.disabled = not active
         cancel.disabled = not active
         self.add_item(buy)
         self.add_item(cancel)
-        self.add_item(balance)
 
 
 def market_panel_embed() -> discord.Embed:

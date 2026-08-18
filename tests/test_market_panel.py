@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, Mock
 from mc_bot.bot import MinecraftDiscordBot
 from mc_bot.config import Config
 from mc_bot.market import MarketListing
-from mc_bot.market_ui import MarketPanelView
+from mc_bot.market_ui import MarketListingView, MarketPanelView
 from mc_bot.settings import RuntimeSettings
 
 
@@ -49,6 +49,17 @@ def test_market_panel_view_has_guide_and_balance_buttons() -> None:
 
     assert custom_ids == {"mc-market:guide:0", "mc-market:balance:0"}
     assert labels == {"使い方", "サーバーXP確認"}
+
+
+def test_market_listing_view_only_has_transaction_buttons() -> None:
+    bot = MinecraftDiscordBot(Config(discord_token="secret"))
+    view = MarketListingView(bot, 17)
+
+    custom_ids = {item.custom_id for item in view.children}
+    labels = {item.label for item in view.children}
+
+    assert custom_ids == {"mc-market:buy:17", "mc-market:cancel:17"}
+    assert labels == {"購入", "出品取消"}
 
 
 def test_refresh_market_panel_creates_and_persists_message(tmp_path) -> None:
