@@ -42,7 +42,7 @@ from mc_bot.settings import RuntimeSettings
 
 class GachaRcon:
     def __init__(self, give_results: list[str | Exception] | None = None) -> None:
-        self.give_results = list(give_results or ["Gave 24 [Iron Ingot] to Steve"])
+        self.give_results = list(give_results or ["Gave 64 [Iron Ingot] to Steve"])
         self.commands: list[str] = []
 
     def execute(self, command: str) -> str:
@@ -166,19 +166,19 @@ def test_reward_table_has_exact_published_tier_probabilities() -> None:
     premium = [draw_item_gacha_reward("premium", roll, 0) for roll in range(400)]
 
     assert Counter(reward.tier for reward in normal) == {
-        "N": 208,
-        "R": 116,
-        "SR": 48,
-        "SSR": 18,
-        "UR": 8,
-        "MYTHIC": 2,
+        "N": 188,
+        "R": 100,
+        "SR": 58,
+        "SSR": 28,
+        "UR": 16,
+        "MYTHIC": 10,
     }
     assert Counter(reward.tier for reward in premium) == {
-        "R": 260,
-        "SR": 88,
-        "SSR": 32,
-        "UR": 16,
-        "MYTHIC": 4,
+        "R": 188,
+        "SR": 118,
+        "SSR": 50,
+        "UR": 30,
+        "MYTHIC": 14,
     }
     with pytest.raises(ValueError):
         draw_item_gacha_reward("normal", -1)
@@ -192,11 +192,11 @@ def test_reward_table_has_exact_published_tier_probabilities() -> None:
 def test_category_pools_keep_every_tier_and_only_draw_tagged_rewards(category: str) -> None:
     tier_rolls = {
         "N": 0,
-        "R": 208,
-        "SR": 324,
-        "SSR": 372,
-        "UR": 390,
-        "MYTHIC": 398,
+        "R": 188,
+        "SR": 288,
+        "SSR": 346,
+        "UR": 374,
+        "MYTHIC": 390,
     }
 
     for tier, roll in tier_rolls.items():
@@ -216,12 +216,12 @@ def test_premium_draw_has_higher_cumulative_upper_tier_rates() -> None:
     normal = Counter(draw_item_gacha_reward("normal", roll, 0).tier for roll in range(400))
     premium = Counter(draw_item_gacha_reward("premium", roll, 0).tier for roll in range(400))
 
-    assert sum(premium[tier] for tier in ("SR", "SSR", "UR", "MYTHIC")) == 140
-    assert sum(normal[tier] for tier in ("SR", "SSR", "UR", "MYTHIC")) == 76
-    assert sum(premium[tier] for tier in ("SSR", "UR", "MYTHIC")) == 52
-    assert sum(normal[tier] for tier in ("SSR", "UR", "MYTHIC")) == 28
-    assert sum(premium[tier] for tier in ("UR", "MYTHIC")) == 20
-    assert sum(normal[tier] for tier in ("UR", "MYTHIC")) == 10
+    assert sum(premium[tier] for tier in ("SR", "SSR", "UR", "MYTHIC")) == 212
+    assert sum(normal[tier] for tier in ("SR", "SSR", "UR", "MYTHIC")) == 112
+    assert sum(premium[tier] for tier in ("SSR", "UR", "MYTHIC")) == 94
+    assert sum(normal[tier] for tier in ("SSR", "UR", "MYTHIC")) == 54
+    assert sum(premium[tier] for tier in ("UR", "MYTHIC")) == 44
+    assert sum(normal[tier] for tier in ("UR", "MYTHIC")) == 26
 
 
 def test_reward_table_has_no_per_item_rarity_inversion() -> None:
@@ -337,8 +337,8 @@ def test_reward_table_uses_current_nontrivial_rewards() -> None:
 
     assert len(ITEM_GACHA_REWARDS) == 152
     assert Counter(reward.tier for reward in ITEM_GACHA_REWARDS) == {
-        "N": 46,
-        "R": 49,
+        "N": 47,
+        "R": 48,
         "SR": 28,
         "SSR": 13,
         "UR": 8,
@@ -375,15 +375,16 @@ def test_reward_table_uses_current_nontrivial_rewards() -> None:
         "minecraft:dragon_head",
         "minecraft:conduit",
     } <= item_ids
-    assert get_item_gacha_reward("r_breeze_rod_bulk").item_count == 12
+    assert get_item_gacha_reward("r_breeze_rod_bulk").item_count == 64
     assert get_item_gacha_reward("r_wither_skull").item_count == 2
     assert get_item_gacha_reward("r_wither_skull").tier == "SR"
     assert get_item_gacha_reward("r_rocket_crate").item_count == 128
     assert get_item_gacha_reward("r_xp_bottle_crate").item_count == 64
     assert get_item_gacha_reward("r_shulker_box").item_count == 2
-    assert get_item_gacha_reward("r_iron_block_crate").item_count == 16
+    assert get_item_gacha_reward("r_iron_block_crate").item_count == 64
     assert get_item_gacha_reward("r_ender_pearl_crate").item_count == 32
     assert get_item_gacha_reward("r_obsidian_crate").item_count == 64
+    assert get_item_gacha_reward("r_obsidian_crate").tier == "N"
     assert get_item_gacha_reward("sr_heavy_core").item_count == 1
     assert get_item_gacha_reward("sr_heavy_core").tier == "SSR"
     assert get_item_gacha_reward("sr_dragon_head").tier == "SSR"
@@ -400,16 +401,29 @@ def test_reward_table_uses_current_nontrivial_rewards() -> None:
 
 def test_reward_table_has_generous_consumable_quantities() -> None:
     expected_counts = {
+        "n_iron": 64,
+        "n_gold": 64,
         "n_rocket_bulk": 64,
         "n_xp_bottle_bulk": 64,
         "n_golden_carrot_bulk": 64,
+        "n_sea_lantern": 64,
+        "n_slime": 64,
+        "n_quartz": 64,
         "n_ender_pearl_bulk": 16,
+        "n_sulfur": 64,
+        "n_cinnabar": 64,
+        "n_amethyst": 64,
+        "n_glowstone": 64,
+        "n_prismarine_crystals": 64,
+        "n_phantom_membrane": 64,
+        "n_honeycomb": 64,
         "n_wind_charge_bulk": 64,
         "n_chorus_fruit_bulk": 64,
+        "n_dead_bush": 64,
         "r_golden_apple_bulk": 6,
-        "r_breeze_rod_bulk": 12,
+        "r_breeze_rod_bulk": 64,
         "r_shulker_box": 2,
-        "r_iron_block_crate": 16,
+        "r_iron_block_crate": 64,
         "r_ender_pearl_crate": 32,
         "r_obsidian_crate": 64,
         "r_rocket_crate": 128,
@@ -664,17 +678,17 @@ def test_panel_publishes_only_tier_rates_and_keeps_rewards_secret() -> None:
     embed = item_gacha_panel_embed()
     rendered = str(embed.to_dict())
 
-    assert "N 52%" in rendered
-    assert "R 29%" in rendered
-    assert "SR 12%" in rendered
-    assert "SSR 4.5%" in rendered
-    assert "UR 2%" in rendered
-    assert "幻 0.5%" in rendered
-    assert "R 65%" in rendered
-    assert "SR 22%" in rendered
-    assert "SSR 8%" in rendered
+    assert "N 47%" in rendered
+    assert "R 25%" in rendered
+    assert "SR 14.5%" in rendered
+    assert "SSR 7%" in rendered
     assert "UR 4%" in rendered
-    assert "幻 1%" in rendered
+    assert "幻 2.5%" in rendered
+    assert "R 47%" in rendered
+    assert "SR 29.5%" in rendered
+    assert "SSR 12.5%" in rendered
+    assert "UR 7.5%" in rendered
+    assert "幻 3.5%" in rendered
     assert "100 XP" in rendered
     assert "1,000 XP" in rendered
     assert "1日 **3回**" in rendered
@@ -825,7 +839,7 @@ def test_gacha_day_resets_at_midnight_in_japan() -> None:
 
 
 def test_commands_use_only_catalog_rewards_and_safe_player_names() -> None:
-    assert item_gacha_give_command("Steve", "n_iron") == ("give Steve minecraft:iron_ingot 24")
+    assert item_gacha_give_command("Steve", "n_iron") == ("give Steve minecraft:iron_ingot 64")
     assert "stored_enchantments={mending:1}" in item_gacha_give_command("Steve", "r_mending")
     assert "enchantments={sharpness:5" in item_gacha_give_command("Steve", "mythic_sword")
     assert item_gacha_give_command("Steve", "r_diamond_spear") == (
@@ -834,13 +848,13 @@ def test_commands_use_only_catalog_rewards_and_safe_player_names() -> None:
     assert item_gacha_give_command("Steve", "r_healing_splash_potion_bulk") == (
         'give Steve minecraft:splash_potion[potion_contents="minecraft:strong_healing"] 8'
     )
-    assert item_gacha_give_command("*Steve", "n_iron") == ("give *Steve minecraft:iron_ingot 24")
+    assert item_gacha_give_command("*Steve", "n_iron") == ("give *Steve minecraft:iron_ingot 64")
     assert "lunge:3" in item_gacha_give_command("Steve", "mythic_spear")
     tellraw = item_gacha_tellraw_command("Steve", "n_iron", "resources")
     assert tellraw.startswith("tellraw @a ")
     assert "【N】" in tellraw
     assert "資源・採掘ガチャ" in tellraw
-    assert "鉄インゴット x24" in tellraw
+    assert "鉄インゴット x64" in tellraw
     with pytest.raises(ValueError):
         item_gacha_give_command("@a", "n_iron")
     with pytest.raises(ValueError):
@@ -871,7 +885,7 @@ def test_result_embed_uses_minecraft_name_and_discord_mention() -> None:
 
     assert embed.title == "🎁 アイテムガチャ【N】"
     assert r"**\*Steve\* (<@123>) さん** が" in str(embed.description)
-    assert "鉄インゴット x24" in str(embed.description)
+    assert "鉄インゴット x64" in str(embed.description)
 
 
 def test_store_reuses_incomplete_draw_and_allows_three_completed_draws_per_day(
@@ -1163,7 +1177,7 @@ def test_concurrent_notification_flush_sends_each_destination_once(tmp_path) -> 
 
 def test_three_daily_draws_deliver_and_fourth_is_rejected(tmp_path) -> None:
     bot, account, channel = _bot_with_account(tmp_path)
-    rcon = GachaRcon(["Gave 24 [Iron Ingot] to Steve"] * 3)
+    rcon = GachaRcon(["Gave 64 [Iron Ingot] to Steve"] * 3)
     bot._rcon = rcon  # type: ignore[assignment]
     interactions = [_interaction() for _ in range(4)]
     reward = get_item_gacha_reward("n_iron")
@@ -1175,7 +1189,7 @@ def test_three_daily_draws_deliver_and_fourth_is_rejected(tmp_path) -> None:
 
     asyncio.run(exercise())
 
-    assert rcon.commands.count("give Steve minecraft:iron_ingot 24") == 3
+    assert rcon.commands.count("give Steve minecraft:iron_ingot 64") == 3
     public_commands = [command for command in rcon.commands if command.startswith("tellraw @a ")]
     assert len(public_commands) == 3
     assert all("【N】" in command for command in public_commands)
@@ -1187,7 +1201,7 @@ def test_three_daily_draws_deliver_and_fourth_is_rejected(tmp_path) -> None:
     assert [user.id for user in log["allowed_mentions"].users] == [123]
     assert "【N】" in log["embed"].title
     assert "**Steve (<@123>) さん** が" in str(log["embed"].description)
-    assert "鉄インゴット x24" in str(log["embed"].description)
+    assert "鉄インゴット x64" in str(log["embed"].description)
     for draw_number, interaction in enumerate(interactions[:3], start=1):
         received = interaction.followup.send.await_args.args[0]
         assert "受け取りました" in received
@@ -1315,7 +1329,7 @@ def test_draw_is_retryable_while_payment_is_requested_and_reserved_before_rcon(
 
 def test_explicit_minecraft_rejection_retries_the_same_secret_reward(tmp_path) -> None:
     bot, _, channel = _bot_with_account(tmp_path)
-    rcon = GachaRcon(["No player was found", "Gave 24 [Iron Ingot] to Steve"])
+    rcon = GachaRcon(["No player was found", "Gave 64 [Iron Ingot] to Steve"])
     bot._rcon = rcon  # type: ignore[assignment]
     first = _interaction()
     second = _interaction()
@@ -1331,7 +1345,7 @@ def test_explicit_minecraft_rejection_retries_the_same_secret_reward(tmp_path) -
     asyncio.run(exercise())
 
     gives = [command for command in rcon.commands if command.startswith("give Steve ")]
-    assert gives == ["give Steve minecraft:iron_ingot 24"] * 2
+    assert gives == ["give Steve minecraft:iron_ingot 64"] * 2
     assert "同じ景品で再試行" in first.followup.send.await_args.args[0]
     assert "受け取りました" in second.followup.send.await_args.args[0]
     channel.send.assert_awaited_once()
@@ -1365,7 +1379,7 @@ def test_ambiguous_delivery_consumes_one_slot_and_next_draw_is_new(tmp_path) -> 
 
     gives = [command for command in rcon.commands if command.startswith("give Steve ")]
     assert gives == [
-        "give Steve minecraft:iron_ingot 24",
+        "give Steve minecraft:iron_ingot 64",
         "give Steve minecraft:elytra 1",
     ]
     assert "再抽選は行いません" in first.followup.send.await_args.args[0]
@@ -1400,7 +1414,7 @@ def test_discord_log_failure_retries_only_the_log_not_the_reward(tmp_path) -> No
 
     asyncio.run(exercise())
 
-    assert rcon.commands.count("give Steve minecraft:iron_ingot 24") == 1
+    assert rcon.commands.count("give Steve minecraft:iron_ingot 64") == 1
     assert sum(command.startswith("tellraw @a ") for command in rcon.commands) == 1
     assert channel.send.await_count == 2
     draw = bot._accounts.get_minecraft_item_gacha_draw(

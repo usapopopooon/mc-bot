@@ -34,20 +34,20 @@ _DRAW_TABLE_SIZE = 400
 _TIER_ORDER = ("N", "R", "SR", "SSR", "UR", "MYTHIC")
 _TIER_WEIGHTS_BY_KIND: dict[ItemGachaKind, dict[str, int]] = {
     "normal": {
-        "N": 208,
-        "R": 116,
-        "SR": 48,
-        "SSR": 18,
-        "UR": 8,
-        "MYTHIC": 2,
+        "N": 188,
+        "R": 100,
+        "SR": 58,
+        "SSR": 28,
+        "UR": 16,
+        "MYTHIC": 10,
     },
     "premium": {
         "N": 0,
-        "R": 260,
-        "SR": 88,
-        "SSR": 32,
-        "UR": 16,
-        "MYTHIC": 4,
+        "R": 188,
+        "SR": 118,
+        "SSR": 50,
+        "UR": 30,
+        "MYTHIC": 14,
     },
 }
 
@@ -81,40 +81,40 @@ def _enchanted_book(
 
 
 # レアリティを先に公開確率で抽選し、そのランク内では既存weightを相対比として使う。
-# 通常は N 52% / R 29% / SR 12% / SSR 4.5% / UR 2% / 幻 0.5%、
-# R以上確定は R 65% / SR 22% / SSR 8% / UR 4% / 幻 1%。
+# 通常は N 47% / R 25% / SR 14.5% / SSR 7% / UR 4% / 幻 2.5%、
+# R以上確定は R 47% / SR 29.5% / SSR 12.5% / UR 7.5% / 幻 3.5%。
 # Minecraft Java 26.2 の公式 recipe / loot_table / enchantment を基準に確認する。
 # パネルにはランク確率だけを出し、景品内容と個別確率は抽選まで公開しない。
 # keyは予約済み抽選の復旧に使うため、レアリティ変更後も既存値を維持する。
 ITEM_GACHA_REWARDS = (
-    ItemGachaReward("n_iron", "N", "minecraft:iron_ingot", "鉄インゴット", 24, 13),
-    ItemGachaReward("n_gold", "N", "minecraft:gold_ingot", "金インゴット", 16, 13),
+    ItemGachaReward("n_iron", "N", "minecraft:iron_ingot", "鉄インゴット", 64, 13),
+    ItemGachaReward("n_gold", "N", "minecraft:gold_ingot", "金インゴット", 64, 13),
     ItemGachaReward("n_rocket_bulk", "N", "minecraft:firework_rocket", "ロケット花火", 64, 13),
     ItemGachaReward(
         "n_xp_bottle_bulk", "N", "minecraft:experience_bottle", "エンチャントの瓶", 64, 13
     ),
     ItemGachaReward("n_golden_carrot_bulk", "N", "minecraft:golden_carrot", "金のニンジン", 64, 13),
-    ItemGachaReward("n_sea_lantern", "N", "minecraft:sea_lantern", "シーランタン", 16, 13),
-    ItemGachaReward("n_slime", "N", "minecraft:slime_ball", "スライムボール", 16, 13),
-    ItemGachaReward("n_quartz", "N", "minecraft:quartz", "ネザークォーツ", 48, 13),
+    ItemGachaReward("n_sea_lantern", "N", "minecraft:sea_lantern", "シーランタン", 64, 13),
+    ItemGachaReward("n_slime", "N", "minecraft:slime_ball", "スライムボール", 64, 13),
+    ItemGachaReward("n_quartz", "N", "minecraft:quartz", "ネザークォーツ", 64, 13),
     ItemGachaReward("n_redstone", "N", "minecraft:redstone", "レッドストーンダスト", 64, 12),
     ItemGachaReward("n_ender_pearl_bulk", "N", "minecraft:ender_pearl", "エンダーパール", 16, 12),
-    ItemGachaReward("n_sulfur", "N", "minecraft:sulfur", "硫黄", 32, 12),
-    ItemGachaReward("n_cinnabar", "N", "minecraft:cinnabar", "辰砂", 32, 12),
-    ItemGachaReward("n_amethyst", "N", "minecraft:amethyst_shard", "アメジストの欠片", 32, 12),
-    ItemGachaReward("n_glowstone", "N", "minecraft:glowstone", "グロウストーン", 24, 12),
+    ItemGachaReward("n_sulfur", "N", "minecraft:sulfur", "硫黄", 64, 12),
+    ItemGachaReward("n_cinnabar", "N", "minecraft:cinnabar", "辰砂", 64, 12),
+    ItemGachaReward("n_amethyst", "N", "minecraft:amethyst_shard", "アメジストの欠片", 64, 12),
+    ItemGachaReward("n_glowstone", "N", "minecraft:glowstone", "グロウストーン", 64, 12),
     ItemGachaReward(
         "n_prismarine_crystals",
         "N",
         "minecraft:prismarine_crystals",
         "プリズマリンクリスタル",
-        24,
+        64,
         12,
     ),
     ItemGachaReward(
-        "n_phantom_membrane", "N", "minecraft:phantom_membrane", "ファントムの皮膜", 8, 12
+        "n_phantom_membrane", "N", "minecraft:phantom_membrane", "ファントムの皮膜", 64, 12
     ),
-    ItemGachaReward("n_honeycomb", "N", "minecraft:honeycomb", "ハニカム", 32, 12),
+    ItemGachaReward("n_honeycomb", "N", "minecraft:honeycomb", "ハニカム", 64, 12),
     ItemGachaReward("n_wind_charge_bulk", "N", "minecraft:wind_charge", "ウィンドチャージ", 64, 12),
     ItemGachaReward(
         "n_chorus_fruit_bulk", "N", "minecraft:chorus_fruit", "コーラスフルーツ", 64, 12
@@ -136,7 +136,7 @@ ITEM_GACHA_REWARDS = (
         64,
         12,
     ),
-    ItemGachaReward("n_dead_bush", "N", "minecraft:dead_bush", "枯れ木の栽培セット", 16, 12),
+    ItemGachaReward("n_dead_bush", "N", "minecraft:dead_bush", "枯れ木の栽培セット", 64, 12),
     ItemGachaReward("n_legendary_dirt", "N", "minecraft:dirt", "由緒正しい土", 64, 12),
     ItemGachaReward("n_steak_bulk", "N", "minecraft:cooked_beef", "ステーキ", 64, 12),
     ItemGachaReward("n_cooked_porkchop_bulk", "N", "minecraft:cooked_porkchop", "焼き豚", 64, 12),
@@ -197,7 +197,7 @@ ITEM_GACHA_REWARDS = (
     ItemGachaReward("r_diamond", "R", "minecraft:diamond", "ダイヤモンド", 3, 12),
     ItemGachaReward("r_golden_apple_bulk", "R", "minecraft:golden_apple", "金のリンゴ", 6, 12),
     ItemGachaReward("r_shulker_box", "R", "minecraft:shulker_box", "シュルカーボックス", 2, 12),
-    ItemGachaReward("r_breeze_rod_bulk", "R", "minecraft:breeze_rod", "ブリーズロッド", 12, 12),
+    ItemGachaReward("r_breeze_rod_bulk", "R", "minecraft:breeze_rod", "ブリーズロッド", 64, 12),
     ItemGachaReward(
         "r_rocket_crate",
         "R",
@@ -206,9 +206,10 @@ ITEM_GACHA_REWARDS = (
         128,
         12,
     ),
-    ItemGachaReward("r_iron_block_crate", "R", "minecraft:iron_block", "鉄ブロック", 16, 12),
+    ItemGachaReward("r_iron_block_crate", "R", "minecraft:iron_block", "鉄ブロック", 64, 12),
     ItemGachaReward("r_ender_pearl_crate", "R", "minecraft:ender_pearl", "エンダーパール", 32, 12),
-    ItemGachaReward("r_obsidian_crate", "R", "minecraft:obsidian", "黒曜石", 64, 12),
+    # key は予約済み抽選の復旧互換のため維持する。黒曜石は量産容易なのでN扱い。
+    ItemGachaReward("r_obsidian_crate", "N", "minecraft:obsidian", "黒曜石", 64, 12),
     ItemGachaReward(
         "r_recovery_compass",
         "R",
@@ -1157,12 +1158,12 @@ def item_gacha_panel_embed() -> discord.Embed:
     )
     embed.add_field(
         name=f"通常 · {ITEM_GACHA_NORMAL_COST_XP:,} XP",
-        value="`N 52%` `R 29%` `SR 12%`\n`SSR 4.5%` `UR 2%` `幻 0.5%`",
+        value="`N 47%` `R 25%` `SR 14.5%`\n`SSR 7%` `UR 4%` `幻 2.5%`",
         inline=False,
     )
     embed.add_field(
         name=f"R以上確定 · {ITEM_GACHA_PREMIUM_COST_XP:,} XP",
-        value="`R 65%` `SR 22%` `SSR 8%`\n`UR 4%` `幻 1%`",
+        value="`R 47%` `SR 29.5%` `SSR 12.5%`\n`UR 7.5%` `幻 3.5%`",
         inline=False,
     )
     embed.add_field(
