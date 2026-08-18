@@ -118,6 +118,7 @@ class MinecraftItemGachaDraw:
     draw_day: str
     draw_number: int
     draw_kind: str
+    draw_category: str
     cost_xp: int
     tier: str
     reward_key: str
@@ -275,6 +276,8 @@ class AccountStore:
                     draw_day TEXT NOT NULL,
                     draw_number INTEGER NOT NULL CHECK (draw_number BETWEEN 1 AND 3),
                     draw_kind TEXT NOT NULL CHECK (draw_kind IN ('normal', 'premium')),
+                    draw_category TEXT NOT NULL DEFAULT 'all'
+                        CHECK (draw_category IN ('all', 'resources', 'adventure', 'equipment')),
                     cost_xp INTEGER NOT NULL CHECK (cost_xp IN (100, 1000)),
                     tier TEXT NOT NULL
                         CHECK (tier IN ('N', 'R', 'SR', 'SSR', 'UR', 'MYTHIC')),
@@ -402,6 +405,7 @@ class AccountStore:
             self._add_whitelist_retry_columns(connection)
             self._add_item_gacha_notification_attempt_columns(connection)
             self._upgrade_item_gacha_draw_table(connection)
+            self._add_item_gacha_category_column(connection)
 
     @staticmethod
     def _add_public_delivery_columns(connection: sqlite3.Connection, table: str) -> None:
@@ -498,6 +502,8 @@ class AccountStore:
                 draw_day TEXT NOT NULL,
                 draw_number INTEGER NOT NULL CHECK (draw_number BETWEEN 1 AND 3),
                 draw_kind TEXT NOT NULL CHECK (draw_kind IN ('normal', 'premium')),
+                draw_category TEXT NOT NULL DEFAULT 'all'
+                    CHECK (draw_category IN ('all', 'resources', 'adventure', 'equipment')),
                 cost_xp INTEGER NOT NULL CHECK (cost_xp IN (100, 1000)),
                 tier TEXT NOT NULL
                     CHECK (tier IN ('N', 'R', 'SR', 'SSR', 'UR', 'MYTHIC')),
@@ -521,14 +527,14 @@ class AccountStore:
             );
             INSERT INTO minecraft_item_gacha_draws_v2 (
                 draw_id, guild_id, discord_user_id, account_id, player_name,
-                draw_day, draw_number, draw_kind, cost_xp, tier, reward_key,
+                draw_day, draw_number, draw_kind, draw_category, cost_xp, tier, reward_key,
                 item_spec, item_name, item_count, status, minecraft_notified,
                 discord_notified, minecraft_notification_attempts,
                 discord_notification_attempts, created_at, updated_at
             )
             SELECT
                 draw_id, guild_id, discord_user_id, account_id, player_name,
-                draw_day, 1, 'normal', 100, tier, reward_key, item_spec,
+                draw_day, 1, 'normal', 'all', 100, tier, reward_key, item_spec,
                 item_name, item_count, status, minecraft_notified,
                 discord_notified, minecraft_notification_attempts,
                 discord_notification_attempts, created_at, updated_at
@@ -539,6 +545,20 @@ class AccountStore:
                 ON minecraft_item_gacha_draws(
                     status, minecraft_notified, discord_notified, created_at
                 );
+            """
+        )
+
+    @staticmethod
+    def _add_item_gacha_category_column(connection: sqlite3.Connection) -> None:
+        table = "minecraft_item_gacha_draws"
+        columns = {row["name"] for row in connection.execute(f"PRAGMA table_info({table})")}
+        if "draw_category" in columns:
+            return
+        connection.execute(
+            f"""
+            ALTER TABLE {table}
+            ADD COLUMN draw_category TEXT NOT NULL DEFAULT 'all'
+                CHECK (draw_category IN ('all', 'resources', 'adventure', 'equipment'))
             """
         )
 
@@ -1671,6 +1691,7 @@ class AccountStore:
         item_spec: str,
         item_name: str,
         item_count: int,
+        draw_category: str = "all",
     ) -> tuple[MinecraftItemGachaDraw, bool]:
         try:
             normalized_draw_id = str(uuid.UUID(draw_id))
@@ -1684,6 +1705,7 @@ class AccountStore:
             or not player_name
             or draw_day != normalized_day
             or draw_kind not in {"normal", "premium"}
+            or draw_category not in {"all", "resources", "adventure", "equipment"}
             or cost_xp != {"normal": 100, "premium": 1_000}[draw_kind]
             or tier not in {"N", "R", "SR", "SSR", "UR", "MYTHIC"}
             or not reward_key
@@ -1707,6 +1729,7 @@ class AccountStore:
                     or existing_draw.account_id != account_id
                     or existing_draw.draw_day != normalized_day
                     or existing_draw.draw_kind != draw_kind
+                    or existing_draw.draw_category != draw_category
                     or existing_draw.cost_xp != cost_xp
                 ):
                     raise ValueError("Minecraft item gacha request ID was reused")
@@ -1740,9 +1763,9 @@ class AccountStore:
                 """
                 INSERT INTO minecraft_item_gacha_draws (
                     draw_id, guild_id, discord_user_id, account_id, player_name,
-                    draw_day, draw_number, draw_kind, cost_xp, tier, reward_key,
+                    draw_day, draw_number, draw_kind, draw_category, cost_xp, tier, reward_key,
                     item_spec, item_name, item_count, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     normalized_draw_id,
@@ -1753,6 +1776,7 @@ class AccountStore:
                     normalized_day,
                     draw_number,
                     draw_kind,
+                    draw_category,
                     cost_xp,
                     tier,
                     reward_key,
@@ -3180,6 +3204,7 @@ def _minecraft_item_gacha_draw(row: sqlite3.Row) -> MinecraftItemGachaDraw:
         draw_day=str(row["draw_day"]),
         draw_number=int(row["draw_number"]),
         draw_kind=str(row["draw_kind"]),
+        draw_category=str(row["draw_category"]),
         cost_xp=int(row["cost_xp"]),
         tier=str(row["tier"]),
         reward_key=str(row["reward_key"]),

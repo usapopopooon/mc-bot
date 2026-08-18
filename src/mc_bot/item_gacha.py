@@ -21,6 +21,14 @@ ITEM_GACHA_PREMIUM_COST_XP = 1_000
 ITEM_GACHA_DAILY_LIMIT = 3
 ITEM_GACHA_COST_XP = ITEM_GACHA_NORMAL_COST_XP
 type ItemGachaKind = Literal["normal", "premium"]
+type ItemGachaCategory = Literal["all", "resources", "adventure", "equipment"]
+
+ITEM_GACHA_CATEGORIES: tuple[ItemGachaCategory, ...] = (
+    "all",
+    "resources",
+    "adventure",
+    "equipment",
+)
 
 _DRAW_TABLE_SIZE = 400
 _TIER_ORDER = ("N", "R", "SR", "SSR", "UR", "MYTHIC")
@@ -837,11 +845,157 @@ _REWARDS_BY_TIER = {
     tier: tuple(reward for reward in ITEM_GACHA_REWARDS if reward.tier == tier)
     for tier in _TIER_ORDER
 }
+
+_RESOURCE_ITEM_IDS = frozenset(
+    {
+        "minecraft:amethyst_shard",
+        "minecraft:ancient_debris",
+        "minecraft:breeze_rod",
+        "minecraft:cinnabar",
+        "minecraft:dead_bush",
+        "minecraft:diamond",
+        "minecraft:diamond_block",
+        "minecraft:dirt",
+        "minecraft:glowstone",
+        "minecraft:gold_ingot",
+        "minecraft:heavy_core",
+        "minecraft:honeycomb",
+        "minecraft:iron_block",
+        "minecraft:iron_ingot",
+        "minecraft:nether_star",
+        "minecraft:netherite_ingot",
+        "minecraft:obsidian",
+        "minecraft:prismarine_crystals",
+        "minecraft:quartz",
+        "minecraft:redstone",
+        "minecraft:sea_lantern",
+        "minecraft:slime_ball",
+        "minecraft:sulfur",
+    }
+)
+_RESOURCE_REWARD_KEYS = frozenset(
+    {
+        "mythic_pickaxe",
+        "r_aqua_affinity",
+        "r_efficiency",
+        "r_fortune",
+        "r_mending",
+        "r_silk_touch",
+        "r_unbreaking",
+        "ur_axe",
+        "ur_shovel",
+    }
+)
+_ADVENTURE_ITEM_IDS = frozenset(
+    {
+        "minecraft:beacon",
+        "minecraft:bow",
+        "minecraft:chorus_fruit",
+        "minecraft:conduit",
+        "minecraft:cooked_beef",
+        "minecraft:cooked_porkchop",
+        "minecraft:cookie",
+        "minecraft:creeper_head",
+        "minecraft:diamond_spear",
+        "minecraft:dragon_head",
+        "minecraft:elytra",
+        "minecraft:enchanted_golden_apple",
+        "minecraft:ender_pearl",
+        "minecraft:experience_bottle",
+        "minecraft:firework_rocket",
+        "minecraft:golden_apple",
+        "minecraft:golden_carrot",
+        "minecraft:honey_bottle",
+        "minecraft:lingering_potion",
+        "minecraft:mace",
+        "minecraft:music_disc_5",
+        "minecraft:music_disc_creator",
+        "minecraft:music_disc_creator_music_box",
+        "minecraft:music_disc_precipice",
+        "minecraft:music_disc_relic",
+        "minecraft:netherite_spear",
+        "minecraft:netherite_sword",
+        "minecraft:phantom_membrane",
+        "minecraft:poisonous_potato",
+        "minecraft:potion",
+        "minecraft:pumpkin_pie",
+        "minecraft:recovery_compass",
+        "minecraft:shulker_box",
+        "minecraft:sniffer_egg",
+        "minecraft:splash_potion",
+        "minecraft:sulfur_cube_bucket",
+        "minecraft:totem_of_undying",
+        "minecraft:trident",
+        "minecraft:wind_charge",
+        "minecraft:wither_skeleton_skull",
+    }
+)
+
+
+def item_gacha_reward_categories(
+    reward: ItemGachaReward,
+) -> frozenset[ItemGachaCategory]:
+    """Return the intentionally overlapping pools that contain a reward."""
+    item_id = reward.item_spec.partition("[")[0]
+    categories: set[ItemGachaCategory] = set()
+    if item_id in _RESOURCE_ITEM_IDS or reward.key in _RESOURCE_REWARD_KEYS:
+        categories.add("resources")
+    if (
+        item_id == "minecraft:enchanted_book"
+        or item_id.endswith("_smithing_template")
+        or item_id.endswith(
+            (
+                "_axe",
+                "_boots",
+                "_chestplate",
+                "_helmet",
+                "_nautilus_armor",
+                "_pickaxe",
+                "_shovel",
+                "_spear",
+                "_sword",
+            )
+        )
+        or item_id
+        in {
+            "minecraft:bow",
+            "minecraft:elytra",
+            "minecraft:mace",
+            "minecraft:trident",
+        }
+    ):
+        categories.add("equipment")
+    if item_id in _ADVENTURE_ITEM_IDS:
+        categories.add("adventure")
+    return frozenset(categories)
+
+
+_REWARDS_BY_CATEGORY_AND_TIER = {
+    category: {
+        tier: (
+            _REWARDS_BY_TIER[tier]
+            if category == "all"
+            else tuple(
+                reward
+                for reward in _REWARDS_BY_TIER[tier]
+                if category in item_gacha_reward_categories(reward)
+            )
+        )
+        for tier in _TIER_ORDER
+    }
+    for category in ITEM_GACHA_CATEGORIES
+}
 _CATALOG_TOTAL_WEIGHT = sum(reward.weight for reward in ITEM_GACHA_REWARDS)
 if (
     _CATALOG_TOTAL_WEIGHT != 1600
     or len(_REWARDS_BY_KEY) != len(ITEM_GACHA_REWARDS) + len(_LEGACY_ITEM_GACHA_REWARDS)
     or any(sum(weights.values()) != _DRAW_TABLE_SIZE for weights in _TIER_WEIGHTS_BY_KIND.values())
+    or any(
+        not _REWARDS_BY_CATEGORY_AND_TIER[category][tier]
+        for category in ITEM_GACHA_CATEGORIES
+        for tier in _TIER_ORDER
+    )
+    or any(not item_gacha_reward_categories(reward) for reward in ITEM_GACHA_REWARDS)
 ):
     raise RuntimeError("item gacha reward table is invalid")
 
@@ -863,15 +1017,28 @@ def item_gacha_kind_label(draw_kind: ItemGachaKind) -> str:
     return "通常" if draw_kind == "normal" else "R以上確定"
 
 
+def item_gacha_category_label(category: ItemGachaCategory) -> str:
+    return {
+        "all": "おまかせ",
+        "resources": "資源・採掘",
+        "adventure": "冒険",
+        "equipment": "装備・強化",
+    }[category]
+
+
 def draw_item_gacha_reward(
     draw_kind: ItemGachaKind = "normal",
     roll: int | None = None,
     reward_roll: int | None = None,
+    *,
+    category: ItemGachaCategory = "all",
 ) -> ItemGachaReward:
     try:
         tier_weights = _TIER_WEIGHTS_BY_KIND[draw_kind]
     except KeyError as error:
         raise ValueError("unknown item gacha kind") from error
+    if category not in ITEM_GACHA_CATEGORIES:
+        raise ValueError("unknown item gacha category")
     selected = secrets.randbelow(_DRAW_TABLE_SIZE) if roll is None else roll
     if not 0 <= selected < _DRAW_TABLE_SIZE:
         raise ValueError("roll is outside the item gacha table")
@@ -885,7 +1052,7 @@ def draw_item_gacha_reward(
     if selected_tier is None:
         raise RuntimeError("item gacha tier table did not select a tier")
 
-    candidates = _REWARDS_BY_TIER[selected_tier]
+    candidates = _REWARDS_BY_CATEGORY_AND_TIER[category][selected_tier]
     candidate_total = sum(reward.weight for reward in candidates)
     selected_reward = secrets.randbelow(candidate_total) if reward_roll is None else reward_roll
     if not 0 <= selected_reward < candidate_total:
@@ -912,7 +1079,11 @@ def item_gacha_give_command(player_name: str, reward_key: str) -> str:
     return f"give {player_name} {reward.item_spec} {reward.item_count}"
 
 
-def item_gacha_tellraw_command(player_name: str, reward_key: str) -> str:
+def item_gacha_tellraw_command(
+    player_name: str,
+    reward_key: str,
+    category: ItemGachaCategory = "all",
+) -> str:
     if not is_safe_server_player_name(player_name):
         raise ValueError("player_name contains unsafe RCON characters")
     reward = get_item_gacha_reward(reward_key)
@@ -928,7 +1099,7 @@ def item_gacha_tellraw_command(player_name: str, reward_key: str) -> str:
     components = [
         {"text": "🎁 "},
         {"text": player_name, "color": "yellow"},
-        {"text": "さんがアイテムガチャで "},
+        {"text": f"さんが{item_gacha_category_label(category)}ガチャで "},
         {"text": f"【{tier}】", "color": color, "bold": True},
         {
             "text": f"{reward.item_name} x{reward.item_count}",
@@ -945,6 +1116,7 @@ def item_gacha_result_embed(
     player_name: str,
     discord_user_id: int,
     reward_key: str,
+    category: ItemGachaCategory = "all",
 ) -> discord.Embed:
     if discord_user_id <= 0:
         raise ValueError("discord_user_id must be positive")
@@ -963,7 +1135,8 @@ def item_gacha_result_embed(
         title=f"🎁 アイテムガチャ【{tier}】",
         description=(
             f"**{player_name} (<@{discord_user_id}>) さん** が\n"
-            f"**{reward.item_name} x{reward.item_count}** を獲得しました!"
+            f"**{reward.item_name} x{reward.item_count}** を獲得しました!\n"
+            f"種類: **{item_gacha_category_label(category)}**"
         ),
         color=color,
     )
@@ -977,7 +1150,8 @@ def item_gacha_panel_embed() -> discord.Embed:
             f"通常 **{ITEM_GACHA_NORMAL_COST_XP:,} XP**、R以上確定 "
             f"**{ITEM_GACHA_PREMIUM_COST_XP:,} XP**から選べます。\n"
             f"両方を合わせて1日 **{ITEM_GACHA_DAILY_LIMIT}回**までです。\n"
-            "何が出るかは受け取るまで秘密。景品はその場でMinecraftへ届きます。"
+            "先に欲しい種類を選べます。何が出るかは受け取るまで秘密で、"
+            "景品はその場でMinecraftへ届きます。"
         ),
         color=discord.Color.gold(),
     )
@@ -995,8 +1169,8 @@ def item_gacha_panel_embed() -> discord.Embed:
         name="🎮 ゲーム内コマンド",
         value=(
             "スマホ版・Bedrock版: `/gacha` で選択メニューを開く\n"
-            "通常: `/gacha normal`\n"
-            "R以上確定: `/gacha rare`"
+            "おまかせ: `/gacha normal` / `/gacha rare`\n"
+            "種類指定: `/gacha resource normal` など"
         ),
         inline=False,
     )
@@ -1023,24 +1197,78 @@ class MinecraftItemGachaPanelView(discord.ui.View):
         self.bot = bot
 
     @discord.ui.button(
-        label="通常 100 XP",
-        emoji="🎁",
+        label="おまかせ",
+        emoji="🎲",
         style=discord.ButtonStyle.primary,
-        custom_id="mc-item-gacha:draw:normal",
+        custom_id="mc-item-gacha:category:all",
     )
-    async def normal(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+    async def all(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if await self.bot.validate_item_gacha_panel(interaction):
-            await self.bot.show_minecraft_item_gacha_confirmation(interaction, "normal")
+            await self.bot.show_minecraft_item_gacha_kind_selection(interaction, "all")
+
+    @discord.ui.button(
+        label="資源・採掘",
+        emoji="⛏️",
+        style=discord.ButtonStyle.secondary,
+        custom_id="mc-item-gacha:category:resources",
+    )
+    async def resources(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if await self.bot.validate_item_gacha_panel(interaction):
+            await self.bot.show_minecraft_item_gacha_kind_selection(interaction, "resources")
+
+    @discord.ui.button(
+        label="冒険",
+        emoji="🧭",
+        style=discord.ButtonStyle.secondary,
+        custom_id="mc-item-gacha:category:adventure",
+    )
+    async def adventure(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if await self.bot.validate_item_gacha_panel(interaction):
+            await self.bot.show_minecraft_item_gacha_kind_selection(interaction, "adventure")
+
+    @discord.ui.button(
+        label="装備・強化",
+        emoji="⚔️",
+        style=discord.ButtonStyle.secondary,
+        custom_id="mc-item-gacha:category:equipment",
+    )
+    async def equipment(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if await self.bot.validate_item_gacha_panel(interaction):
+            await self.bot.show_minecraft_item_gacha_kind_selection(interaction, "equipment")
+
+
+class MinecraftItemGachaKindView(discord.ui.View):
+    def __init__(
+        self,
+        bot: MinecraftDiscordBot,
+        *,
+        owner_id: int,
+        category: ItemGachaCategory,
+    ) -> None:
+        super().__init__(timeout=180)
+        self.bot = bot
+        self.owner_id = owner_id
+        self.category = category
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id == self.owner_id:
+            return True
+        await interaction.response.send_message(
+            "このガチャを操作できるのは本人だけです。", ephemeral=True
+        )
+        return False
+
+    @discord.ui.button(label="通常 100 XP", emoji="🎁", style=discord.ButtonStyle.primary)
+    async def normal(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await self.bot.show_minecraft_item_gacha_confirmation(interaction, "normal", self.category)
 
     @discord.ui.button(
         label="R以上確定 1,000 XP",
         emoji="💎",
         style=discord.ButtonStyle.success,
-        custom_id="mc-item-gacha:draw:premium",
     )
     async def premium(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
-        if await self.bot.validate_item_gacha_panel(interaction):
-            await self.bot.show_minecraft_item_gacha_confirmation(interaction, "premium")
+        await self.bot.show_minecraft_item_gacha_confirmation(interaction, "premium", self.category)
 
 
 class MinecraftItemGachaConfirmView(discord.ui.View):
@@ -1052,11 +1280,13 @@ class MinecraftItemGachaConfirmView(discord.ui.View):
         draw_kind: ItemGachaKind,
         cost_xp: int,
         affordable: bool,
+        draw_category: ItemGachaCategory = "all",
     ) -> None:
         super().__init__(timeout=180)
         self.bot = bot
         self.owner_id = owner_id
         self.draw_kind = draw_kind
+        self.draw_category = draw_category
         self.cost_xp = cost_xp
         self._operation_lock = asyncio.Lock()
         self._completed = False
@@ -1087,6 +1317,7 @@ class MinecraftItemGachaConfirmView(discord.ui.View):
             await self.bot.draw_minecraft_item_gacha(
                 interaction,
                 draw_kind=self.draw_kind,
+                draw_category=self.draw_category,
                 expected_cost_xp=self.cost_xp,
                 response_ready=True,
             )
@@ -1105,23 +1336,28 @@ class MinecraftItemGachaConfirmView(discord.ui.View):
 
 
 __all__ = [
+    "ITEM_GACHA_CATEGORIES",
     "ITEM_GACHA_COST_XP",
     "ITEM_GACHA_DAILY_LIMIT",
     "ITEM_GACHA_NORMAL_COST_XP",
     "ITEM_GACHA_PREMIUM_COST_XP",
     "ITEM_GACHA_REWARDS",
+    "ItemGachaCategory",
     "ItemGachaKind",
     "ItemGachaReward",
     "MinecraftItemGachaConfirmView",
+    "MinecraftItemGachaKindView",
     "MinecraftItemGachaPanelView",
     "draw_item_gacha_reward",
     "get_item_gacha_reward",
+    "item_gacha_category_label",
     "item_gacha_cost_xp",
     "item_gacha_day",
     "item_gacha_give_command",
     "item_gacha_kind_label",
     "item_gacha_panel_embed",
     "item_gacha_result_embed",
+    "item_gacha_reward_categories",
     "item_gacha_tellraw_command",
     "item_gacha_tier_label",
 ]

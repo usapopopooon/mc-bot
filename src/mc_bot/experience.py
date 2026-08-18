@@ -841,6 +841,7 @@ class LevelBotXpClient:
         account_id: int,
         draw_day: str,
         expected_cost_xp: int,
+        draw_category: str = "all",
     ) -> MinecraftItemGachaSpendRequest | None:
         if not self._token:
             return None
@@ -855,6 +856,7 @@ class LevelBotXpClient:
                     "user_id": str(user_id),
                     "minecraft_account_id": f"mc-bot:{account_id}",
                     "draw_day": draw_day,
+                    "draw_category": draw_category,
                     "expected_cost_xp": expected_cost_xp,
                 },
             ) as response:

@@ -246,6 +246,7 @@ def test_item_gacha_spend_uses_draw_id_and_account_binding() -> None:
             request_id="00000000-0000-4000-8000-000000000021",
             account_id=7,
             draw_day="2026-08-15",
+            draw_category="resources",
             expected_cost_xp=100,
         )
         completed = await client.update_item_gacha_spend(
@@ -263,6 +264,7 @@ def test_item_gacha_spend_uses_draw_id_and_account_binding() -> None:
             "user_id": "2001",
             "minecraft_account_id": "mc-bot:7",
             "draw_day": "2026-08-15",
+            "draw_category": "resources",
             "expected_cost_xp": 100,
         }
         assert session.calls[1]["json"] == {"guild_id": "1001", "user_id": "2001"}

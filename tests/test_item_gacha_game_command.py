@@ -47,15 +47,21 @@ def _request_line(
     *,
     request_id: str = REQUEST_ID,
     draw_kind: str = "premium",
+    draw_category: str = "resources",
     expected_cost_xp: int | None = None,
-    protocol_version: int = 2,
+    protocol_version: int = 3,
     requested_at_ms: int | None = None,
 ) -> PendingLine:
     if requested_at_ms is None:
         requested_at_ms = int(datetime.now(UTC).timestamp() * 1_000)
     if expected_cost_xp is None:
         expected_cost_xp = 1_000 if draw_kind == "premium" else 100
-    selection = f"{draw_kind}|{expected_cost_xp}" if protocol_version == 2 else draw_kind
+    if protocol_version == 3:
+        selection = f"{draw_category}|{draw_kind}|{expected_cost_xp}"
+    elif protocol_version == 2:
+        selection = f"{draw_kind}|{expected_cost_xp}"
+    else:
+        selection = draw_kind
     return PendingLine(
         text=(
             "[08:24:00] [Server thread/INFO]: [UsapoEventBridge] "
@@ -138,6 +144,7 @@ def test_game_command_uses_linked_discord_xp_and_replay_does_not_give_twice(tmp_
     assert draw.draw_id == REQUEST_ID
     assert draw.account_id == account.id
     assert draw.draw_kind == "premium"
+    assert draw.draw_category == "resources"
     assert draw.cost_xp == 1_000
     assert draw.status == "delivered"
     assert (
@@ -154,6 +161,7 @@ def test_game_command_uses_linked_discord_xp_and_replay_does_not_give_twice(tmp_
         request_id=REQUEST_ID,
         account_id=account.id,
         draw_day=draw.draw_day,
+        draw_category="resources",
         expected_cost_xp=1_000,
     )
 
