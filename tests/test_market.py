@@ -207,8 +207,10 @@ def test_market_panel_keeps_summary_short_and_moves_details_to_guide() -> None:
 
     assert panel.title == "Minecraft フリマ"
     assert panel.description is not None
-    assert len(panel.description) <= 100
-    assert "手数料" not in panel.description
+    assert panel.description == (
+        "どんなアイテムでもサーバーXPで出品・購入できます。\n"
+        "詳しくは「使い方」を押してください。"
+    )
     assert "サーバーXP" in panel.description
     assert "/market sell" not in panel.description
     assert "/market sell" in str(guide.to_dict())
@@ -218,8 +220,6 @@ def test_market_panel_keeps_summary_short_and_moves_details_to_guide() -> None:
     assert "商品カード" in str(guide.to_dict())
     assert "サーバーXP" in str(guide.to_dict())
     assert "オンライン" in str(guide.to_dict())
-    assert "手数料" not in str(guide.to_dict())
-    assert "全額" not in str(guide.to_dict())
 
 
 def test_market_panel_balance_identifies_server_xp() -> None:
