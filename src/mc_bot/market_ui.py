@@ -60,7 +60,7 @@ class MarketPanelView(discord.ui.View):
                 bot,
                 0,
                 action="balance",
-                label="自分のXP",
+                label="サーバーXP確認",
                 style=discord.ButtonStyle.secondary,
             )
         )
@@ -101,7 +101,7 @@ def market_panel_embed() -> discord.Embed:
     return discord.Embed(
         title="Minecraft フリマ",
         description=(
-            "どんなアイテムでもXPで出品・購入できます。**手数料なし**。\n"
+            "どんなアイテムでもサーバーXPで出品・購入できます。**手数料なし**。\n"
             "詳しくは「使い方」を押してください。"
         ),
         color=discord.Color.gold(),
@@ -111,7 +111,10 @@ def market_panel_embed() -> discord.Embed:
 def market_guide_embed() -> discord.Embed:
     embed = discord.Embed(
         title="Minecraft フリマの使い方",
-        description="出品操作はMinecraft内、購入はMinecraft内とDiscordの両方からできます。",
+        description=(
+            "取引にはMinecraftの経験値ではなく、**サーバーXP**を使います。"
+            "出品操作はMinecraft内、購入はMinecraft内とDiscordの両方からできます。"
+        ),
         color=discord.Color.gold(),
     )
     embed.add_field(
@@ -128,7 +131,7 @@ def market_guide_embed() -> discord.Embed:
         name="確認・取り消し",
         value=(
             "自分の出品は `/market mine`、取り消しは "
-            "`/market cancel <出品番号>`、XP確認は `/market balance` です。"
+            "`/market cancel <出品番号>`、サーバーXP確認は `/market balance` です。"
         ),
         inline=False,
     )
@@ -237,7 +240,7 @@ def market_purchase_confirmation_embed(
 
 def market_balance_text(wallet: MinecraftXpWallet) -> str:
     return (
-        f"獲得・売上XP: **{wallet.total_xp:,} XP**\n"
-        f"使用済み・予約中: **{wallet.spent_xp:,} XP**\n"
-        f"現在XP: **{wallet.available_xp:,} XP**"
+        f"獲得・売上のサーバーXP: **{wallet.total_xp:,} XP**\n"
+        f"使用済み・予約中のサーバーXP: **{wallet.spent_xp:,} XP**\n"
+        f"現在のサーバーXP: **{wallet.available_xp:,} XP**"
     )

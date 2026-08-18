@@ -42,10 +42,13 @@ class FakeMarketPanelChannel:
 
 def test_market_panel_view_has_guide_and_balance_buttons() -> None:
     bot = MinecraftDiscordBot(Config(discord_token="secret"))
+    view = MarketPanelView(bot)
 
-    custom_ids = {item.custom_id for item in MarketPanelView(bot).children}
+    custom_ids = {item.custom_id for item in view.children}
+    labels = {item.label for item in view.children}
 
     assert custom_ids == {"mc-market:guide:0", "mc-market:balance:0"}
+    assert labels == {"使い方", "サーバーXP確認"}
 
 
 def test_refresh_market_panel_creates_and_persists_message(tmp_path) -> None:

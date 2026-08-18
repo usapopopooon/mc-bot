@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 import discord
 import pytest
 
+from mc_bot.experience import MinecraftXpWallet
 from mc_bot.market import (
     MarketStore,
     market_listing_embed,
@@ -11,7 +12,7 @@ from mc_bot.market import (
     parse_market_transfer_result,
 )
 from mc_bot.market_request import parse_market_listing, parse_market_request
-from mc_bot.market_ui import market_guide_embed, market_panel_embed
+from mc_bot.market_ui import market_balance_text, market_guide_embed, market_panel_embed
 
 SELLER_UUID = "22222222-2222-4222-8222-222222222222"
 BUYER_UUID = "33333333-3333-4333-8333-333333333333"
@@ -194,7 +195,17 @@ def test_market_panel_keeps_summary_short_and_moves_details_to_guide() -> None:
     assert panel.description is not None
     assert len(panel.description) <= 100
     assert "手数料なし" in panel.description
+    assert "サーバーXP" in panel.description
     assert "/market sell" not in panel.description
     assert "/market sell" in str(guide.to_dict())
     assert "/market balance" in str(guide.to_dict())
+    assert "サーバーXP" in str(guide.to_dict())
     assert "オンライン" in str(guide.to_dict())
+
+
+def test_market_panel_balance_identifies_server_xp() -> None:
+    text = market_balance_text(
+        MinecraftXpWallet(total_xp=5_000, spent_xp=1_000, available_xp=4_000)
+    )
+
+    assert "現在のサーバーXP: **4,000 XP**" in text
