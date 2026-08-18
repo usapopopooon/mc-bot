@@ -9,6 +9,10 @@ from typing import Literal, cast
 
 import discord
 
+from mc_bot.translations import MinecraftItemTranslator
+
+_ITEM_TRANSLATOR = MinecraftItemTranslator.load()
+
 type MarketTransferStatus = Literal[
     "completed",
     "unavailable",
@@ -39,6 +43,10 @@ class MarketListing:
     discord_message_id: int | None
     created_at: str
     updated_at: str
+
+    @property
+    def display_item_name(self) -> str:
+        return _ITEM_TRANSLATOR.translate(self.item_id, self.item_name)
 
 
 @dataclass(frozen=True, slots=True)
@@ -359,7 +367,7 @@ def market_listing_embed(listing: MarketListing) -> discord.Embed:
     }[listing.status]
     color = discord.Color.green() if listing.status == "active" else discord.Color.dark_grey()
     embed = discord.Embed(
-        title=f"#{listing.listing_id} {listing.item_name} x{listing.item_count}",
+        title=f"#{listing.listing_id} {listing.display_item_name} x{listing.item_count}",
         description=f"**{listing.price_xp:,} XP**　{status}",
         color=color,
     )

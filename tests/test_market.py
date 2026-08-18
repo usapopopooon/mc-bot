@@ -1,4 +1,5 @@
 import base64
+from dataclasses import replace
 from datetime import UTC, datetime
 
 import discord
@@ -13,6 +14,7 @@ from mc_bot.market import (
 )
 from mc_bot.market_request import parse_market_listing, parse_market_request
 from mc_bot.market_ui import market_balance_text, market_guide_embed, market_panel_embed
+from mc_bot.translations import MinecraftItemTranslator
 
 SELLER_UUID = "22222222-2222-4222-8222-222222222222"
 BUYER_UUID = "33333333-3333-4333-8333-333333333333"
@@ -182,9 +184,21 @@ def test_listing_embed_shows_no_fee_market(tmp_path) -> None:
     embed = market_listing_embed(listing)
 
     assert isinstance(embed, discord.Embed)
-    assert embed.title == "#1 diamond x3"
+    assert embed.title == "#1 ダイヤモンド x3"
     assert "720 XP" in (embed.description or "")
     assert "手数料なし" in (embed.footer.text or "")
+
+    custom_name_embed = market_listing_embed(replace(listing, item_name="Yukiのダイヤモンド"))
+    assert custom_name_embed.title == "#1 Yukiのダイヤモンド x3"
+
+
+def test_item_translator_uses_minecraft_26_2_names_and_safe_fallbacks() -> None:
+    translator = MinecraftItemTranslator.load()
+
+    assert len(translator) >= 2_700
+    assert translator.translate("minecraft:ancient_debris", "ancient debris") == "古代の残骸"
+    assert translator.translate("minecraft:diamond", "Yukiのダイヤ") == "Yukiのダイヤ"
+    assert translator.translate("minecraft:future_item", "future item") == "future item"
 
 
 def test_market_panel_keeps_summary_short_and_moves_details_to_guide() -> None:

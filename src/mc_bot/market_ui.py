@@ -218,7 +218,7 @@ def market_purchase_confirmation_embed(
     embed = discord.Embed(
         title="購入内容の確認",
         description=(
-            f"**#{listing.listing_id} {listing.item_name} x{listing.item_count}**\n"
+            f"**#{listing.listing_id} {listing.display_item_name} x{listing.item_count}**\n"
             f"価格: **{listing.price_xp:,} XP**\n"
             f"現在XP: **{wallet.available_xp:,} XP**"
         ),

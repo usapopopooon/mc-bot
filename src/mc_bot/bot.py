@@ -2358,7 +2358,8 @@ class MinecraftDiscordBot(discord.Client):
             )
             await self._refresh_market_listing(listing.listing_id)
             return (
-                f"購入完了: #{listing.listing_id} {listing.item_name} x{listing.item_count} / "
+                f"購入完了: #{listing.listing_id} {listing.display_item_name} "
+                f"x{listing.item_count} / "
                 f"{listing.price_xp:,} XP。残り {purchase.wallet_after.available_xp:,} XPです。"
             )
 
@@ -2425,7 +2426,9 @@ class MinecraftDiscordBot(discord.Client):
                 "cancelled",
             )
             await self._refresh_market_listing(listing.listing_id)
-            return f"出品を取り消し、{listing.item_name} x{listing.item_count}を返却しました。"
+            return (
+                f"出品を取り消し、{listing.display_item_name} x{listing.item_count}を返却しました。"
+            )
 
     async def _post_market_listing(
         self, listing: MarketListing, *, move_panel: bool = True
