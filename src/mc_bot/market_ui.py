@@ -118,6 +118,14 @@ def market_guide_embed() -> discord.Embed:
         color=discord.Color.gold(),
     )
     embed.add_field(
+        name="商品一覧を見る",
+        value=(
+            "Java版は `/market list [ページ]`、Bedrock版は `/market` の一覧フォームを使います。"
+            "Discordでは、このチャンネルの商品カードが現在の出品一覧です。"
+        ),
+        inline=False,
+    )
+    embed.add_field(
         name="出品する",
         value=("売りたいスタックをメインハンドに持ち、`/market sell <合計価格XP>` を実行します。"),
         inline=False,
