@@ -208,8 +208,7 @@ def test_market_panel_keeps_summary_short_and_moves_details_to_guide() -> None:
     assert panel.title == "Minecraft フリマ"
     assert panel.description is not None
     assert panel.description == (
-        "どんなアイテムでもサーバーXPで出品・購入できます。\n"
-        "詳しくは「使い方」を押してください。"
+        "どんなアイテムでもサーバーXPで出品・購入できます。\n詳しくは「使い方」を押してください。"
     )
     assert "サーバーXP" in panel.description
     assert "/market sell" not in panel.description
