@@ -11,6 +11,7 @@ from mc_bot.market import (
     parse_market_transfer_result,
 )
 from mc_bot.market_request import parse_market_listing, parse_market_request
+from mc_bot.market_ui import market_guide_embed, market_panel_embed
 
 SELLER_UUID = "22222222-2222-4222-8222-222222222222"
 BUYER_UUID = "33333333-3333-4333-8333-333333333333"
@@ -183,3 +184,17 @@ def test_listing_embed_shows_no_fee_market(tmp_path) -> None:
     assert embed.title == "#1 diamond x3"
     assert "720 XP" in (embed.description or "")
     assert "手数料なし" in (embed.footer.text or "")
+
+
+def test_market_panel_keeps_summary_short_and_moves_details_to_guide() -> None:
+    panel = market_panel_embed()
+    guide = market_guide_embed()
+
+    assert panel.title == "Minecraft フリマ"
+    assert panel.description is not None
+    assert len(panel.description) <= 100
+    assert "手数料なし" in panel.description
+    assert "/market sell" not in panel.description
+    assert "/market sell" in str(guide.to_dict())
+    assert "/market balance" in str(guide.to_dict())
+    assert "オンライン" in str(guide.to_dict())

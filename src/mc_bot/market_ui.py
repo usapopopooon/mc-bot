@@ -37,8 +37,33 @@ class _MarketButton(discord.ui.Button[discord.ui.View]):
             await self.bot.show_market_purchase_confirmation(interaction, self.listing_id)
         elif self.action == "cancel":
             await self.bot.cancel_market_listing(interaction, self.listing_id)
+        elif self.action == "guide":
+            await self.bot.show_market_guide(interaction)
         else:
             await self.bot.show_market_balance(interaction)
+
+
+class MarketPanelView(discord.ui.View):
+    def __init__(self, bot: MinecraftDiscordBot) -> None:
+        super().__init__(timeout=None)
+        self.add_item(
+            _MarketButton(
+                bot,
+                0,
+                action="guide",
+                label="使い方",
+                style=discord.ButtonStyle.primary,
+            )
+        )
+        self.add_item(
+            _MarketButton(
+                bot,
+                0,
+                action="balance",
+                label="自分のXP",
+                style=discord.ButtonStyle.secondary,
+            )
+        )
 
 
 class MarketListingView(discord.ui.View):
@@ -70,6 +95,52 @@ class MarketListingView(discord.ui.View):
         self.add_item(buy)
         self.add_item(cancel)
         self.add_item(balance)
+
+
+def market_panel_embed() -> discord.Embed:
+    return discord.Embed(
+        title="Minecraft フリマ",
+        description=(
+            "どんなアイテムでもXPで出品・購入できます。**手数料なし**。\n"
+            "詳しくは「使い方」を押してください。"
+        ),
+        color=discord.Color.gold(),
+    )
+
+
+def market_guide_embed() -> discord.Embed:
+    embed = discord.Embed(
+        title="Minecraft フリマの使い方",
+        description="出品操作はMinecraft内、購入はMinecraft内とDiscordの両方からできます。",
+        color=discord.Color.gold(),
+    )
+    embed.add_field(
+        name="出品する",
+        value=("売りたいスタックをメインハンドに持ち、`/market sell <合計価格XP>` を実行します。"),
+        inline=False,
+    )
+    embed.add_field(
+        name="購入する",
+        value=("商品カードの「購入」、またはMinecraft内の `/market buy <出品番号>` を使います。"),
+        inline=False,
+    )
+    embed.add_field(
+        name="確認・取り消し",
+        value=(
+            "自分の出品は `/market mine`、取り消しは "
+            "`/market cancel <出品番号>`、XP確認は `/market balance` です。"
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="受け取り条件",
+        value=(
+            "購入と出品取消は、連携したMinecraftアカウントでオンラインになり、"
+            "インベントリに空きを作ってから操作してください。価格は全額出品者へ入ります。"
+        ),
+        inline=False,
+    )
+    return embed
 
 
 class MarketPurchaseConfirmView(discord.ui.View):

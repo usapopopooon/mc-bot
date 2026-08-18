@@ -6,6 +6,7 @@ import re
 import time
 import uuid
 from collections.abc import Awaitable, Callable
+from contextlib import suppress
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -116,8 +117,11 @@ from mc_bot.market_request import (
 )
 from mc_bot.market_ui import (
     MarketListingView,
+    MarketPanelView,
     MarketPurchaseConfirmView,
     market_balance_text,
+    market_guide_embed,
+    market_panel_embed,
     market_purchase_confirmation_embed,
 )
 from mc_bot.player_count import (
@@ -233,6 +237,7 @@ class MinecraftDiscordBot(discord.Client):
     def __init__(self, config: Config) -> None:
         intents = discord.Intents.none()
         intents.guilds = True
+        intents.guild_messages = True
         intents.members = True
         intents.voice_states = True
         super().__init__(intents=intents)
@@ -290,6 +295,7 @@ class MinecraftDiscordBot(discord.Client):
         self._item_gacha_lock = asyncio.Lock()
         self._item_gacha_notification_lock = asyncio.Lock()
         self._market_lock = asyncio.Lock()
+        self._market_panel_lock = asyncio.Lock()
         self._online_player_names: set[str] = set()
         self._voice_bonus_active_users: set[int] = set()
         self._voice_bonus_initialized_users: set[int] = set()
@@ -368,6 +374,7 @@ class MinecraftDiscordBot(discord.Client):
         self.add_view(MinecraftXpShopPanelView(self))
         self.add_view(MinecraftResourceShopPanelView(self))
         self.add_view(MinecraftItemGachaPanelView(self))
+        self.add_view(MarketPanelView(self))
         for listing in await asyncio.to_thread(self._market.list_open):
             if listing.discord_message_id is not None:
                 self.add_view(
@@ -397,6 +404,10 @@ class MinecraftDiscordBot(discord.Client):
         await self._refresh_xp_shop_panel()
         await self._refresh_resource_shop_panel()
         await self._refresh_item_gacha_panel()
+        try:
+            await self._refresh_market_panel(move_to_bottom=True)
+        except (OSError, RuntimeError, discord.DiscordException) as error:
+            LOGGER.warning("Could not restore market panel: %s", error)
         channel_id = self._settings.channel_id
         if channel_id is None:
             self._channel = None
@@ -438,6 +449,16 @@ class MinecraftDiscordBot(discord.Client):
             self.user,
             len(self._translator),
         )
+
+    async def on_message(self, message: discord.Message) -> None:
+        if message.channel.id != self._settings.market_channel_id:
+            return
+        if self.user is not None and message.author.id == self.user.id:
+            return
+        try:
+            await self._refresh_market_panel(move_to_bottom=True)
+        except (OSError, RuntimeError, discord.DiscordException) as error:
+            LOGGER.warning("Could not keep market panel at the bottom: %s", error)
 
     async def on_member_remove(self, member: discord.Member) -> None:
         if member.guild.id != self._settings.guild_id:
@@ -859,20 +880,32 @@ class MinecraftDiscordBot(discord.Client):
         await interaction.response.defer(ephemeral=True)
         try:
             self._ensure_same_guild(target.guild.id)
-            await self._resolve_and_validate_channel(target.id, require_embeds=True)
+            await self._resolve_and_validate_channel(
+                target.id,
+                require_embeds=True,
+                require_message_history=True,
+            )
+            old_channel_id = self._settings.market_channel_id
+            old_message_id = self._settings.market_panel_message_id
             await self._save_settings(
                 replace(
                     self._settings,
                     guild_id=target.guild.id,
                     market_channel_id=target.id,
+                    market_panel_message_id=(
+                        old_message_id if old_channel_id == target.id else None
+                    ),
                 )
             )
             for listing in await asyncio.to_thread(self._market.list_open):
                 if listing.discord_message_id is None:
-                    await self._post_market_listing(listing)
+                    await self._post_market_listing(listing, move_panel=False)
                 else:
-                    await self._refresh_market_listing(listing.listing_id)
-        except (RuntimeError, discord.DiscordException) as error:
+                    await self._refresh_market_listing(listing.listing_id, move_panel=False)
+            await self._refresh_market_panel(move_to_bottom=True)
+            if old_channel_id != target.id:
+                await self._disable_old_panel(old_channel_id, old_message_id)
+        except (OSError, RuntimeError, discord.DiscordException) as error:
             LOGGER.warning("Could not configure Minecraft market channel: %s", error)
             await interaction.followup.send(f"設定できませんでした: {error}", ephemeral=True)
             return
@@ -2088,6 +2121,13 @@ class MinecraftDiscordBot(discord.Client):
             ephemeral=True,
         )
 
+    async def show_market_guide(self, interaction: discord.Interaction) -> None:
+        await interaction.response.send_message(
+            embed=market_guide_embed(),
+            ephemeral=True,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
     async def show_market_purchase_confirmation(
         self, interaction: discord.Interaction, listing_id: int
     ) -> None:
@@ -2387,7 +2427,9 @@ class MinecraftDiscordBot(discord.Client):
             await self._refresh_market_listing(listing.listing_id)
             return f"出品を取り消し、{listing.item_name} x{listing.item_count}を返却しました。"
 
-    async def _post_market_listing(self, listing: MarketListing) -> None:
+    async def _post_market_listing(
+        self, listing: MarketListing, *, move_panel: bool = True
+    ) -> None:
         channel_id = self._settings.market_channel_id
         if channel_id is None:
             return
@@ -2398,8 +2440,13 @@ class MinecraftDiscordBot(discord.Client):
             allowed_mentions=discord.AllowedMentions.none(),
         )
         await asyncio.to_thread(self._market.set_discord_message, listing.listing_id, message.id)
+        if move_panel:
+            try:
+                await self._refresh_market_panel(move_to_bottom=True)
+            except (OSError, RuntimeError, discord.DiscordException) as error:
+                LOGGER.warning("Could not move market panel after a new listing: %s", error)
 
-    async def _refresh_market_listing(self, listing_id: int) -> None:
+    async def _refresh_market_listing(self, listing_id: int, *, move_panel: bool = True) -> None:
         listing = await asyncio.to_thread(self._market.get, listing_id)
         channel_id = self._settings.market_channel_id
         if listing is None or channel_id is None:
@@ -2407,7 +2454,7 @@ class MinecraftDiscordBot(discord.Client):
         try:
             channel = await self._resolve_and_validate_channel(channel_id, require_embeds=True)
             if listing.discord_message_id is None:
-                await self._post_market_listing(listing)
+                await self._post_market_listing(listing, move_panel=move_panel)
                 return
             message = await channel.fetch_message(listing.discord_message_id)
             await message.edit(
@@ -2420,7 +2467,41 @@ class MinecraftDiscordBot(discord.Client):
                 allowed_mentions=discord.AllowedMentions.none(),
             )
         except discord.NotFound:
-            await self._post_market_listing(listing)
+            await self._post_market_listing(listing, move_panel=move_panel)
+
+    async def _refresh_market_panel(self, *, move_to_bottom: bool = False) -> None:
+        async with self._market_panel_lock:
+            channel_id = self._settings.market_channel_id
+            if channel_id is None:
+                return
+            channel = await self._resolve_and_validate_channel(
+                channel_id,
+                require_embeds=True,
+                require_message_history=True,
+            )
+            message: discord.Message | None = None
+            message_id = self._settings.market_panel_message_id
+            if message_id is not None:
+                try:
+                    message = await channel.fetch_message(message_id)
+                except discord.NotFound:
+                    message = None
+            if message is not None and not move_to_bottom:
+                await message.edit(
+                    embed=market_panel_embed(),
+                    view=MarketPanelView(self),
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+                return
+            if message is not None:
+                with suppress(discord.NotFound):
+                    await message.delete()
+            message = await channel.send(
+                embed=market_panel_embed(),
+                view=MarketPanelView(self),
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            await self._save_settings(replace(self._settings, market_panel_message_id=message.id))
 
     async def _recover_market_transactions(self) -> None:
         guild_id = self._settings.guild_id

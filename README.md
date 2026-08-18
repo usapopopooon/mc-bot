@@ -13,7 +13,7 @@ Minecraftサーバーのログを監視し、Discord Botとして指定チャン
 | パッケージ管理 | uv 0.11.8 |
 | デプロイ方式 | Docker Compose |
 | Discord接続方式 | BotアカウントによるGateway接続（Webhook不使用） |
-| Gateway Intents | Guilds、Guild Members、Voice States |
+| Gateway Intents | Guilds、Guild Members、Guild Messages、Voice States |
 | 対応Minecraftログ | チャット、進捗・達成、参加、退出、死亡 |
 | 通知方向 | Minecraftログ通知、Discordからwhitelist管理 |
 | 設定方法 | Discordスラッシュコマンド |
@@ -129,7 +129,9 @@ XPを消費しません。
 自分の出品、所持XP確認をフォームで操作でき、Java版では `/market list [ページ]`、
 `/market sell <合計価格XP>`、`/market buy <出品番号>`、`/market mine`、
 `/market cancel <出品番号>`、`/market balance` を使います。Discordでは設定したチャンネルへ
-商品カードを投稿し、「購入」「出品取消」「自分のXP」をエフェメラル画面から操作できます。
+商品カードと短い説明パネルを投稿します。説明パネルは新しい投稿の後にチャンネル末尾へ戻り、
+「使い方」で詳しいコマンド説明、「自分のXP」で所持XPを本人だけ確認できます。商品カードの
+「購入」「出品取消」「自分のXP」もエフェメラル画面から操作できます。
 購入確認には現在XPと購入後XPを表示します。手数料はなく、受取成功後に表示価格の全額を
 買い手から差し引いて売り手へ加算します。Discordからの購入、出品取消、アイテム返却には
 対象のMinecraftアカウントがオンラインで、インベントリに空きがある必要があります。
@@ -171,7 +173,7 @@ mc-botコンテナ
 2. OAuth2のスコープ `bot` と `applications.commands` を付けて、Botを対象サーバーへ招待します。
 3. Developer PortalのBot設定で **Server Members Intent** を有効にします。
 4. 使用するチャンネルで「チャンネルを見る」「メッセージを送信」
-   「埋め込みリンク」の権限を与えます。
+   「埋め込みリンク」「メッセージ履歴を読む」の権限を与えます。
 5. mc-botをデプロイした後、「サーバーの管理」権限を持つユーザーがDiscordで設定します。
 
 ```text
