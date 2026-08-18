@@ -914,6 +914,15 @@ def test_store_reuses_incomplete_draw_and_allows_three_completed_draws_per_day(
     )
 
 
+def test_store_accepts_largest_catalog_reward_count(tmp_path) -> None:
+    store, account_id = _store_with_account(tmp_path)
+
+    draw, created = _reserve(store, account_id, reward_key="r_rocket_crate")
+
+    assert created
+    assert draw.item_count == 128
+
+
 def test_store_replays_the_same_request_id_without_a_second_draw(tmp_path) -> None:
     store, account_id = _store_with_account(tmp_path)
     request_id = "11111111-1111-4111-8111-111111111111"

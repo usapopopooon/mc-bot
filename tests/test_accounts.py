@@ -135,6 +135,98 @@ def test_item_gacha_notification_retry_migration_preserves_existing_draws(tmp_pa
     assert row == ("old-draw", 1, "normal", "all", 100, 0, 0)
 
 
+def test_item_gacha_count_limit_migration_preserves_existing_draws(tmp_path) -> None:
+    database = tmp_path / "accounts.db"
+    store = AccountStore(database)
+    store.initialize()
+    account = store.create_registration(
+        edition="java",
+        minecraft_name="Steve",
+        server_player_name="Steve",
+        discord_user_id=123,
+        discord_username="hoge",
+        source="self",
+        status="active",
+        created_by=123,
+    )
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            """
+            INSERT INTO minecraft_item_gacha_draws (
+                draw_id, guild_id, discord_user_id, account_id, player_name,
+                draw_day, draw_number, draw_kind, draw_category, cost_xp, tier,
+                reward_key, item_spec, item_name, item_count, created_at, updated_at
+            ) VALUES (
+                '11111111-1111-4111-8111-111111111111', 456, 123, ?, 'Steve',
+                '2026-08-14', 1, 'normal', 'all', 100, 'N', 'n_iron',
+                'minecraft:iron_ingot', '鉄インゴット', 24, 'old', 'old'
+            )
+            """,
+            (account.id,),
+        )
+        connection.executescript(
+            """
+            DROP INDEX minecraft_item_gacha_pending_notifications;
+            ALTER TABLE minecraft_item_gacha_draws
+                RENAME TO minecraft_item_gacha_draws_current;
+            CREATE TABLE minecraft_item_gacha_draws (
+                draw_id TEXT PRIMARY KEY,
+                guild_id INTEGER NOT NULL,
+                discord_user_id INTEGER NOT NULL,
+                account_id INTEGER NOT NULL
+                    REFERENCES minecraft_accounts(id) ON DELETE RESTRICT,
+                player_name TEXT NOT NULL,
+                draw_day TEXT NOT NULL,
+                draw_number INTEGER NOT NULL CHECK (draw_number BETWEEN 1 AND 3),
+                draw_kind TEXT NOT NULL CHECK (draw_kind IN ('normal', 'premium')),
+                draw_category TEXT NOT NULL DEFAULT 'all'
+                    CHECK (draw_category IN ('all', 'resources', 'adventure', 'equipment')),
+                cost_xp INTEGER NOT NULL CHECK (cost_xp IN (100, 1000)),
+                tier TEXT NOT NULL
+                    CHECK (tier IN ('N', 'R', 'SR', 'SSR', 'UR', 'MYTHIC')),
+                reward_key TEXT NOT NULL,
+                item_spec TEXT NOT NULL,
+                item_name TEXT NOT NULL,
+                item_count INTEGER NOT NULL CHECK (item_count BETWEEN 1 AND 64),
+                status TEXT NOT NULL DEFAULT 'reserved'
+                    CHECK (status IN ('reserved', 'retryable', 'delivered', 'ambiguous')),
+                minecraft_notified INTEGER NOT NULL DEFAULT 0
+                    CHECK (minecraft_notified IN (0, 1)),
+                discord_notified INTEGER NOT NULL DEFAULT 0
+                    CHECK (discord_notified IN (0, 1)),
+                minecraft_notification_attempts INTEGER NOT NULL DEFAULT 0
+                    CHECK (minecraft_notification_attempts >= 0),
+                discord_notification_attempts INTEGER NOT NULL DEFAULT 0
+                    CHECK (discord_notification_attempts >= 0),
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(guild_id, discord_user_id, draw_day, draw_number)
+            );
+            INSERT INTO minecraft_item_gacha_draws
+                SELECT * FROM minecraft_item_gacha_draws_current;
+            DROP TABLE minecraft_item_gacha_draws_current;
+            CREATE INDEX minecraft_item_gacha_pending_notifications
+                ON minecraft_item_gacha_draws(
+                    status, minecraft_notified, discord_notified, created_at
+                );
+            """
+        )
+
+    store.initialize()
+
+    with sqlite3.connect(database) as connection:
+        table_sql = connection.execute(
+            "SELECT sql FROM sqlite_master "
+            "WHERE type = 'table' AND name = 'minecraft_item_gacha_draws'"
+        ).fetchone()[0]
+        row = connection.execute(
+            "SELECT reward_key, item_count FROM minecraft_item_gacha_draws"
+        ).fetchone()
+        connection.execute("UPDATE minecraft_item_gacha_draws SET item_count = 128")
+    assert "item_count BETWEEN 1 AND 128" in table_sql
+    assert row == ("n_iron", 24)
+
+
 def test_whitelist_retry_failures_persist_and_stop_at_limit(tmp_path) -> None:
     store = AccountStore(tmp_path / "accounts.db")
     store.initialize()

@@ -284,7 +284,7 @@ class AccountStore:
                     reward_key TEXT NOT NULL,
                     item_spec TEXT NOT NULL,
                     item_name TEXT NOT NULL,
-                    item_count INTEGER NOT NULL CHECK (item_count BETWEEN 1 AND 64),
+                    item_count INTEGER NOT NULL CHECK (item_count BETWEEN 1 AND 128),
                     status TEXT NOT NULL DEFAULT 'reserved'
                         CHECK (status IN ('reserved', 'retryable', 'delivered', 'ambiguous')),
                     minecraft_notified INTEGER NOT NULL DEFAULT 0
@@ -406,6 +406,7 @@ class AccountStore:
             self._add_item_gacha_notification_attempt_columns(connection)
             self._upgrade_item_gacha_draw_table(connection)
             self._add_item_gacha_category_column(connection)
+            self._upgrade_item_gacha_item_count_limit(connection)
 
     @staticmethod
     def _add_public_delivery_columns(connection: sqlite3.Connection, table: str) -> None:
@@ -510,7 +511,7 @@ class AccountStore:
                 reward_key TEXT NOT NULL,
                 item_spec TEXT NOT NULL,
                 item_name TEXT NOT NULL,
-                item_count INTEGER NOT NULL CHECK (item_count BETWEEN 1 AND 64),
+                item_count INTEGER NOT NULL CHECK (item_count BETWEEN 1 AND 128),
                 status TEXT NOT NULL DEFAULT 'reserved'
                     CHECK (status IN ('reserved', 'retryable', 'delivered', 'ambiguous')),
                 minecraft_notified INTEGER NOT NULL DEFAULT 0
@@ -559,6 +560,79 @@ class AccountStore:
             ALTER TABLE {table}
             ADD COLUMN draw_category TEXT NOT NULL DEFAULT 'all'
                 CHECK (draw_category IN ('all', 'resources', 'adventure', 'equipment'))
+            """
+        )
+
+    @staticmethod
+    def _upgrade_item_gacha_item_count_limit(connection: sqlite3.Connection) -> None:
+        table = "minecraft_item_gacha_draws"
+        row = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?",
+            (table,),
+        ).fetchone()
+        if row is None:
+            raise RuntimeError("minecraft item gacha draw table is missing")
+        if "item_count BETWEEN 1 AND 128" in str(row["sql"]):
+            return
+        connection.executescript(
+            """
+            DROP TABLE IF EXISTS minecraft_item_gacha_draws_v3;
+            CREATE TABLE minecraft_item_gacha_draws_v3 (
+                draw_id TEXT PRIMARY KEY,
+                guild_id INTEGER NOT NULL,
+                discord_user_id INTEGER NOT NULL,
+                account_id INTEGER NOT NULL
+                    REFERENCES minecraft_accounts(id) ON DELETE RESTRICT,
+                player_name TEXT NOT NULL,
+                draw_day TEXT NOT NULL,
+                draw_number INTEGER NOT NULL CHECK (draw_number BETWEEN 1 AND 3),
+                draw_kind TEXT NOT NULL CHECK (draw_kind IN ('normal', 'premium')),
+                draw_category TEXT NOT NULL DEFAULT 'all'
+                    CHECK (draw_category IN ('all', 'resources', 'adventure', 'equipment')),
+                cost_xp INTEGER NOT NULL CHECK (cost_xp IN (100, 1000)),
+                tier TEXT NOT NULL
+                    CHECK (tier IN ('N', 'R', 'SR', 'SSR', 'UR', 'MYTHIC')),
+                reward_key TEXT NOT NULL,
+                item_spec TEXT NOT NULL,
+                item_name TEXT NOT NULL,
+                item_count INTEGER NOT NULL CHECK (item_count BETWEEN 1 AND 128),
+                status TEXT NOT NULL DEFAULT 'reserved'
+                    CHECK (status IN ('reserved', 'retryable', 'delivered', 'ambiguous')),
+                minecraft_notified INTEGER NOT NULL DEFAULT 0
+                    CHECK (minecraft_notified IN (0, 1)),
+                discord_notified INTEGER NOT NULL DEFAULT 0
+                    CHECK (discord_notified IN (0, 1)),
+                minecraft_notification_attempts INTEGER NOT NULL DEFAULT 0
+                    CHECK (minecraft_notification_attempts >= 0),
+                discord_notification_attempts INTEGER NOT NULL DEFAULT 0
+                    CHECK (discord_notification_attempts >= 0),
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(guild_id, discord_user_id, draw_day, draw_number)
+            );
+            INSERT INTO minecraft_item_gacha_draws_v3 (
+                draw_id, guild_id, discord_user_id, account_id, player_name,
+                draw_day, draw_number, draw_kind, draw_category, cost_xp, tier,
+                reward_key, item_spec, item_name, item_count, status,
+                minecraft_notified, discord_notified,
+                minecraft_notification_attempts, discord_notification_attempts,
+                created_at, updated_at
+            )
+            SELECT
+                draw_id, guild_id, discord_user_id, account_id, player_name,
+                draw_day, draw_number, draw_kind, draw_category, cost_xp, tier,
+                reward_key, item_spec, item_name, item_count, status,
+                minecraft_notified, discord_notified,
+                minecraft_notification_attempts, discord_notification_attempts,
+                created_at, updated_at
+            FROM minecraft_item_gacha_draws;
+            DROP TABLE minecraft_item_gacha_draws;
+            ALTER TABLE minecraft_item_gacha_draws_v3
+                RENAME TO minecraft_item_gacha_draws;
+            CREATE INDEX minecraft_item_gacha_pending_notifications
+                ON minecraft_item_gacha_draws(
+                    status, minecraft_notified, discord_notified, created_at
+                );
             """
         )
 
@@ -1711,7 +1785,7 @@ class AccountStore:
             or not reward_key
             or not item_spec
             or not item_name
-            or not 1 <= item_count <= 64
+            or not 1 <= item_count <= 128
         ):
             raise ValueError("invalid Minecraft item gacha draw")
         now = _now()
