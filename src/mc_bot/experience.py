@@ -150,6 +150,7 @@ class MinecraftMarketPurchaseRequest:
     request_id: str | None
     wallet_before: MinecraftXpWallet
     wallet_after: MinecraftXpWallet
+    duplicate: bool = False
 
 
 def parse_experience_query(response: str, unit: str) -> int:
@@ -640,7 +641,7 @@ class LevelBotXpClient:
                     "expected_cost_xp": expected_cost_xp,
                 },
             ) as response:
-                if response.status != 200:
+                if response.status not in {200, 409}:
                     body = await response.text()
                     LOGGER.warning(
                         "level-bot market purchase rejected status=%d body=%s",
@@ -648,7 +649,31 @@ class LevelBotXpClient:
                         body[:300],
                     )
                     return None
-                return self._parse_market_purchase_request(await response.json())
+                result = self._parse_market_purchase_request(await response.json())
+                if response.status == 200:
+                    return result
+                if result.status == "conflict" and not result.duplicate:
+                    return result
+                normalized_request_id = str(uuid.UUID(request_id))
+                if (
+                    result.status == "reserved"
+                    and result.duplicate
+                    and result.request_id == normalized_request_id
+                ):
+                    LOGGER.info(
+                        "level-bot reports market purchase already reserved request=%s",
+                        normalized_request_id,
+                    )
+                    return result
+                LOGGER.warning(
+                    "level-bot returned invalid market purchase conflict request=%s "
+                    "status=%s duplicate=%s response_request=%s",
+                    normalized_request_id,
+                    result.status,
+                    result.duplicate,
+                    result.request_id,
+                )
+                return None
         except (
             aiohttp.ClientError,
             TimeoutError,
@@ -1242,6 +1267,9 @@ class LevelBotXpClient:
         status = str(item["status"])
         if status not in {"reserved", "insufficient_xp", "unavailable", "conflict"}:
             raise ValueError("market purchase has invalid status")
+        duplicate = item.get("duplicate", False)
+        if not isinstance(duplicate, bool):
+            raise ValueError("market purchase has invalid duplicate flag")
         request_id = item.get("request_id")
         normalized_request = str(uuid.UUID(str(request_id))) if request_id is not None else None
         return MinecraftMarketPurchaseRequest(
@@ -1250,4 +1278,5 @@ class LevelBotXpClient:
             request_id=normalized_request,
             wallet_before=cls._parse_wallet(item["wallet_before"]),
             wallet_after=cls._parse_wallet(item["wallet_after"]),
+            duplicate=duplicate,
         )
