@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 import uuid
 from dataclasses import dataclass
@@ -43,6 +44,8 @@ class MarketListing:
     discord_message_id: int | None
     created_at: str
     updated_at: str
+    minecraft_purchase_notified: bool = False
+    discord_purchase_notified: bool = False
 
     @property
     def display_item_name(self) -> str:
@@ -88,7 +91,11 @@ class MarketStore:
                     buyer_discord_user_id INTEGER,
                     discord_message_id INTEGER,
                     created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
+                    updated_at TEXT NOT NULL,
+                    minecraft_purchase_notified INTEGER NOT NULL DEFAULT 0
+                        CHECK (minecraft_purchase_notified IN (0, 1)),
+                    discord_purchase_notified INTEGER NOT NULL DEFAULT 0
+                        CHECK (discord_purchase_notified IN (0, 1))
                 );
                 CREATE INDEX IF NOT EXISTS minecraft_market_listing_status
                     ON minecraft_market_listings(status, listing_id);
@@ -96,6 +103,22 @@ class MarketStore:
                     ON minecraft_market_listings(seller_account_id, status);
                 """
             )
+            columns = {
+                str(row["name"])
+                for row in connection.execute(
+                    "PRAGMA table_info(minecraft_market_listings)"
+                ).fetchall()
+            }
+            for column in (
+                "minecraft_purchase_notified",
+                "discord_purchase_notified",
+            ):
+                if column not in columns:
+                    connection.execute(
+                        f"ALTER TABLE minecraft_market_listings ADD COLUMN {column} "
+                        "INTEGER NOT NULL DEFAULT 0 CHECK ("
+                        f"{column} IN (0, 1))"
+                    )
 
     def add_listing(
         self,
@@ -200,6 +223,55 @@ class MarketStore:
                 """
             ).fetchall()
         return [_listing(row) for row in rows]
+
+    def list_sold_with_discord_message(self) -> list[MarketListing]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM minecraft_market_listings
+                WHERE status = 'sold' AND discord_message_id IS NOT NULL
+                ORDER BY listing_id
+                """
+            ).fetchall()
+        return [_listing(row) for row in rows]
+
+    def list_pending_purchase_notifications(self) -> list[MarketListing]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM minecraft_market_listings
+                WHERE status = 'sold'
+                  AND purchase_request_id IS NOT NULL
+                  AND buyer_account_id IS NOT NULL
+                  AND buyer_discord_user_id IS NOT NULL
+                  AND (
+                    minecraft_purchase_notified = 0
+                    OR discord_purchase_notified = 0
+                  )
+                ORDER BY updated_at, listing_id
+                """
+            ).fetchall()
+        return [_listing(row) for row in rows]
+
+    def mark_purchase_notified(
+        self,
+        listing_id: int,
+        request_id: str,
+        destination: str,
+    ) -> None:
+        column = {
+            "minecraft": "minecraft_purchase_notified",
+            "discord": "discord_purchase_notified",
+        }.get(destination)
+        if column is None:
+            raise ValueError("unknown market purchase notification destination")
+        normalized_request = str(uuid.UUID(request_id))
+        with self._connect() as connection:
+            connection.execute(
+                f"UPDATE minecraft_market_listings SET {column} = 1, updated_at = ? "
+                "WHERE listing_id = ? AND purchase_request_id = ? AND status = 'sold'",
+                (_now(), listing_id, normalized_request),
+            )
 
     def reserve_purchase(
         self,
@@ -307,7 +379,7 @@ class MarketStore:
             )
             return bool(result.rowcount)
 
-    def set_discord_message(self, listing_id: int, message_id: int) -> None:
+    def set_discord_message(self, listing_id: int, message_id: int | None) -> None:
         with self._connect() as connection:
             connection.execute(
                 """
@@ -333,6 +405,35 @@ def market_transfer_command(
     recipient = str(uuid.UUID(recipient_uuid))
     request = str(uuid.UUID(request_id))
     return f"usapo-event-bridge market-{action} {listing_id} {recipient} {request}"
+
+
+def market_purchase_tellraw_command(
+    *,
+    server_name: str,
+    buyer_name: str,
+    seller_name: str,
+    item_name: str,
+    item_count: int,
+    price_xp: int,
+) -> str:
+    if not all(value.strip() for value in (server_name, buyer_name, seller_name, item_name)):
+        raise ValueError("market purchase notification values must not be blank")
+    if item_count <= 0 or price_xp <= 0:
+        raise ValueError("market purchase notification amounts must be positive")
+    components = [
+        {"text": "🛒 ["},
+        {"text": server_name, "color": "aqua"},
+        {"text": "] "},
+        {"text": buyer_name, "color": "yellow"},
+        {"text": "さんが"},
+        {"text": seller_name, "color": "gold"},
+        {"text": "さんから"},
+        {"text": f"{item_name} x{item_count:,}", "color": "aqua", "bold": True},
+        {"text": "を"},
+        {"text": f"{price_xp:,}サーバーXP", "color": "green", "bold": True},
+        {"text": "で購入しました!"},
+    ]
+    return f"tellraw @a {json.dumps(components, ensure_ascii=False, separators=(',', ':'))}"
 
 
 def parse_market_transfer_result(
@@ -408,6 +509,8 @@ def _listing(row: sqlite3.Row) -> MarketListing:
         discord_message_id=row["discord_message_id"],
         created_at=str(row["created_at"]),
         updated_at=str(row["updated_at"]),
+        minecraft_purchase_notified=bool(row["minecraft_purchase_notified"]),
+        discord_purchase_notified=bool(row["discord_purchase_notified"]),
     )
 
 

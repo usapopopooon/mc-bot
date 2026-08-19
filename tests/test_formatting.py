@@ -6,6 +6,7 @@ from mc_bot.formatting import (
     format_event,
     format_fishing_combo_milestone,
     format_level_up_event,
+    format_market_purchase,
     format_resource_exchange,
     format_server_announcement,
     format_server_xp_started,
@@ -131,6 +132,26 @@ def test_formats_minecraft_resource_exchange() -> None:
         "**ダイヤモンド x3**を獲得しました!"
     )
     assert embed.color.value == 0x2ECC71
+
+
+def test_formats_market_purchase_with_buyer_seller_item_and_price() -> None:
+    embed = format_market_purchase(
+        server_name="うさぽサーバー",
+        buyer_name="*Buyer*",
+        buyer_discord_user_id=123,
+        seller_name="_Seller_",
+        seller_discord_user_id=456,
+        item_name="古代の*残骸*",
+        item_count=2,
+        price_xp=3_000,
+    )
+
+    assert embed.description == (
+        r"🛒 **[うさぽサーバー] \*Buyer\* (<@123>) さん** が"
+        r"**\_Seller\_ (<@456>) さん** から"
+        r"**古代の\*残骸\* x2**を **3,000 サーバーXP**で購入しました!"
+    )
+    assert embed.color.value == 0x3498DB
 
 
 def test_formats_public_combo_milestones_for_discord_log() -> None:

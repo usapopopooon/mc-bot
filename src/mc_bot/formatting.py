@@ -172,6 +172,33 @@ def format_resource_exchange(
     )
 
 
+def format_market_purchase(
+    *,
+    server_name: str,
+    buyer_name: str,
+    buyer_discord_user_id: int,
+    seller_name: str,
+    seller_discord_user_id: int,
+    item_name: str,
+    item_count: int,
+    price_xp: int,
+) -> discord.Embed:
+    """Minecraftプレイヤーマーケットの購入成功ログ。"""
+    server_name = _escape_markdown(server_name)
+    buyer_name = _escape_markdown(buyer_name)
+    seller_name = _escape_markdown(seller_name)
+    item_name = _escape_markdown(item_name)
+    return discord.Embed(
+        description=(
+            f"🛒 **[{server_name}] {buyer_name} (<@{buyer_discord_user_id}>) さん** が"
+            f"**{seller_name} (<@{seller_discord_user_id}>) さん** から"
+            f"**{item_name} x{item_count:,}**を "
+            f"**{price_xp:,} サーバーXP**で購入しました!"
+        ),
+        color=discord.Color.blue(),
+    )
+
+
 def format_emerald_diamond_exchange(
     *,
     server_name: str,

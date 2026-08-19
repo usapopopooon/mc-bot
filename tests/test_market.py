@@ -1,4 +1,6 @@
 import base64
+import json
+import sqlite3
 from dataclasses import replace
 from datetime import UTC, datetime
 
@@ -9,6 +11,7 @@ from mc_bot.experience import MinecraftXpWallet
 from mc_bot.market import (
     MarketStore,
     market_listing_embed,
+    market_purchase_tellraw_command,
     market_transfer_command,
     parse_market_transfer_result,
 )
@@ -23,6 +26,67 @@ REQUEST_ID = "11111111-1111-4111-8111-111111111111"
 
 def _encoded(value: str) -> str:
     return base64.urlsafe_b64encode(value.encode()).decode().rstrip("=")
+
+
+def test_store_migrates_existing_listings_to_purchase_notification_tracking(
+    tmp_path,
+) -> None:
+    path = tmp_path / "accounts.db"
+    with sqlite3.connect(path) as connection:
+        connection.executescript(
+            """
+            CREATE TABLE minecraft_market_listings (
+                listing_id INTEGER PRIMARY KEY CHECK (listing_id > 0),
+                event_id TEXT NOT NULL UNIQUE,
+                seller_account_id INTEGER NOT NULL,
+                seller_discord_user_id INTEGER NOT NULL,
+                seller_uuid TEXT NOT NULL,
+                seller_name TEXT NOT NULL,
+                item_id TEXT NOT NULL,
+                item_name TEXT NOT NULL,
+                item_count INTEGER NOT NULL CHECK (item_count > 0),
+                price_xp INTEGER NOT NULL CHECK (price_xp > 0),
+                status TEXT NOT NULL DEFAULT 'active' CHECK (
+                    status IN ('active', 'reserved', 'sold', 'cancelling', 'cancelled')
+                ),
+                purchase_request_id TEXT UNIQUE,
+                buyer_account_id INTEGER,
+                buyer_discord_user_id INTEGER,
+                discord_message_id INTEGER,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            INSERT INTO minecraft_market_listings VALUES (
+                17,
+                '11111111-1111-4111-8111-111111111111',
+                2,
+                2002,
+                '22222222-2222-4222-8222-222222222222',
+                'Seller',
+                'minecraft:ancient_debris',
+                '古代の残骸',
+                2,
+                3000,
+                'sold',
+                '44444444-4444-4444-8444-444444444444',
+                3,
+                2003,
+                NULL,
+                '2026-08-18T00:00:00+00:00',
+                '2026-08-18T00:01:00+00:00'
+            );
+            """
+        )
+
+    store = MarketStore(path)
+    store.initialize()
+
+    listing = store.get(17)
+    assert listing is not None
+    assert listing.status == "sold"
+    assert not listing.minecraft_purchase_notified
+    assert not listing.discord_purchase_notified
+    assert store.list_pending_purchase_notifications() == [listing]
 
 
 def test_parses_versioned_listing_and_request_with_exact_price() -> None:
@@ -122,6 +186,38 @@ def test_store_serializes_purchase_and_preserves_party_mapping(tmp_path) -> None
         )
         is None
     )
+    store.set_discord_message(17, 901)
+    assert store.set_status(
+        17,
+        "44444444-4444-4444-8444-444444444444",
+        "sold",
+    )
+    assert [item.listing_id for item in store.list_sold_with_discord_message()] == [17]
+    pending = store.list_pending_purchase_notifications()
+    assert len(pending) == 1
+    assert not pending[0].minecraft_purchase_notified
+    assert not pending[0].discord_purchase_notified
+
+    store.mark_purchase_notified(
+        17,
+        "44444444-4444-4444-8444-444444444444",
+        "minecraft",
+    )
+    pending = store.list_pending_purchase_notifications()
+    assert len(pending) == 1
+    assert pending[0].minecraft_purchase_notified
+    assert not pending[0].discord_purchase_notified
+
+    store.mark_purchase_notified(
+        17,
+        "44444444-4444-4444-8444-444444444444",
+        "discord",
+    )
+    assert store.list_pending_purchase_notifications() == []
+
+    store.set_discord_message(17, None)
+
+    assert store.list_sold_with_discord_message() == []
     assert (
         store.reserve_purchase(
             listing_id=17,
@@ -203,6 +299,25 @@ def test_market_rcon_protocol_and_card() -> None:
     assert not result.duplicate
     assert result.delivery_recorded
     assert store_listing is MarketStore
+
+
+def test_market_purchase_tellraw_contains_exact_transaction_parties_and_values() -> None:
+    command = market_purchase_tellraw_command(
+        server_name="うさぽサーバー",
+        buyer_name="Buyer",
+        seller_name="Seller",
+        item_name="古代の残骸",
+        item_count=2,
+        price_xp=3_000,
+    )
+
+    assert command.startswith("tellraw @a ")
+    text = "".join(
+        component["text"] for component in json.loads(command.removeprefix("tellraw @a "))
+    )
+    assert text == (
+        "🛒 [うさぽサーバー] BuyerさんがSellerさんから古代の残骸 x2を3,000サーバーXPで購入しました!"
+    )
 
 
 def test_market_transfer_result_preserves_ambiguous_recorded_delivery() -> None:

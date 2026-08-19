@@ -38,6 +38,8 @@ class MarketRcon:
         if command.startswith("usapo-event-bridge market-deliver "):
             fields = command.split()
             return f"USAPO_MARKET_TRANSFER_RESULT|1|{fields[4]}|{fields[2]}|completed|sold|new"
+        if command.startswith("tellraw @a "):
+            return ""
         if command.startswith("tellraw Buyer "):
             return ""
         raise AssertionError(f"unexpected RCON command: {command}")
@@ -119,6 +121,8 @@ def test_game_market_wires_listing_buyer_seller_price_and_delivery(tmp_path) -> 
     bot._level_bot_xp.fetch_market_wallet = AsyncMock(  # type: ignore[method-assign]
         return_value=wallet_after
     )
+    send_log = AsyncMock()
+    bot._send = send_log  # type: ignore[method-assign]
     milliseconds = int(datetime.now(UTC).timestamp() * 1_000)
     lines = [
         _line(
@@ -168,6 +172,14 @@ def test_game_market_wires_listing_buyer_seller_price_and_delivery(tmp_path) -> 
     rcon = bot._rcon
     assert isinstance(rcon, MarketRcon)
     assert f"usapo-event-bridge market-deliver 17 {BUYER_UUID} {PURCHASE_ID}" in rcon.commands
+    public_messages = [command for command in rcon.commands if command.startswith("tellraw @a ")]
+    assert len(public_messages) == 1
+    assert all(value in public_messages[0] for value in ("Buyer", "Seller", "古代の残骸", "3,000"))
+    send_log.assert_awaited_once()
+    discord_log = str(send_log.await_args.args[0].description)
+    assert all(value in discord_log for value in ("Buyer", "Seller", "古代の残骸", "3,000"))
+    assert listing.minecraft_purchase_notified
+    assert listing.discord_purchase_notified
     assert any("残りのサーバーXPは 2,000 XP" in command for command in rcon.commands)
     assert any("現在のサーバーXP: 2,000 XP" in command for command in rcon.commands)
 
@@ -253,6 +265,81 @@ def test_game_market_keeps_xp_reserved_when_delivery_was_recorded_but_save_faile
     assert listing is not None
     assert listing.status == "reserved"
     assert listing.purchase_request_id == PURCHASE_ID
+
+
+def test_market_purchase_notifications_retry_only_failed_destination(tmp_path) -> None:
+    bot = MinecraftDiscordBot(
+        Config(
+            discord_token="test",
+            accounts_path=tmp_path / "accounts.db",
+            rcon_password="test",
+        )
+    )
+    bot._accounts.initialize()
+    bot._market.initialize()
+    seller = bot._accounts.create_registration(
+        edition="java",
+        minecraft_name="Seller",
+        server_player_name="Seller",
+        discord_user_id=2002,
+        discord_username="seller",
+        source="self",
+        status="active",
+        created_by=2002,
+        player_uuid=SELLER_UUID,
+    )
+    buyer = bot._accounts.create_registration(
+        edition="java",
+        minecraft_name="Buyer",
+        server_player_name="Buyer",
+        discord_user_id=2003,
+        discord_username="buyer",
+        source="self",
+        status="active",
+        created_by=2003,
+        player_uuid=BUYER_UUID,
+    )
+    bot._market.add_listing(
+        listing_id=17,
+        event_id=LISTING_EVENT_ID,
+        seller_account_id=seller.id,
+        seller_discord_user_id=2002,
+        seller_uuid=SELLER_UUID,
+        seller_name="Seller",
+        item_id="minecraft:ancient_debris",
+        item_name="古代の残骸",
+        item_count=2,
+        price_xp=3_000,
+        created_at="2026-08-18T00:00:00+00:00",
+    )
+    reserved = bot._market.reserve_purchase(
+        listing_id=17,
+        request_id=PURCHASE_ID,
+        expected_price_xp=3_000,
+        buyer_account_id=buyer.id,
+        buyer_discord_user_id=2003,
+    )
+    assert reserved is not None
+    assert bot._market.set_status(17, PURCHASE_ID, "sold")
+    bot._settings = RuntimeSettings(guild_id=1001)
+    rcon = MarketRcon()
+    bot._rcon = rcon  # type: ignore[assignment]
+    send_log = AsyncMock(side_effect=[RuntimeError("Discord unavailable"), None])
+    bot._send = send_log  # type: ignore[method-assign]
+
+    async def exercise() -> None:
+        await bot._deliver_market_purchase_notifications()
+        await bot._deliver_market_purchase_notifications()
+
+    asyncio.run(exercise())
+
+    assert sum(command.startswith("tellraw @a ") for command in rcon.commands) == 1
+    assert send_log.await_count == 2
+    listing = bot._market.get(17)
+    assert listing is not None
+    assert listing.minecraft_purchase_notified
+    assert listing.discord_purchase_notified
+    assert bot._market.list_pending_purchase_notifications() == []
 
 
 def test_market_listing_log_is_acknowledged_only_after_successful_retry(tmp_path) -> None:

@@ -67,6 +67,7 @@ from mc_bot.formatting import (
     format_event,
     format_fishing_combo_milestone,
     format_level_up_event,
+    format_market_purchase,
     format_resource_exchange,
     format_server_announcement,
     format_server_xp_started,
@@ -106,6 +107,7 @@ from mc_bot.market import (
     MarketListing,
     MarketStore,
     market_listing_embed,
+    market_purchase_tellraw_command,
     market_transfer_command,
     parse_market_transfer_result,
 )
@@ -295,6 +297,7 @@ class MinecraftDiscordBot(discord.Client):
         self._item_gacha_lock = asyncio.Lock()
         self._item_gacha_notification_lock = asyncio.Lock()
         self._market_lock = asyncio.Lock()
+        self._market_notification_lock = asyncio.Lock()
         self._market_panel_lock = asyncio.Lock()
         self._online_player_names: set[str] = set()
         self._voice_bonus_active_users: set[int] = set()
@@ -2359,6 +2362,7 @@ class MinecraftDiscordBot(discord.Client):
                 "sold",
             )
             await self._refresh_market_listing(listing.listing_id)
+            await self._deliver_market_purchase_notifications()
             return (
                 f"購入完了: #{listing.listing_id} {listing.display_item_name} "
                 f"x{listing.item_count} / "
@@ -2437,7 +2441,7 @@ class MinecraftDiscordBot(discord.Client):
         self, listing: MarketListing, *, move_panel: bool = True
     ) -> None:
         channel_id = self._settings.market_channel_id
-        if channel_id is None:
+        if channel_id is None or listing.status != "active":
             return
         channel = await self._resolve_and_validate_channel(channel_id, require_embeds=True)
         message = await channel.send(
@@ -2459,6 +2463,16 @@ class MinecraftDiscordBot(discord.Client):
             return
         try:
             channel = await self._resolve_and_validate_channel(channel_id, require_embeds=True)
+            if listing.status == "sold":
+                if listing.discord_message_id is None:
+                    return
+                try:
+                    message = await channel.fetch_message(listing.discord_message_id)
+                    await message.delete()
+                except discord.NotFound:
+                    pass
+                await asyncio.to_thread(self._market.set_discord_message, listing.listing_id, None)
+                return
             if listing.discord_message_id is None:
                 await self._post_market_listing(listing, move_panel=move_panel)
                 return
@@ -2513,6 +2527,16 @@ class MinecraftDiscordBot(discord.Client):
         guild_id = self._settings.guild_id
         if guild_id is None:
             return
+        if self._settings.market_channel_id is not None:
+            sold_listings = await asyncio.to_thread(self._market.list_sold_with_discord_message)
+            for listing in sold_listings:
+                try:
+                    await self._refresh_market_listing(listing.listing_id, move_panel=False)
+                except OSError, RuntimeError, discord.DiscordException:
+                    LOGGER.exception(
+                        "Could not remove sold market listing=%d",
+                        listing.listing_id,
+                    )
         for listing in await asyncio.to_thread(self._market.list_open):
             try:
                 if listing.status == "active":
@@ -2547,6 +2571,82 @@ class MinecraftDiscordBot(discord.Client):
                     listing.listing_id,
                     listing.status,
                 )
+        await self._deliver_market_purchase_notifications()
+
+    async def _deliver_market_purchase_notifications(self) -> None:
+        async with self._market_notification_lock:
+            listings = await asyncio.to_thread(self._market.list_pending_purchase_notifications)
+            guild = self.get_guild(self._settings.guild_id or 0)
+            server_name = guild.name if guild is not None else "サーバー"
+            for listing in listings:
+                if (
+                    listing.purchase_request_id is None
+                    or listing.buyer_account_id is None
+                    or listing.buyer_discord_user_id is None
+                ):
+                    continue
+                buyer = await asyncio.to_thread(
+                    self._accounts.get,
+                    listing.buyer_account_id,
+                )
+                if buyer is None:
+                    LOGGER.warning(
+                        "Could not notify market purchase for missing buyer account listing=%d",
+                        listing.listing_id,
+                    )
+                    continue
+                if not listing.minecraft_purchase_notified:
+                    try:
+                        await self._execute_checked_rcon(
+                            market_purchase_tellraw_command(
+                                server_name=server_name,
+                                buyer_name=buyer.server_player_name,
+                                seller_name=listing.seller_name,
+                                item_name=listing.display_item_name,
+                                item_count=listing.item_count,
+                                price_xp=listing.price_xp,
+                            )
+                        )
+                    except (OSError, RconError, RuntimeError, ValueError) as error:
+                        LOGGER.warning(
+                            "Could not announce market purchase in Minecraft listing=%d: %s",
+                            listing.listing_id,
+                            error,
+                        )
+                    else:
+                        await asyncio.to_thread(
+                            self._market.mark_purchase_notified,
+                            listing.listing_id,
+                            listing.purchase_request_id,
+                            "minecraft",
+                        )
+                if not listing.discord_purchase_notified:
+                    try:
+                        await self._send(
+                            format_market_purchase(
+                                server_name=server_name,
+                                buyer_name=buyer.server_player_name,
+                                buyer_discord_user_id=listing.buyer_discord_user_id,
+                                seller_name=listing.seller_name,
+                                seller_discord_user_id=listing.seller_discord_user_id,
+                                item_name=listing.display_item_name,
+                                item_count=listing.item_count,
+                                price_xp=listing.price_xp,
+                            )
+                        )
+                    except (RuntimeError, discord.DiscordException) as error:
+                        LOGGER.warning(
+                            "Could not announce market purchase in Discord listing=%d: %s",
+                            listing.listing_id,
+                            error,
+                        )
+                    else:
+                        await asyncio.to_thread(
+                            self._market.mark_purchase_notified,
+                            listing.listing_id,
+                            listing.purchase_request_id,
+                            "discord",
+                        )
 
     def _ensure_market_recovery_started(self) -> None:
         if self._market_recovery_task is not None and not self._market_recovery_task.done():
