@@ -301,6 +301,18 @@ def test_market_rcon_protocol_and_card() -> None:
     assert store_listing is MarketStore
 
 
+def test_market_transfer_result_accepts_rcon_line_ending() -> None:
+    result = parse_market_transfer_result(
+        f"USAPO_MARKET_TRANSFER_RESULT|1|{REQUEST_ID}|17|completed|sold|duplicate\n",
+        request_id=REQUEST_ID,
+        listing_id=17,
+    )
+
+    assert result.status == "completed"
+    assert result.listing_status == "sold"
+    assert result.duplicate
+
+
 def test_market_purchase_tellraw_contains_exact_transaction_parties_and_values() -> None:
     command = market_purchase_tellraw_command(
         server_name="うさぽサーバー",

@@ -440,10 +440,11 @@ def parse_market_transfer_result(
     response: str, *, request_id: str, listing_id: int
 ) -> MarketTransferResult:
     prefix = "USAPO_MARKET_TRANSFER_RESULT|1|"
-    marker = response.find(prefix)
+    normalized = response.strip()
+    marker = normalized.find(prefix)
     if marker < 0:
         raise ValueError("market transfer result is missing")
-    fields = response[marker + len(prefix) :].split("|")
+    fields = normalized[marker + len(prefix) :].split("|")
     if len(fields) != 5:
         raise ValueError("market transfer result is malformed")
     if str(uuid.UUID(fields[0])) != str(uuid.UUID(request_id)) or int(fields[1]) != listing_id:
