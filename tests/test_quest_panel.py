@@ -23,17 +23,30 @@ class FakeMessage:
     def __init__(self, message_id: int) -> None:
         self.id = message_id
         self.deleted = False
+        self.edits: list[dict[str, object]] = []
 
     async def delete(self) -> None:
         self.deleted = True
 
+    async def edit(self, **options: object) -> None:
+        self.edits.append(options)
+
 
 class FakeChannel:
-    def __init__(self, message: FakeMessage) -> None:
+    def __init__(self, message: FakeMessage | None = None) -> None:
         self.message = message
+        self.sent: list[dict[str, object]] = []
+        self.next_message_id = 900
 
     async def fetch_message(self, message_id: int) -> FakeMessage:
+        assert self.message is not None
         assert message_id == self.message.id
+        return self.message
+
+    async def send(self, **options: object) -> FakeMessage:
+        self.sent.append(options)
+        self.next_message_id += 1
+        self.message = FakeMessage(self.next_message_id)
         return self.message
 
 
@@ -168,6 +181,46 @@ def test_my_quests_uses_one_item_per_page_without_silent_truncation() -> None:
         }
 
     asyncio.run(exercise())
+
+
+def test_refresh_quest_panel_creates_and_persists_message(tmp_path) -> None:
+    bot = MinecraftDiscordBot(
+        Config(discord_token="secret", settings_path=tmp_path / "settings.json")
+    )
+    bot._settings = RuntimeSettings(guild_id=1, quest_channel_id=2)
+    channel = FakeChannel()
+    bot._resolve_and_validate_channel = AsyncMock(  # type: ignore[method-assign]
+        return_value=channel
+    )
+
+    asyncio.run(bot._refresh_quest_panel())
+
+    assert bot._settings.quest_panel_message_id == 901
+    assert len(channel.sent) == 1
+    assert isinstance(channel.sent[0]["view"], QuestPanelView)
+
+
+def test_refresh_quest_panel_reuses_existing_message_on_restart(tmp_path) -> None:
+    bot = MinecraftDiscordBot(
+        Config(discord_token="secret", settings_path=tmp_path / "settings.json")
+    )
+    existing_message = FakeMessage(800)
+    channel = FakeChannel(existing_message)
+    bot._settings = RuntimeSettings(
+        guild_id=1,
+        quest_channel_id=2,
+        quest_panel_message_id=existing_message.id,
+    )
+    bot._resolve_and_validate_channel = AsyncMock(  # type: ignore[method-assign]
+        return_value=channel
+    )
+
+    asyncio.run(bot._refresh_quest_panel())
+
+    assert not existing_message.deleted
+    assert len(existing_message.edits) == 1
+    assert channel.sent == []
+    assert bot._settings.quest_panel_message_id == 800
 
 
 def test_accepted_quest_card_is_deleted_instead_of_left_on_board() -> None:

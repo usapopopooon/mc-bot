@@ -452,11 +452,11 @@ class MinecraftDiscordBot(discord.Client):
         await self._refresh_resource_shop_panel()
         await self._refresh_item_gacha_panel()
         try:
-            await self._refresh_market_panel(move_to_bottom=True)
+            await self._refresh_market_panel()
         except (OSError, RuntimeError, discord.DiscordException) as error:
             LOGGER.warning("Could not restore market panel: %s", error)
         try:
-            await self._refresh_quest_panel(move_to_bottom=True)
+            await self._refresh_quest_panel()
         except (OSError, RuntimeError, discord.DiscordException) as error:
             LOGGER.warning("Could not restore quest panel: %s", error)
         channel_id = self._settings.channel_id

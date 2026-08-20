@@ -96,6 +96,29 @@ def test_refresh_market_panel_creates_and_persists_message(tmp_path) -> None:
     assert isinstance(channel.sent[0]["view"], MarketPanelView)
 
 
+def test_refresh_market_panel_reuses_existing_message_on_restart(tmp_path) -> None:
+    bot = MinecraftDiscordBot(
+        Config(discord_token="secret", settings_path=tmp_path / "settings.json")
+    )
+    existing_message = FakeMarketPanelMessage(800)
+    channel = FakeMarketPanelChannel(existing_message)
+    bot._settings = RuntimeSettings(
+        guild_id=1,
+        market_channel_id=2,
+        market_panel_message_id=existing_message.id,
+    )
+    bot._resolve_and_validate_channel = AsyncMock(  # type: ignore[method-assign]
+        return_value=channel
+    )
+
+    asyncio.run(bot._refresh_market_panel())
+
+    assert not existing_message.deleted
+    assert len(existing_message.edits) == 1
+    assert channel.sent == []
+    assert bot._settings.market_panel_message_id == 800
+
+
 def test_refresh_market_panel_reposts_it_after_new_content(tmp_path) -> None:
     bot = MinecraftDiscordBot(
         Config(discord_token="secret", settings_path=tmp_path / "settings.json")
