@@ -20,6 +20,8 @@ class _QuestButton(discord.ui.Button[discord.ui.View]):
         action: str,
         label: str,
         style: discord.ButtonStyle,
+        return_page: int | None = None,
+        update_message: bool = False,
     ) -> None:
         super().__init__(
             label=label,
@@ -29,10 +31,17 @@ class _QuestButton(discord.ui.Button[discord.ui.View]):
         self.bot = bot
         self.quest_id = quest_id
         self.action = action
+        self.return_page = return_page
+        self.update_message = update_message
 
     async def callback(self, interaction: discord.Interaction) -> None:
         if self.action in {"accept", "cancel", "submit", "abandon"}:
-            await self.bot.show_quest_action_confirmation(interaction, self.quest_id, self.action)
+            await self.bot.show_quest_action_confirmation(
+                interaction,
+                self.quest_id,
+                self.action,
+                return_page=self.return_page,
+            )
         elif self.action == "confirm-accept":
             await self.bot.accept_quest(interaction, self.quest_id)
         elif self.action == "confirm-cancel":
@@ -42,16 +51,33 @@ class _QuestButton(discord.ui.Button[discord.ui.View]):
         elif self.action == "confirm-abandon":
             await self.bot.abandon_quest(interaction, self.quest_id)
         elif self.action == "mine":
-            await self.bot.show_my_quests(interaction)
+            await self.bot.show_my_quests(
+                interaction,
+                update_message=self.update_message,
+            )
         elif self.action == "guide":
-            await self.bot.show_quest_guide(interaction)
+            await self.bot.show_quest_guide(
+                interaction,
+                update_message=self.update_message,
+            )
         else:
-            await self.bot.show_quest_claim_guide(interaction)
+            await self.bot.show_quest_claim_guide(
+                interaction,
+                update_message=self.update_message,
+            )
 
 
 class QuestPanelView(discord.ui.View):
-    def __init__(self, bot: MinecraftDiscordBot) -> None:
-        super().__init__(timeout=None)
+    def __init__(
+        self,
+        bot: MinecraftDiscordBot,
+        *,
+        owner_id: int | None = None,
+        timeout: float | None = None,
+    ) -> None:
+        super().__init__(timeout=timeout)
+        self.owner_id = owner_id
+        update_message = owner_id is not None
         self.add_item(
             _QuestButton(
                 bot,
@@ -59,6 +85,7 @@ class QuestPanelView(discord.ui.View):
                 action="guide",
                 label="使い方",
                 style=discord.ButtonStyle.primary,
+                update_message=update_message,
             )
         )
         self.add_item(
@@ -68,6 +95,7 @@ class QuestPanelView(discord.ui.View):
                 action="mine",
                 label="自分のクエスト",
                 style=discord.ButtonStyle.secondary,
+                update_message=update_message,
             )
         )
         self.add_item(
@@ -77,8 +105,17 @@ class QuestPanelView(discord.ui.View):
                 action="claim",
                 label="受取方法",
                 style=discord.ButtonStyle.secondary,
+                update_message=update_message,
             )
         )
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if self.owner_id is None or interaction.user.id == self.owner_id:
+            return True
+        await interaction.response.send_message(
+            "この個人メニューを使えるのは開いた本人だけです。", ephemeral=True
+        )
+        return False
 
 
 class QuestListingView(discord.ui.View):
@@ -96,16 +133,39 @@ class QuestListingView(discord.ui.View):
 
 
 class _QuestConfirmationCancelButton(discord.ui.Button[discord.ui.View]):
-    def __init__(self, quest_id: int) -> None:
+    def __init__(
+        self,
+        bot: MinecraftDiscordBot,
+        quest_id: int,
+        *,
+        owner_id: int,
+        return_page: int | None,
+    ) -> None:
         super().__init__(
             label="戻る",
             style=discord.ButtonStyle.secondary,
             custom_id=f"mc-quest:confirmation-cancel:{quest_id}",
         )
+        self.bot = bot
+        self.owner_id = owner_id
+        self.return_page = return_page
 
     async def callback(self, interaction: discord.Interaction) -> None:
+        if self.return_page is not None:
+            await self.bot.show_my_quests(
+                interaction,
+                page=self.return_page,
+                update_message=True,
+            )
+            return
         await interaction.response.edit_message(
-            content="操作を取りやめました。", embed=None, view=None
+            content=None,
+            embed=quest_panel_embed(),
+            view=QuestPanelView(
+                self.bot,
+                owner_id=self.owner_id,
+                timeout=180,
+            ),
         )
 
 
@@ -117,6 +177,7 @@ class QuestActionConfirmationView(discord.ui.View):
         *,
         owner_id: int,
         action: str,
+        return_page: int | None = None,
     ) -> None:
         super().__init__(timeout=180)
         self.owner_id = owner_id
@@ -136,7 +197,14 @@ class QuestActionConfirmationView(discord.ui.View):
                 style=style,
             )
         )
-        self.add_item(_QuestConfirmationCancelButton(quest.quest_id))
+        self.add_item(
+            _QuestConfirmationCancelButton(
+                bot,
+                quest.quest_id,
+                owner_id=owner_id,
+                return_page=return_page,
+            )
+        )
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id == self.owner_id:
@@ -159,7 +227,45 @@ class _QuestMinePageButton(discord.ui.Button[discord.ui.View]):
         self.page = page
 
     async def callback(self, interaction: discord.Interaction) -> None:
-        await self.bot.show_my_quests(interaction, page=self.page, edit=True)
+        await self.bot.show_my_quests(interaction, page=self.page, update_message=True)
+
+
+class _QuestBackButton(discord.ui.Button[discord.ui.View]):
+    def __init__(self, bot: MinecraftDiscordBot, owner_id: int) -> None:
+        super().__init__(
+            label="戻る",
+            style=discord.ButtonStyle.secondary,
+            custom_id="mc-quest:back:0",
+            row=1,
+        )
+        self.bot = bot
+        self.owner_id = owner_id
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        await interaction.response.edit_message(
+            content=None,
+            embed=quest_panel_embed(),
+            view=QuestPanelView(
+                self.bot,
+                owner_id=self.owner_id,
+                timeout=180,
+            ),
+        )
+
+
+class QuestBackView(discord.ui.View):
+    def __init__(self, bot: MinecraftDiscordBot, owner_id: int) -> None:
+        super().__init__(timeout=180)
+        self.owner_id = owner_id
+        self.add_item(_QuestBackButton(bot, owner_id))
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id == self.owner_id:
+            return True
+        await interaction.response.send_message(
+            "この操作画面を使えるのは開いた本人だけです。", ephemeral=True
+        )
+        return False
 
 
 class QuestMineView(discord.ui.View):
@@ -182,6 +288,7 @@ class QuestMineView(discord.ui.View):
                     action="cancel",
                     label="依頼取消",
                     style=discord.ButtonStyle.danger,
+                    return_page=page,
                 )
             )
         elif quest.worker_discord_user_id == owner_id and quest.status == "accepted":
@@ -192,6 +299,7 @@ class QuestMineView(discord.ui.View):
                     action="submit",
                     label="納品",
                     style=discord.ButtonStyle.success,
+                    return_page=page,
                 )
             )
             self.add_item(
@@ -201,12 +309,14 @@ class QuestMineView(discord.ui.View):
                     action="abandon",
                     label="辞退",
                     style=discord.ButtonStyle.danger,
+                    return_page=page,
                 )
             )
         if page > 0:
             self.add_item(_QuestMinePageButton(bot, page=page - 1, label="前へ"))
         if page + 1 < total:
             self.add_item(_QuestMinePageButton(bot, page=page + 1, label="次へ"))
+        self.add_item(_QuestBackButton(bot, owner_id))
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id == self.owner_id:

@@ -11,6 +11,7 @@ from mc_bot.config import Config
 from mc_bot.quest import Quest
 from mc_bot.quest_ui import (
     QuestActionConfirmationView,
+    QuestBackView,
     QuestListingView,
     QuestMineView,
     QuestPanelView,
@@ -119,6 +120,35 @@ def test_quest_panel_has_guide_mine_and_claim_buttons() -> None:
     assert {child.custom_id for child in listing.children} == {"mc-quest:accept:17"}
 
 
+@pytest.mark.parametrize(
+    ("owner_id", "update_message"),
+    [(None, False), (2002, True)],
+)
+def test_quest_panel_opens_my_quests_in_the_correct_response(
+    owner_id: int | None,
+    update_message: bool,
+) -> None:
+    async def exercise() -> None:
+        bot = MinecraftDiscordBot(Config(discord_token="secret"))
+        bot.show_my_quests = AsyncMock()  # type: ignore[method-assign]
+        panel = QuestPanelView(
+            bot,
+            owner_id=owner_id,
+            timeout=180 if owner_id is not None else None,
+        )
+        mine = next(child for child in panel.children if child.custom_id == "mc-quest:mine:0")
+        interaction = Mock(spec=discord.Interaction)
+
+        await mine.callback(interaction)
+
+        bot.show_my_quests.assert_awaited_once_with(  # type: ignore[attr-defined]
+            interaction,
+            update_message=update_message,
+        )
+
+    asyncio.run(exercise())
+
+
 def test_quest_actions_require_an_explicit_confirmation() -> None:
     bot = MinecraftDiscordBot(Config(discord_token="secret"))
     quest = _quest(status="open", message_id=901)
@@ -146,9 +176,29 @@ def test_public_accept_button_opens_confirmation_before_running_action() -> None
         await button.callback(interaction)
 
         bot.show_quest_action_confirmation.assert_awaited_once_with(  # type: ignore[attr-defined]
-            interaction, 17, "accept"
+            interaction, 17, "accept", return_page=None
         )
         bot.accept_quest.assert_not_awaited()  # type: ignore[attr-defined]
+
+    asyncio.run(exercise())
+
+
+def test_public_accept_confirmation_is_private_and_owner_locked() -> None:
+    async def exercise() -> None:
+        bot = MinecraftDiscordBot(Config(discord_token="secret"))
+        bot._quests.get = Mock(return_value=_quest(status="open", message_id=901))  # type: ignore[method-assign]
+        interaction = Mock(spec=discord.Interaction)
+        interaction.user.id = 2003
+        interaction.response.defer = AsyncMock()
+        interaction.followup.send = AsyncMock()
+
+        await bot.show_quest_action_confirmation(interaction, 17, "accept")
+
+        interaction.response.defer.assert_awaited_once_with(ephemeral=True, thinking=True)
+        response = interaction.followup.send.await_args.kwargs
+        assert response["ephemeral"] is True
+        assert isinstance(response["view"], QuestActionConfirmationView)
+        assert response["view"].owner_id == 2003
 
     asyncio.run(exercise())
 
@@ -170,7 +220,7 @@ def test_my_quests_uses_one_item_per_page_without_silent_truncation() -> None:
 
         await bot.show_my_quests(interaction)
 
-        interaction.response.defer.assert_awaited_once_with(ephemeral=True)
+        interaction.response.defer.assert_awaited_once_with(ephemeral=True, thinking=True)
         response = interaction.edit_original_response.await_args.kwargs
         assert response["embed"].title == "依頼中 #30"
         assert response["embed"].footer.text == "1 / 12"
@@ -178,7 +228,195 @@ def test_my_quests_uses_one_item_per_page_without_silent_truncation() -> None:
         assert {child.custom_id for child in response["view"].children} >= {
             "mc-quest:cancel:30",
             "mc-quest:mine-page:1",
+            "mc-quest:back:0",
         }
+
+    asyncio.run(exercise())
+
+
+def test_my_quest_action_preserves_the_current_page_for_confirmation_back() -> None:
+    async def exercise() -> None:
+        bot = MinecraftDiscordBot(Config(discord_token="secret"))
+        bot.show_quest_action_confirmation = AsyncMock()  # type: ignore[method-assign]
+        quest = _quest(status="open", message_id=None)
+        view = QuestMineView(bot, quest, owner_id=2002, page=4, total=6)
+        cancel = next(child for child in view.children if child.custom_id == "mc-quest:cancel:17")
+        interaction = Mock(spec=discord.Interaction)
+
+        await cancel.callback(interaction)
+
+        bot.show_quest_action_confirmation.assert_awaited_once_with(  # type: ignore[attr-defined]
+            interaction,
+            17,
+            "cancel",
+            return_page=4,
+        )
+
+    asyncio.run(exercise())
+
+
+def test_empty_my_quests_is_private_and_has_back_navigation() -> None:
+    async def exercise() -> None:
+        bot = MinecraftDiscordBot(Config(discord_token="secret"))
+        bot._quests.list_active_for_discord_user = Mock(return_value=[])  # type: ignore[method-assign]
+        interaction = Mock(spec=discord.Interaction)
+        interaction.user.id = 2002
+        interaction.response.defer = AsyncMock()
+        interaction.edit_original_response = AsyncMock()
+
+        await bot.show_my_quests(interaction)
+
+        interaction.response.defer.assert_awaited_once_with(ephemeral=True, thinking=True)
+        response = interaction.edit_original_response.await_args.kwargs
+        assert isinstance(response["view"], QuestBackView)
+        assert {child.custom_id for child in response["view"].children} == {"mc-quest:back:0"}
+
+    asyncio.run(exercise())
+
+
+def test_quest_guide_and_claim_guide_are_private_and_have_back_navigation() -> None:
+    async def exercise() -> None:
+        bot = MinecraftDiscordBot(Config(discord_token="secret"))
+
+        for show in (bot.show_quest_guide, bot.show_quest_claim_guide):
+            interaction = Mock(spec=discord.Interaction)
+            interaction.user.id = 2002
+            interaction.response.send_message = AsyncMock()
+
+            await show(interaction)
+
+            options = interaction.response.send_message.await_args.kwargs
+            assert options["ephemeral"] is True
+            assert isinstance(options["view"], QuestBackView)
+
+    asyncio.run(exercise())
+
+
+def test_private_quest_guide_navigation_edits_the_existing_private_message() -> None:
+    async def exercise() -> None:
+        bot = MinecraftDiscordBot(Config(discord_token="secret"))
+        interaction = Mock(spec=discord.Interaction)
+        interaction.user.id = 2002
+        interaction.response.edit_message = AsyncMock()
+        interaction.response.send_message = AsyncMock()
+
+        await bot.show_quest_guide(interaction, update_message=True)
+
+        options = interaction.response.edit_message.await_args.kwargs
+        assert options["embed"].title == "ギルド・クエストの使い方"
+        assert isinstance(options["view"], QuestBackView)
+        interaction.response.send_message.assert_not_awaited()
+
+    asyncio.run(exercise())
+
+
+def test_quest_back_button_returns_to_owner_only_private_menu() -> None:
+    async def exercise() -> None:
+        bot = MinecraftDiscordBot(Config(discord_token="secret"))
+        interaction = Mock(spec=discord.Interaction)
+        interaction.user.id = 2002
+        interaction.response.edit_message = AsyncMock()
+        back = QuestBackView(bot, owner_id=2002).children[0]
+
+        await back.callback(interaction)
+
+        response = interaction.response.edit_message.await_args.kwargs
+        assert response["embed"].title == "📜 Minecraft ギルド・クエスト掲示板"
+        assert isinstance(response["view"], QuestPanelView)
+        assert response["view"].owner_id == 2002
+        assert response["view"].timeout == 180
+
+    asyncio.run(exercise())
+
+
+def test_private_quest_menu_rejects_a_different_user() -> None:
+    async def exercise() -> None:
+        bot = MinecraftDiscordBot(Config(discord_token="secret"))
+        view = QuestPanelView(bot, owner_id=2002, timeout=180)
+        interaction = Mock(spec=discord.Interaction)
+        interaction.user.id = 2003
+        interaction.response.send_message = AsyncMock()
+
+        allowed = await view.interaction_check(interaction)
+
+        assert allowed is False
+        interaction.response.send_message.assert_awaited_once_with(
+            "この個人メニューを使えるのは開いた本人だけです。",
+            ephemeral=True,
+        )
+
+    asyncio.run(exercise())
+
+
+def test_my_quests_pagination_stays_on_the_private_response() -> None:
+    async def exercise() -> None:
+        bot = MinecraftDiscordBot(Config(discord_token="secret"))
+        bot.show_my_quests = AsyncMock()  # type: ignore[method-assign]
+        quest = _quest(status="open", message_id=None)
+        view = QuestMineView(bot, quest, owner_id=2002, page=0, total=2)
+        next_button = next(
+            child for child in view.children if child.custom_id == "mc-quest:mine-page:1"
+        )
+        interaction = Mock(spec=discord.Interaction)
+
+        await next_button.callback(interaction)
+
+        bot.show_my_quests.assert_awaited_once_with(  # type: ignore[attr-defined]
+            interaction,
+            page=1,
+            update_message=True,
+        )
+
+    asyncio.run(exercise())
+
+
+def test_my_quests_page_update_edits_the_existing_private_response() -> None:
+    async def exercise() -> None:
+        bot = MinecraftDiscordBot(Config(discord_token="secret"))
+        quests = [
+            replace(_quest(status="open", message_id=None), quest_id=30),
+            replace(_quest(status="open", message_id=None), quest_id=29),
+        ]
+        bot._quests.list_active_for_discord_user = Mock(return_value=quests)  # type: ignore[method-assign]
+        interaction = Mock(spec=discord.Interaction)
+        interaction.user.id = 2002
+        interaction.response.defer = AsyncMock()
+        interaction.edit_original_response = AsyncMock()
+
+        await bot.show_my_quests(interaction, page=1, update_message=True)
+
+        interaction.response.defer.assert_awaited_once_with()
+        response = interaction.edit_original_response.await_args.kwargs
+        assert response["embed"].title == "依頼中 #29"
+        assert response["embed"].footer.text == "2 / 2"
+
+    asyncio.run(exercise())
+
+
+def test_personal_quest_confirmation_back_returns_to_my_quests() -> None:
+    async def exercise() -> None:
+        bot = MinecraftDiscordBot(Config(discord_token="secret"))
+        bot.show_my_quests = AsyncMock()  # type: ignore[method-assign]
+        quest = _quest(status="open", message_id=None)
+        view = QuestActionConfirmationView(
+            bot,
+            quest,
+            owner_id=2002,
+            action="cancel",
+            return_page=4,
+        )
+        back = next(
+            child for child in view.children if child.custom_id == "mc-quest:confirmation-cancel:17"
+        )
+        interaction = Mock(spec=discord.Interaction)
+
+        await back.callback(interaction)
+
+        bot.show_my_quests.assert_awaited_once_with(  # type: ignore[attr-defined]
+            interaction,
+            page=4,
+            update_message=True,
+        )
 
     asyncio.run(exercise())
 

@@ -142,6 +142,7 @@ from mc_bot.quest import (
 from mc_bot.quest_request import MinecraftQuestStateEvent, parse_quest_state
 from mc_bot.quest_ui import (
     QuestActionConfirmationView,
+    QuestBackView,
     QuestListingView,
     QuestMineView,
     QuestPanelView,
@@ -548,9 +549,17 @@ class MinecraftDiscordBot(discord.Client):
     async def on_voice_state_update(
         self,
         member: discord.Member,
-        _before: discord.VoiceState,
-        _after: discord.VoiceState,
+        before: discord.VoiceState,
+        after: discord.VoiceState,
     ) -> None:
+        player_count_channel_id = self._settings.player_count_channel_id
+        if self._settings.player_count_enabled and player_count_channel_id is not None:
+            changed_channel_ids = {
+                state.channel.id for state in (before, after) if state.channel is not None
+            }
+            if player_count_channel_id in changed_channel_ids:
+                self._last_player_count_status = None
+                self._schedule_player_count_refresh(delay=1)
         if member.guild.id == self._settings.guild_id and not member.bot:
             await self._sync_voice_bonus_for_discord_user(member.id)
         if not self._settings.voice_enabled:
@@ -3007,7 +3016,12 @@ class MinecraftDiscordBot(discord.Client):
         await interaction.followup.send(self._quest_action_error(result.status), ephemeral=True)
 
     async def show_quest_action_confirmation(
-        self, interaction: discord.Interaction, quest_id: int, action: str
+        self,
+        interaction: discord.Interaction,
+        quest_id: int,
+        action: str,
+        *,
+        return_page: int | None = None,
     ) -> None:
         if action not in {"accept", "cancel", "submit", "abandon"}:
             await interaction.response.send_message("不明な操作です。", ephemeral=True)
@@ -3039,7 +3053,11 @@ class MinecraftDiscordBot(discord.Client):
         await interaction.followup.send(
             embed=quest_action_confirmation_embed(quest, action),
             view=QuestActionConfirmationView(
-                self, quest, owner_id=interaction.user.id, action=action
+                self,
+                quest,
+                owner_id=interaction.user.id,
+                action=action,
+                return_page=return_page,
             ),
             ephemeral=True,
             allowed_mentions=discord.AllowedMentions.none(),
@@ -3182,27 +3200,55 @@ class MinecraftDiscordBot(discord.Client):
             "操作結果を確認できませんでした。Minecraftの `/quest mine` を確認してください。",
         )
 
-    async def show_quest_guide(self, interaction: discord.Interaction) -> None:
-        await interaction.response.send_message(
-            embed=quest_guide_embed(),
-            ephemeral=True,
-            allowed_mentions=discord.AllowedMentions.none(),
-        )
+    async def show_quest_guide(
+        self,
+        interaction: discord.Interaction,
+        *,
+        update_message: bool = False,
+    ) -> None:
+        options = {
+            "content": None,
+            "embed": quest_guide_embed(),
+            "view": QuestBackView(self, interaction.user.id),
+            "allowed_mentions": discord.AllowedMentions.none(),
+        }
+        if update_message:
+            await interaction.response.edit_message(**options)
+        else:
+            await interaction.response.send_message(**options, ephemeral=True)
 
-    async def show_quest_claim_guide(self, interaction: discord.Interaction) -> None:
-        await interaction.response.send_message(
-            "報酬・返却品・納品物はMinecraftの永続受取箱に入ります。"
-            "インベントリに空きを作り、Minecraftで `/quest claim` を実行してください。",
-            ephemeral=True,
-        )
+    async def show_quest_claim_guide(
+        self,
+        interaction: discord.Interaction,
+        *,
+        update_message: bool = False,
+    ) -> None:
+        options = {
+            "content": (
+                "報酬・返却品・納品物はMinecraftの永続受取箱に入ります。"
+                "インベントリに空きを作り、Minecraftで `/quest claim` を実行してください。"
+            ),
+            "embed": None,
+            "view": QuestBackView(self, interaction.user.id),
+        }
+        if update_message:
+            await interaction.response.edit_message(**options)
+        else:
+            await interaction.response.send_message(**options, ephemeral=True)
 
     async def show_my_quests(
-        self, interaction: discord.Interaction, *, page: int = 0, edit: bool = False
+        self,
+        interaction: discord.Interaction,
+        *,
+        page: int = 0,
+        update_message: bool = False,
     ) -> None:
-        if edit:
+        if update_message:
             await interaction.response.defer()
         else:
-            await interaction.response.defer(ephemeral=True)
+            # For component interactions, ephemeral only applies with thinking=True.
+            # Without it, Discord updates the public panel that was clicked.
+            await interaction.response.defer(ephemeral=True, thinking=True)
         quests = await asyncio.to_thread(
             self._quests.list_active_for_discord_user, interaction.user.id
         )
@@ -3213,7 +3259,7 @@ class MinecraftDiscordBot(discord.Client):
                     "受取品はMinecraftの `/quest claim` で確認できます。"
                 ),
                 embed=None,
-                view=None,
+                view=QuestBackView(self, interaction.user.id),
             )
             return
         selected = min(max(0, page), len(quests) - 1)

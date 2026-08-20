@@ -1,4 +1,6 @@
 import asyncio
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -60,6 +62,11 @@ class FakeVoiceChannel:
             self.name = options["name"]
 
 
+def _voice_state(channel_id: int | None) -> SimpleNamespace:
+    channel = None if channel_id is None else SimpleNamespace(id=channel_id)
+    return SimpleNamespace(channel=channel)
+
+
 def test_refreshes_status_from_rcon_only_when_count_changes() -> None:
     bot = MinecraftDiscordBot(Config(discord_token="secret"))
     bot._settings = RuntimeSettings(
@@ -91,3 +98,71 @@ def test_marks_channel_stopped_when_rcon_is_unavailable() -> None:
     asyncio.run(bot._refresh_player_count_channel(channel))  # type: ignore[arg-type]
 
     assert [edit["status"] for edit in channel.edits] == ["🔴サーバー停止中"]
+
+
+@pytest.mark.parametrize(
+    ("before_channel_id", "after_channel_id"),
+    [
+        (None, 2),
+        (2, None),
+        (3, 2),
+        (2, 3),
+    ],
+)
+def test_player_count_voice_activity_restores_same_status(
+    before_channel_id: int | None,
+    after_channel_id: int | None,
+) -> None:
+    bot = MinecraftDiscordBot(Config(discord_token="secret"))
+    bot._settings = RuntimeSettings(
+        guild_id=1,
+        player_count_channel_id=2,
+        player_count_enabled=True,
+    )
+    bot._last_player_count_status = "🟢オンライン2人"
+    bot._schedule_player_count_refresh = Mock()  # type: ignore[method-assign]
+    bot._sync_voice_bonus_for_discord_user = AsyncMock()  # type: ignore[method-assign]
+    member = SimpleNamespace(id=100, bot=False, guild=SimpleNamespace(id=1))
+
+    asyncio.run(
+        bot.on_voice_state_update(
+            member,  # type: ignore[arg-type]
+            _voice_state(before_channel_id),  # type: ignore[arg-type]
+            _voice_state(after_channel_id),  # type: ignore[arg-type]
+        )
+    )
+
+    assert bot._last_player_count_status is None
+    bot._schedule_player_count_refresh.assert_called_once_with(delay=1)  # type: ignore[attr-defined]
+
+    bot._rcon = FakeRcon(  # type: ignore[assignment]
+        "There are 2 of a max of 20 players online: Steve, Alex"
+    )
+    channel = FakeVoiceChannel("マイクラオンライン数")
+    asyncio.run(bot._refresh_player_count_channel(channel))  # type: ignore[arg-type]
+
+    assert [edit["status"] for edit in channel.edits] == ["🟢オンライン2人"]
+
+
+def test_unrelated_voice_activity_keeps_player_count_status_cache() -> None:
+    bot = MinecraftDiscordBot(Config(discord_token="secret"))
+    bot._settings = RuntimeSettings(
+        guild_id=1,
+        player_count_channel_id=2,
+        player_count_enabled=True,
+    )
+    bot._last_player_count_status = "🟢オンライン2人"
+    bot._schedule_player_count_refresh = Mock()  # type: ignore[method-assign]
+    bot._sync_voice_bonus_for_discord_user = AsyncMock()  # type: ignore[method-assign]
+    member = SimpleNamespace(id=100, bot=False, guild=SimpleNamespace(id=1))
+
+    asyncio.run(
+        bot.on_voice_state_update(
+            member,  # type: ignore[arg-type]
+            _voice_state(3),  # type: ignore[arg-type]
+            _voice_state(4),  # type: ignore[arg-type]
+        )
+    )
+
+    assert bot._last_player_count_status == "🟢オンライン2人"
+    bot._schedule_player_count_refresh.assert_not_called()  # type: ignore[attr-defined]
