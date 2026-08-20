@@ -146,6 +146,29 @@ Discordでは `/mc-config market-log-channel` で設定したフリマ成約ロ�
 取引中はXPを予約し、明確な配布失敗では予約を解放します。応答が不明な場合は自動で二重配布
 せず、同じ取引IDで再確認できる状態を保持します。
 
+ギルド・クエスト掲示板では、連携済みプレイヤーが通常アイテムの一括納品を依頼できます。
+依頼者はMinecraftで依頼品を手に持って `/quest create <個数> <期限時間>`、次に報酬
+スタックを持って `/quest confirm` を実行します。初期版は名前・エンチャント等のない
+スタック可能アイテム、依頼品・報酬とも1スタック以内、受注後の期限1〜72時間です。
+報酬は公開前にPaper側へ預けられ、受注者は1人だけです。受注後は依頼者から取り消せず、
+受注者の辞退または期限切れでは再募集されます。未受注のまま7日経過すると終了し、報酬を
+返却します。報酬、返却品、納品物は永続受取箱へ入り、Minecraftの `/quest claim` で
+インベントリに空きがある時だけ重複なく受け取れます。
+
+Discordの `/mc-config quest-channel` で掲示板を設置すると、募集中の依頼だけをカード表示し、
+受注・使い方・自分のクエスト・受取方法をボタンから操作できます。公開カードの受注と、
+本人専用画面の取消・納品・辞退は、内容を再表示する確認画面を経て確定します。自分のクエストは
+前後ボタンで全件を確認できます。受注済みカードは
+直ちに削除し、Bot再起動時にも残存カードを清掃します。完了・取消・募集期限切れは
+`/mc-config quest-log-channel` で指定した専用ログへ投稿します。専用ログ未設定中は一般ログへ
+流さずSQLiteに未送信として保持し、設定後またはBot再起動後に再送します。Minecraft全体
+チャットへ流すのは達成時だけです。全状態遷移はUUID付きで監査保存し、古いログの後着で
+現在状態を巻き戻しません。Paper側で未送信状態と未放送の達成通知も永続化するため、状態保存と
+ログ出力の間にサーバーが停止しても再起動後に回収します。Bot停止中に進行した未連携プレイヤーの
+古いイベントはPaperの現在状態と照合し、後続ログを塞ぎません。Discordの終了ログには遷移UUID由来の
+固定nonceと監査用の記録IDを付けます。送信開始をSQLiteへ先に保存し、再開時は専用チャンネルの履歴を
+照合するため、Discord送信成功後・SQLite完了前にBotが停止した場合も同じ投稿を重複作成しません。
+
 ```text
 client.jar: 2dc72797acbc1b63fc16a11c4ac393605f453754
 ja_jp.json: 53e15b2f69a51d0c4291d4d453acd81a1828f416
@@ -194,6 +217,8 @@ mc-botコンテナ
 /mc-config item-gacha-panel channel:#minecraftガチャ
 /mc-config market-channel channel:#minecraftマーケット
 /mc-config market-log-channel channel:#minecraftフリマ成約ログ
+/mc-config quest-channel channel:#minecraftクエスト
+/mc-config quest-log-channel channel:#minecraftクエストログ
 /mc-config show
 ```
 

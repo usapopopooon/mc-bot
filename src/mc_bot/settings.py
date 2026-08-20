@@ -26,6 +26,9 @@ class RuntimeSettings:
     market_channel_id: int | None = None
     market_log_channel_id: int | None = None
     market_panel_message_id: int | None = None
+    quest_channel_id: int | None = None
+    quest_log_channel_id: int | None = None
+    quest_panel_message_id: int | None = None
     approval_mode: str = "automatic"
     approval_channel_id: int | None = None
     player_count_channel_id: int | None = None
@@ -69,6 +72,9 @@ class SettingsStore:
             "market_channel_id",
             "market_log_channel_id",
             "market_panel_message_id",
+            "quest_channel_id",
+            "quest_log_channel_id",
+            "quest_panel_message_id",
             "approval_channel_id",
             "player_count_channel_id",
             "voice_channel_id",

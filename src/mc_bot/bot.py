@@ -132,6 +132,26 @@ from mc_bot.player_count import (
     parse_online_player_count,
     player_count_status,
 )
+from mc_bot.quest import (
+    Quest,
+    QuestStore,
+    parse_quest_action_result,
+    quest_action_command,
+    quest_log_nonce,
+)
+from mc_bot.quest_request import MinecraftQuestStateEvent, parse_quest_state
+from mc_bot.quest_ui import (
+    QuestActionConfirmationView,
+    QuestListingView,
+    QuestMineView,
+    QuestPanelView,
+    quest_action_confirmation_embed,
+    quest_guide_embed,
+    quest_listing_embed,
+    quest_log_embed,
+    quest_mine_embed,
+    quest_panel_embed,
+)
 from mc_bot.rcon import RconClient, RconError
 from mc_bot.resource_shop import (
     EmeraldDiamondPackSelectView,
@@ -252,6 +272,7 @@ class MinecraftDiscordBot(discord.Client):
         self._settings_store = SettingsStore(config.settings_path)
         self._accounts = AccountStore(config.accounts_path)
         self._market = MarketStore(config.accounts_path)
+        self._quests = QuestStore(config.accounts_path)
         self._voice_player = MinecraftVoicePlayer(
             self,
             api_url=config.voicevox_tts_api_url,
@@ -299,6 +320,9 @@ class MinecraftDiscordBot(discord.Client):
         self._market_lock = asyncio.Lock()
         self._market_notification_lock = asyncio.Lock()
         self._market_panel_lock = asyncio.Lock()
+        self._quest_lock = asyncio.Lock()
+        self._quest_panel_lock = asyncio.Lock()
+        self._quest_notification_lock = asyncio.Lock()
         self._online_player_names: set[str] = set()
         self._voice_bonus_active_users: set[int] = set()
         self._voice_bonus_initialized_users: set[int] = set()
@@ -363,6 +387,14 @@ class MinecraftDiscordBot(discord.Client):
             description="Minecraftプレイヤーマーケットの成約ログ投稿先を設定します",
         )(self._configure_market_log_channel)
         group.command(
+            name="quest-channel",
+            description="Minecraftギルド・クエストの掲示先を設定します",
+        )(self._configure_quest_channel)
+        group.command(
+            name="quest-log-channel",
+            description="Minecraftギルド・クエストの完了ログ投稿先を設定します",
+        )(self._configure_quest_log_channel)
+        group.command(
             name="show",
             description="現在のBot設定と稼働状態を表示します",
         )(self._show_configuration)
@@ -375,6 +407,7 @@ class MinecraftDiscordBot(discord.Client):
     async def setup_hook(self) -> None:
         await asyncio.to_thread(self._accounts.initialize)
         await asyncio.to_thread(self._market.initialize)
+        await asyncio.to_thread(self._quests.initialize)
         self._voice_player.start()
         self.add_view(AccessPanelView(self))
         self.add_view(AdminPanelView(self))
@@ -382,6 +415,7 @@ class MinecraftDiscordBot(discord.Client):
         self.add_view(MinecraftResourceShopPanelView(self))
         self.add_view(MinecraftItemGachaPanelView(self))
         self.add_view(MarketPanelView(self))
+        self.add_view(QuestPanelView(self))
         for listing in await asyncio.to_thread(self._market.list_open):
             if listing.discord_message_id is not None:
                 self.add_view(
@@ -391,6 +425,12 @@ class MinecraftDiscordBot(discord.Client):
                         active=listing.status == "active",
                     ),
                     message_id=listing.discord_message_id,
+                )
+        for quest in await asyncio.to_thread(self._quests.list_open):
+            if quest.discord_message_id is not None:
+                self.add_view(
+                    QuestListingView(self, quest.quest_id),
+                    message_id=quest.discord_message_id,
                 )
         for account in await asyncio.to_thread(self._accounts.list_pending_approvals):
             if account.approval_message_id is not None:
@@ -415,6 +455,10 @@ class MinecraftDiscordBot(discord.Client):
             await self._refresh_market_panel(move_to_bottom=True)
         except (OSError, RuntimeError, discord.DiscordException) as error:
             LOGGER.warning("Could not restore market panel: %s", error)
+        try:
+            await self._refresh_quest_panel(move_to_bottom=True)
+        except (OSError, RuntimeError, discord.DiscordException) as error:
+            LOGGER.warning("Could not restore quest panel: %s", error)
         channel_id = self._settings.channel_id
         if channel_id is None:
             self._channel = None
@@ -433,6 +477,14 @@ class MinecraftDiscordBot(discord.Client):
                     "Notification forwarding is inactive; repair it with /mc-config channel: %s",
                     error,
                 )
+        if (
+            self._settings.market_channel_id is not None
+            or self._settings.quest_channel_id is not None
+        ):
+            try:
+                await self._ensure_tailer_started()
+            except (OSError, RuntimeError) as error:
+                LOGGER.error("Minecraft integration log monitoring is inactive: %s", error)
 
         if self._settings.player_count_enabled:
             self._schedule_player_count_refresh(delay=0)
@@ -442,6 +494,7 @@ class MinecraftDiscordBot(discord.Client):
             await self._restore_voice_connection()
         await self._refresh_online_player_cache()
         await self._recover_market_transactions()
+        await self._recover_quests()
         self._ensure_market_recovery_started()
         self._ensure_minecraft_xp_started()
         self._ensure_activity_delivery_started()
@@ -458,14 +511,18 @@ class MinecraftDiscordBot(discord.Client):
         )
 
     async def on_message(self, message: discord.Message) -> None:
-        if message.channel.id != self._settings.market_channel_id:
-            return
         if self.user is not None and message.author.id == self.user.id:
             return
-        try:
-            await self._refresh_market_panel(move_to_bottom=True)
-        except (OSError, RuntimeError, discord.DiscordException) as error:
-            LOGGER.warning("Could not keep market panel at the bottom: %s", error)
+        if message.channel.id == self._settings.market_channel_id:
+            try:
+                await self._refresh_market_panel(move_to_bottom=True)
+            except (OSError, RuntimeError, discord.DiscordException) as error:
+                LOGGER.warning("Could not keep market panel at the bottom: %s", error)
+        if message.channel.id == self._settings.quest_channel_id:
+            try:
+                await self._refresh_quest_panel(move_to_bottom=True)
+            except (OSError, RuntimeError, discord.DiscordException) as error:
+                LOGGER.warning("Could not keep quest panel at the bottom: %s", error)
 
     async def on_member_remove(self, member: discord.Member) -> None:
         if member.guild.id != self._settings.guild_id:
@@ -705,7 +762,11 @@ class MinecraftDiscordBot(discord.Client):
         await interaction.response.defer(ephemeral=True)
         try:
             self._ensure_same_guild(target.guild.id)
-            await self._resolve_and_validate_channel(target.id, require_embeds=True)
+            await self._resolve_and_validate_channel(
+                target.id,
+                require_embeds=True,
+                require_message_history=True,
+            )
             shop = await self._level_bot_xp.fetch_xp_shop(target.guild.id, interaction.user.id)
             if shop is None:
                 raise RuntimeError("level-botのXP交換APIへ接続できません")
@@ -958,6 +1019,100 @@ class MinecraftDiscordBot(discord.Client):
             allowed_mentions=discord.AllowedMentions.none(),
         )
 
+    @app_commands.describe(channel="クエストカードの投稿先。省略時は現在のチャンネル")
+    async def _configure_quest_channel(
+        self,
+        interaction: discord.Interaction,
+        channel: discord.TextChannel | None = None,
+    ) -> None:
+        if not await self._require_server_manager(interaction):
+            return
+        target = channel or interaction.channel
+        if not isinstance(target, discord.TextChannel):
+            await interaction.response.send_message(
+                "クエスト掲示先にはテキストチャンネルを指定してください。",
+                ephemeral=True,
+            )
+            return
+        await interaction.response.defer(ephemeral=True)
+        try:
+            self._ensure_same_guild(target.guild.id)
+            await self._resolve_and_validate_channel(
+                target.id,
+                require_embeds=True,
+                require_message_history=True,
+            )
+            await asyncio.to_thread(self._tailer.validate)
+            old_channel_id = self._settings.quest_channel_id
+            old_panel_id = self._settings.quest_panel_message_id
+            if old_channel_id is not None and old_channel_id != target.id:
+                for quest in await asyncio.to_thread(self._quests.list_open):
+                    await self._delete_quest_card(quest, channel_id=old_channel_id)
+            await self._save_settings(
+                replace(
+                    self._settings,
+                    guild_id=target.guild.id,
+                    quest_channel_id=target.id,
+                    quest_panel_message_id=(old_panel_id if old_channel_id == target.id else None),
+                )
+            )
+            await self._ensure_tailer_started()
+            for quest in await asyncio.to_thread(self._quests.list_open):
+                await self._refresh_quest_listing(quest.quest_id, move_panel=False)
+            await self._refresh_quest_panel(move_to_bottom=True)
+            if old_channel_id != target.id:
+                await self._disable_old_panel(old_channel_id, old_panel_id)
+        except (OSError, RuntimeError, discord.DiscordException) as error:
+            LOGGER.warning("Could not configure Minecraft quest channel: %s", error)
+            await interaction.followup.send(f"設定できませんでした: {error}", ephemeral=True)
+            return
+        await interaction.followup.send(
+            f"Minecraftギルド・クエスト掲示板を {target.mention} に設定しました。",
+            ephemeral=True,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+    @app_commands.describe(channel="クエスト完了・終了ログの投稿先。省略時は現在のチャンネル")
+    async def _configure_quest_log_channel(
+        self,
+        interaction: discord.Interaction,
+        channel: discord.TextChannel | None = None,
+    ) -> None:
+        if not await self._require_server_manager(interaction):
+            return
+        target = channel or interaction.channel
+        if not isinstance(target, discord.TextChannel):
+            await interaction.response.send_message(
+                "クエストログの投稿先にはテキストチャンネルを指定してください。",
+                ephemeral=True,
+            )
+            return
+        await interaction.response.defer(ephemeral=True)
+        try:
+            self._ensure_same_guild(target.guild.id)
+            await self._resolve_and_validate_channel(
+                target.id,
+                require_embeds=True,
+                require_message_history=True,
+            )
+            await self._save_settings(
+                replace(
+                    self._settings,
+                    guild_id=target.guild.id,
+                    quest_log_channel_id=target.id,
+                )
+            )
+            await self._deliver_quest_logs()
+        except (OSError, RuntimeError, discord.DiscordException) as error:
+            LOGGER.warning("Could not configure Minecraft quest log channel: %s", error)
+            await interaction.followup.send(f"設定できませんでした: {error}", ephemeral=True)
+            return
+        await interaction.followup.send(
+            f"Minecraftクエスト完了ログを {target.mention} に設定しました。",
+            ephemeral=True,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
     @app_commands.describe(
         mode="自動承認または管理者承認",
         channel="管理者承認時に申請を投稿するチャンネル",
@@ -1103,6 +1258,8 @@ class MinecraftDiscordBot(discord.Client):
                     f"{self._channel_text(self._settings.item_gacha_panel_channel_id)}",
                     f"フリマ商品チャンネル: {self._channel_text(self._settings.market_channel_id)}",
                     f"フリマ成約ログ: {self._channel_text(self._settings.market_log_channel_id)}",
+                    f"クエスト掲示板: {self._channel_text(self._settings.quest_channel_id)}",
+                    f"クエスト完了ログ: {self._channel_text(self._settings.quest_log_channel_id)}",
                     f"承認方式: {mode}",
                     f"申請確認先: {self._channel_text(self._settings.approval_channel_id)}",
                     "人数表示: "
@@ -2698,6 +2855,539 @@ class MinecraftDiscordBot(discord.Client):
                             "discord",
                         )
 
+    async def _handle_quest_state(self, event: MinecraftQuestStateEvent) -> None:
+        owner = await self._quest_account(event.owner_uuid)
+        worker = (
+            await self._quest_account(event.worker_uuid) if event.worker_uuid is not None else None
+        )
+        quest, applied = await asyncio.to_thread(
+            self._quests.apply_state,
+            event,
+            owner_account_id=owner.id if owner is not None else None,
+            owner_discord_user_id=(owner.discord_user_id if owner is not None else None),
+            worker_account_id=worker.id if worker is not None else None,
+            worker_discord_user_id=(worker.discord_user_id if worker is not None else None),
+        )
+        if event.status == "open" and owner is None:
+            await self._undo_unlinked_quest_state(
+                event,
+                action="invalidate",
+                player_uuid=event.owner_uuid,
+                player_name=event.owner_name,
+                reason="クエスト利用にはDiscordアカウント連携が必要です。報酬は受取箱へ戻しました。",
+            )
+            return
+        if event.status == "accepted" and event.worker_uuid is not None and worker is None:
+            await self._undo_unlinked_quest_state(
+                event,
+                action="abandon",
+                player_uuid=event.worker_uuid,
+                player_name=event.worker_name or "player",
+                reason="クエスト利用にはDiscordアカウント連携が必要です。受注を解除しました。",
+            )
+            return
+        if applied or quest.status != "open" or quest.discord_message_id is None:
+            await self._refresh_quest_listing(quest.quest_id)
+        if quest.status in {"completed", "cancelled"}:
+            await self._deliver_quest_logs()
+
+    async def _quest_account(self, player_uuid: str | None) -> MinecraftAccount | None:
+        if player_uuid is None:
+            return None
+        try:
+            account = await asyncio.to_thread(self._accounts.get_by_player_uuid, player_uuid)
+        except ValueError as error:
+            LOGGER.error("Could not identify quest account uuid=%s: %s", player_uuid, error)
+            return None
+        if account is None or account.status != "active" or account.discord_user_id is None:
+            return None
+        return account
+
+    async def _undo_unlinked_quest_state(
+        self,
+        event: MinecraftQuestStateEvent,
+        *,
+        action: str,
+        player_uuid: str,
+        player_name: str,
+        reason: str,
+    ) -> None:
+        if self._rcon is None:
+            raise RuntimeError("RCON is required to undo an unlinked quest state")
+        request_id = str(
+            uuid.uuid5(
+                uuid.UUID(event.event_id),
+                f"unlinked:{action}:{event.quest_id}:{player_uuid}",
+            )
+        )
+        response = await self._execute_rcon(
+            quest_action_command(
+                action,
+                event.quest_id,
+                player_uuid,
+                request_id,
+            )
+        )
+        result = parse_quest_action_result(
+            response,
+            request_id=request_id,
+            quest_id=event.quest_id,
+        )
+        if result.status != "completed":
+            already_reconciled = (
+                action == "invalidate" and result.quest_status in {"completed", "cancelled"}
+            ) or (action == "abandon" and result.quest_status in {"open", "completed", "cancelled"})
+            if already_reconciled:
+                return
+            raise RuntimeError(
+                f"could not undo unlinked quest: {result.status}/{result.quest_status}"
+            )
+        expected_status = "cancelled" if action == "invalidate" else "open"
+        if result.quest_status == expected_status:
+            await self._send_minecraft_private_message(player_name, reason)
+
+    async def accept_quest(self, interaction: discord.Interaction, quest_id: int) -> None:
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        quest = await asyncio.to_thread(self._quests.get, quest_id)
+        if quest is None or quest.status != "open":
+            await interaction.followup.send("このクエストは募集を終了しました。", ephemeral=True)
+            return
+        if quest.owner_discord_user_id == interaction.user.id:
+            await interaction.followup.send("自分の依頼は受注できません。", ephemeral=True)
+            return
+        try:
+            account, reason = await self._online_exchange_account(interaction.user.id)
+        except (OSError, RconError, RuntimeError, ValueError) as error:
+            LOGGER.warning("Could not verify quest worker: %s", error)
+            await interaction.followup.send(
+                "Minecraftへの参加状況を確認できませんでした。", ephemeral=True
+            )
+            return
+        if account is None or account.player_uuid is None:
+            message = (
+                "連携アカウントが複数オンラインです。受注先を1つだけオンラインにしてください。"
+                if reason == "account_ambiguous"
+                else "連携したMinecraftアカウントで参加してから受注してください。"
+            )
+            await interaction.followup.send(message, ephemeral=True)
+            return
+        result = await self._run_quest_action(
+            "accept",
+            quest,
+            account.player_uuid,
+            player_name=account.server_player_name,
+        )
+        if result is None:
+            await interaction.followup.send(
+                "受注結果を確認できませんでした。ゲーム内の `/quest mine` を確認してください。",
+                ephemeral=True,
+            )
+            return
+        if result.status == "completed":
+            await self._delete_quest_card(quest)
+            await interaction.followup.send(
+                f"クエスト #{quest.quest_id} を受注しました。"
+                "納品はMinecraftで依頼品を持ち `/quest submit "
+                f"{quest.quest_id}` を実行してください。",
+                ephemeral=True,
+            )
+            return
+        await interaction.followup.send(self._quest_action_error(result.status), ephemeral=True)
+
+    async def show_quest_action_confirmation(
+        self, interaction: discord.Interaction, quest_id: int, action: str
+    ) -> None:
+        if action not in {"accept", "cancel", "submit", "abandon"}:
+            await interaction.response.send_message("不明な操作です。", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        quest = await asyncio.to_thread(self._quests.get, quest_id)
+        invalid_message: str | None = None
+        if quest is None:
+            invalid_message = "このクエストは見つかりません。"
+        elif action == "accept" and (
+            quest.status != "open" or quest.owner_discord_user_id == interaction.user.id
+        ):
+            invalid_message = (
+                "自分の依頼は受注できません。"
+                if quest.owner_discord_user_id == interaction.user.id
+                else "このクエストは募集を終了しました。"
+            )
+        elif action == "cancel" and (
+            quest.status != "open" or quest.owner_discord_user_id != interaction.user.id
+        ):
+            invalid_message = "取り消せるのは募集中の自分の依頼だけです。"
+        elif action in {"submit", "abandon"} and (
+            quest.status != "accepted" or quest.worker_discord_user_id != interaction.user.id
+        ):
+            invalid_message = "このクエストの担当者ではありません。"
+        if invalid_message is not None or quest is None:
+            await interaction.followup.send(invalid_message, ephemeral=True)
+            return
+        await interaction.followup.send(
+            embed=quest_action_confirmation_embed(quest, action),
+            view=QuestActionConfirmationView(
+                self, quest, owner_id=interaction.user.id, action=action
+            ),
+            ephemeral=True,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+    async def cancel_quest(self, interaction: discord.Interaction, quest_id: int) -> None:
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        quest = await asyncio.to_thread(self._quests.get, quest_id)
+        if (
+            quest is None
+            or quest.status != "open"
+            or quest.owner_discord_user_id != interaction.user.id
+        ):
+            await interaction.followup.send(
+                "取り消せるのは募集中の自分の依頼だけです。", ephemeral=True
+            )
+            return
+        result = await self._run_quest_action("cancel", quest, quest.owner_uuid)
+        if result is not None and result.status == "completed":
+            await self._delete_quest_card(quest)
+            await interaction.followup.send(
+                "依頼を取り消しました。報酬はMinecraftの `/quest claim` で受け取れます。",
+                ephemeral=True,
+            )
+            return
+        await interaction.followup.send(
+            self._quest_action_error(result.status if result is not None else "unknown"),
+            ephemeral=True,
+        )
+
+    async def submit_quest(self, interaction: discord.Interaction, quest_id: int) -> None:
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        quest = await asyncio.to_thread(self._quests.get, quest_id)
+        if (
+            quest is None
+            or quest.status != "accepted"
+            or quest.worker_discord_user_id != interaction.user.id
+        ):
+            await interaction.followup.send("このクエストの担当者ではありません。", ephemeral=True)
+            return
+        try:
+            account, reason = await self._online_exchange_account(interaction.user.id)
+        except (OSError, RconError, RuntimeError, ValueError) as error:
+            LOGGER.warning("Could not verify quest submitter: %s", error)
+            await interaction.followup.send(
+                "Minecraftへの参加状況を確認できませんでした。", ephemeral=True
+            )
+            return
+        if account is None or account.player_uuid is None or account.id != quest.worker_account_id:
+            message = (
+                "連携アカウントが複数オンラインです。受注したアカウントだけをオンラインにしてください。"
+                if reason == "account_ambiguous"
+                else "受注したMinecraftアカウントで参加してから納品してください。"
+            )
+            await interaction.followup.send(message, ephemeral=True)
+            return
+        result = await self._run_quest_action("submit", quest, account.player_uuid)
+        if result is not None and result.status == "completed":
+            await interaction.followup.send(
+                "納品が完了しました。報酬はMinecraftの `/quest claim` で受け取れます。",
+                ephemeral=True,
+            )
+            return
+        await interaction.followup.send(
+            self._quest_action_error(result.status if result is not None else "unknown"),
+            ephemeral=True,
+        )
+
+    async def abandon_quest(self, interaction: discord.Interaction, quest_id: int) -> None:
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        quest = await asyncio.to_thread(self._quests.get, quest_id)
+        if (
+            quest is None
+            or quest.status != "accepted"
+            or quest.worker_discord_user_id != interaction.user.id
+            or quest.worker_uuid is None
+        ):
+            await interaction.followup.send("このクエストの担当者ではありません。", ephemeral=True)
+            return
+        result = await self._run_quest_action("abandon", quest, quest.worker_uuid)
+        if result is not None and result.status == "completed":
+            await interaction.followup.send(
+                "クエストを辞退しました。依頼は掲示板で再募集されます。", ephemeral=True
+            )
+            return
+        await interaction.followup.send(
+            self._quest_action_error(result.status if result is not None else "unknown"),
+            ephemeral=True,
+        )
+
+    async def _run_quest_action(
+        self,
+        action: str,
+        quest: Quest,
+        player_uuid: str,
+        *,
+        player_name: str | None = None,
+    ):
+        request_id = str(uuid.uuid4())
+        try:
+            async with self._quest_lock:
+                response = await self._execute_rcon(
+                    quest_action_command(
+                        action,
+                        quest.quest_id,
+                        player_uuid,
+                        request_id,
+                        player_name=player_name,
+                    )
+                )
+                return parse_quest_action_result(
+                    response,
+                    request_id=request_id,
+                    quest_id=quest.quest_id,
+                )
+        except (OSError, RconError, RuntimeError, ValueError) as error:
+            LOGGER.warning(
+                "Quest action is ambiguous quest=%d action=%s request=%s: %s",
+                quest.quest_id,
+                action,
+                request_id,
+                error,
+            )
+            return None
+
+    @staticmethod
+    def _quest_action_error(status: str) -> str:
+        return {
+            "unavailable": "そのクエストは募集を終了しました。",
+            "own_quest": "自分の依頼は受注できません。",
+            "not_assignee": "そのクエストの担当者ではありません。",
+            "not_cancellable": "受注後の依頼は取り消せません。",
+            "expired": "納品期限を過ぎています。",
+            "item_mismatch": "依頼品を必要数、Minecraftのメインハンドにまとめて持ってください。",
+            "player_offline": "Minecraftに参加してから操作してください。",
+            "pending_recovered": "前回の納品処理を復旧しました。もう一度操作してください。",
+            "storage_error": "保存に失敗しました。少し待ってからもう一度お試しください。",
+        }.get(
+            status,
+            "操作結果を確認できませんでした。Minecraftの `/quest mine` を確認してください。",
+        )
+
+    async def show_quest_guide(self, interaction: discord.Interaction) -> None:
+        await interaction.response.send_message(
+            embed=quest_guide_embed(),
+            ephemeral=True,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+    async def show_quest_claim_guide(self, interaction: discord.Interaction) -> None:
+        await interaction.response.send_message(
+            "報酬・返却品・納品物はMinecraftの永続受取箱に入ります。"
+            "インベントリに空きを作り、Minecraftで `/quest claim` を実行してください。",
+            ephemeral=True,
+        )
+
+    async def show_my_quests(
+        self, interaction: discord.Interaction, *, page: int = 0, edit: bool = False
+    ) -> None:
+        if edit:
+            await interaction.response.defer()
+        else:
+            await interaction.response.defer(ephemeral=True)
+        quests = await asyncio.to_thread(
+            self._quests.list_active_for_discord_user, interaction.user.id
+        )
+        if not quests:
+            await interaction.edit_original_response(
+                content=(
+                    "進行中の依頼・受注はありません。"
+                    "受取品はMinecraftの `/quest claim` で確認できます。"
+                ),
+                embed=None,
+                view=None,
+            )
+            return
+        selected = min(max(0, page), len(quests) - 1)
+        quest = quests[selected]
+        await interaction.edit_original_response(
+            content=None,
+            embed=quest_mine_embed(quest, interaction.user.id, page=selected, total=len(quests)),
+            view=QuestMineView(
+                self,
+                quest,
+                interaction.user.id,
+                page=selected,
+                total=len(quests),
+            ),
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+    async def _post_quest_listing(self, quest: Quest, *, move_panel: bool = True) -> None:
+        channel_id = self._settings.quest_channel_id
+        if channel_id is None or quest.status != "open" or quest.owner_discord_user_id is None:
+            return
+        channel = await self._resolve_and_validate_channel(channel_id, require_embeds=True)
+        message = await channel.send(
+            embed=quest_listing_embed(quest),
+            view=QuestListingView(self, quest.quest_id),
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+        await asyncio.to_thread(self._quests.set_discord_message, quest.quest_id, message.id)
+        if move_panel:
+            await self._refresh_quest_panel(move_to_bottom=True)
+
+    async def _refresh_quest_listing(self, quest_id: int, *, move_panel: bool = True) -> None:
+        quest = await asyncio.to_thread(self._quests.get, quest_id)
+        if quest is None:
+            return
+        if quest.status != "open":
+            await self._delete_quest_card(quest)
+            return
+        channel_id = self._settings.quest_channel_id
+        if channel_id is None:
+            return
+        if quest.discord_message_id is None:
+            await self._post_quest_listing(quest, move_panel=move_panel)
+            return
+        try:
+            channel = await self._resolve_and_validate_channel(channel_id, require_embeds=True)
+            message = await channel.fetch_message(quest.discord_message_id)
+            await message.edit(
+                embed=quest_listing_embed(quest),
+                view=QuestListingView(self, quest.quest_id),
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+        except discord.NotFound:
+            await asyncio.to_thread(self._quests.set_discord_message, quest.quest_id, None)
+            await self._post_quest_listing(quest, move_panel=move_panel)
+
+    async def _delete_quest_card(self, quest: Quest, *, channel_id: int | None = None) -> None:
+        if quest.discord_message_id is None:
+            return
+        target_channel = channel_id or self._settings.quest_channel_id
+        if target_channel is not None:
+            try:
+                channel = await self._resolve_and_validate_channel(target_channel)
+                message = await channel.fetch_message(quest.discord_message_id)
+                await message.delete()
+            except discord.NotFound:
+                pass
+        await asyncio.to_thread(self._quests.set_discord_message, quest.quest_id, None)
+
+    async def _refresh_quest_panel(self, *, move_to_bottom: bool = False) -> None:
+        async with self._quest_panel_lock:
+            channel_id = self._settings.quest_channel_id
+            if channel_id is None:
+                return
+            channel = await self._resolve_and_validate_channel(
+                channel_id,
+                require_embeds=True,
+                require_message_history=True,
+            )
+            message: discord.Message | None = None
+            message_id = self._settings.quest_panel_message_id
+            if message_id is not None:
+                try:
+                    message = await channel.fetch_message(message_id)
+                except discord.NotFound:
+                    message = None
+            if message is not None and not move_to_bottom:
+                await message.edit(
+                    embed=quest_panel_embed(),
+                    view=QuestPanelView(self),
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+                return
+            if message is not None:
+                with suppress(discord.NotFound):
+                    await message.delete()
+            message = await channel.send(
+                embed=quest_panel_embed(),
+                view=QuestPanelView(self),
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            await self._save_settings(replace(self._settings, quest_panel_message_id=message.id))
+
+    async def _recover_quests(self) -> None:
+        for quest in await asyncio.to_thread(self._quests.list_nonopen_with_discord_message):
+            try:
+                await self._delete_quest_card(quest)
+            except OSError, RuntimeError, discord.DiscordException:
+                LOGGER.exception("Could not remove inactive quest card quest=%d", quest.quest_id)
+        for quest in await asyncio.to_thread(self._quests.list_open):
+            try:
+                await self._refresh_quest_listing(quest.quest_id, move_panel=False)
+            except OSError, RuntimeError, discord.DiscordException:
+                LOGGER.exception("Could not restore open quest card quest=%d", quest.quest_id)
+        await self._deliver_quest_logs()
+
+    async def _deliver_quest_logs(self) -> None:
+        async with self._quest_notification_lock:
+            channel_id = self._settings.quest_log_channel_id
+            if channel_id is None:
+                return
+            channel = await self._resolve_and_validate_channel(
+                channel_id,
+                require_embeds=True,
+                require_message_history=True,
+            )
+            quests = await asyncio.to_thread(self._quests.list_terminal_unnotified)
+            attempted = [quest for quest in quests if quest.discord_log_delivery_attempted]
+            existing = await self._existing_quest_log_transitions(channel, attempted)
+            for quest in quests:
+                if quest.last_transition_id in existing:
+                    await asyncio.to_thread(
+                        self._quests.mark_discord_log_notified,
+                        quest.quest_id,
+                        quest.last_transition_id,
+                    )
+                    continue
+                if not quest.discord_log_delivery_attempted:
+                    await asyncio.to_thread(
+                        self._quests.mark_discord_log_delivery_attempted,
+                        quest.quest_id,
+                        quest.last_transition_id,
+                    )
+                await channel.send(
+                    embed=quest_log_embed(quest),
+                    nonce=quest_log_nonce(quest.last_transition_id),
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+                await asyncio.to_thread(
+                    self._quests.mark_discord_log_notified,
+                    quest.quest_id,
+                    quest.last_transition_id,
+                )
+
+    async def _existing_quest_log_transitions(
+        self,
+        channel: discord.TextChannel,
+        quests: list[Quest],
+    ) -> set[str]:
+        if not quests:
+            return set()
+        pending = {quest.last_transition_id for quest in quests}
+        nonces = {quest_log_nonce(transition_id): transition_id for transition_id in pending}
+        earliest = min(datetime.fromisoformat(quest.published_at) for quest in quests) - timedelta(
+            seconds=1
+        )
+        found: set[str] = set()
+        async for message in channel.history(limit=None, after=earliest, oldest_first=False):
+            if self.user is not None and message.author.id != self.user.id:
+                continue
+            if message.nonce is not None:
+                try:
+                    transition_id = nonces.get(int(message.nonce))
+                except TypeError, ValueError:
+                    transition_id = None
+                if transition_id is not None:
+                    found.add(transition_id)
+            for embed in message.embeds:
+                footer = embed.footer.text or ""
+                for transition_id in pending - found:
+                    if f"記録ID: {transition_id}" in footer:
+                        found.add(transition_id)
+            if found == pending:
+                break
+        return found
+
     def _ensure_market_recovery_started(self) -> None:
         if self._market_recovery_task is not None and not self._market_recovery_task.done():
             return
@@ -2710,10 +3400,11 @@ class MinecraftDiscordBot(discord.Client):
             await asyncio.sleep(_MARKET_RECOVERY_INTERVAL_SECONDS)
             try:
                 await self._recover_market_transactions()
+                await self._recover_quests()
             except Exception:
-                LOGGER.exception("Could not run periodic Minecraft market recovery")
+                LOGGER.exception("Could not run periodic Minecraft market/quest recovery")
 
-    async def _retry_market_log_operation(
+    async def _retry_integration_log_operation(
         self,
         *,
         description: str,
@@ -2726,7 +3417,7 @@ class MinecraftDiscordBot(discord.Client):
             except Exception:
                 self._delivery_healthy = False
                 LOGGER.exception(
-                    "Minecraft market %s failed; retrying in %ds",
+                    "Minecraft integration %s failed; retrying in %ds",
                     description,
                     retry_delay,
                 )
@@ -5020,11 +5711,30 @@ class MinecraftDiscordBot(discord.Client):
             return
         await asyncio.to_thread(self._tailer.validate)
         self._delivery_healthy = True
-        self._tailer_task = asyncio.create_task(self._forward_logs(), name="minecraft-log-tailer")
+        self._tailer_task = asyncio.create_task(
+            self._forward_logs(integration_only=self._channel is None),
+            name="minecraft-log-tailer",
+        )
         self._tailer_task.add_done_callback(self._tailer_stopped)
 
-    async def _forward_logs(self) -> None:
+    async def _forward_logs(self, *, integration_only: bool = False) -> None:
         async for pending_line in self._tailer.lines():
+            try:
+                quest_state = parse_quest_state(pending_line.text)
+            except ValueError as error:
+                LOGGER.warning("Ignored malformed Minecraft quest state: %s", error)
+                await asyncio.to_thread(self._tailer.acknowledge, pending_line)
+                continue
+            if quest_state is not None:
+                processed = await self._retry_integration_log_operation(
+                    description=(
+                        f"quest={quest_state.quest_id} transition={quest_state.transition_id}"
+                    ),
+                    operation=lambda event=quest_state: self._handle_quest_state(event),
+                )
+                if processed:
+                    await asyncio.to_thread(self._tailer.acknowledge, pending_line)
+                continue
             try:
                 market_listing = parse_market_listing(pending_line.text)
                 market_request = (
@@ -5035,7 +5745,7 @@ class MinecraftDiscordBot(discord.Client):
                 await asyncio.to_thread(self._tailer.acknowledge, pending_line)
                 continue
             if market_listing is not None:
-                processed = await self._retry_market_log_operation(
+                processed = await self._retry_integration_log_operation(
                     description=(
                         f"listing={market_listing.listing_id} "
                         f"seller_uuid={market_listing.seller_uuid}"
@@ -5046,7 +5756,7 @@ class MinecraftDiscordBot(discord.Client):
                     await asyncio.to_thread(self._tailer.acknowledge, pending_line)
                 continue
             if market_request is not None:
-                processed = await self._retry_market_log_operation(
+                processed = await self._retry_integration_log_operation(
                     description=(
                         f"request={market_request.request_id} "
                         f"player_uuid={market_request.player_uuid}"
@@ -5097,6 +5807,9 @@ class MinecraftDiscordBot(discord.Client):
                 await asyncio.to_thread(self._tailer.acknowledge, pending_line)
                 continue
             if emerald_exchange is not None:
+                if integration_only and self._channel is None:
+                    await asyncio.to_thread(self._tailer.acknowledge, pending_line)
+                    continue
                 try:
                     account = await asyncio.to_thread(
                         self._accounts.get_by_player_uuid,
@@ -5167,6 +5880,9 @@ class MinecraftDiscordBot(discord.Client):
                 self._online_player_names.add(event.player_name.casefold())
             elif event.type is EventType.LEAVE:
                 self._online_player_names.discard(event.player_name.casefold())
+            if integration_only and self._channel is None:
+                await asyncio.to_thread(self._tailer.acknowledge, pending_line)
+                continue
             account = await self._find_account_for_player_name(event.player_name)
             discord_user_id, discord_username = await self._discord_identity(account)
             if (

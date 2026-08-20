@@ -399,6 +399,8 @@ def test_registers_manager_only_configuration_commands() -> None:
         "item-gacha-panel",
         "market-channel",
         "market-log-channel",
+        "quest-channel",
+        "quest-log-channel",
         "panel",
         "player-count",
         "resource-panel",
@@ -449,6 +451,44 @@ def test_configures_specific_market_log_channel(tmp_path) -> None:
         )
         response = interaction.followup.send.await_args
         assert "フリマ成約ログ" in response.args[0]
+        assert response.kwargs["ephemeral"] is True
+
+    asyncio.run(exercise())
+
+
+def test_configures_specific_quest_log_channel_and_flushes_pending_logs(tmp_path) -> None:
+    async def exercise() -> None:
+        bot = MinecraftDiscordBot(
+            Config(discord_token="secret", settings_path=tmp_path / "settings.json")
+        )
+        bot._require_server_manager = AsyncMock(return_value=True)  # type: ignore[method-assign]
+        bot._deliver_quest_logs = AsyncMock()  # type: ignore[method-assign]
+        target = Mock(spec=discord.TextChannel)
+        target.id = 778
+        target.guild = Mock()
+        target.guild.id = 1001
+        target.mention = "<#778>"
+        bot._resolve_and_validate_channel = AsyncMock(  # type: ignore[method-assign]
+            return_value=target
+        )
+        interaction = Mock(spec=discord.Interaction)
+        interaction.channel = target
+        interaction.response.defer = AsyncMock()
+        interaction.followup.send = AsyncMock()
+
+        await bot._configure_quest_log_channel(interaction)
+
+        assert bot._settings.guild_id == 1001
+        assert bot._settings.quest_log_channel_id == 778
+        assert bot._settings_store.load() == bot._settings
+        bot._resolve_and_validate_channel.assert_awaited_once_with(  # type: ignore[attr-defined]
+            778,
+            require_embeds=True,
+            require_message_history=True,
+        )
+        bot._deliver_quest_logs.assert_awaited_once()  # type: ignore[attr-defined]
+        response = interaction.followup.send.await_args
+        assert "クエスト完了ログ" in response.args[0]
         assert response.kwargs["ephemeral"] is True
 
     asyncio.run(exercise())
