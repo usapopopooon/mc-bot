@@ -359,6 +359,10 @@ class MinecraftDiscordBot(discord.Client):
             description="Minecraftプレイヤーマーケットの商品投稿先を設定します",
         )(self._configure_market_channel)
         group.command(
+            name="market-log-channel",
+            description="Minecraftプレイヤーマーケットの成約ログ投稿先を設定します",
+        )(self._configure_market_log_channel)
+        group.command(
             name="show",
             description="現在のBot設定と稼働状態を表示します",
         )(self._show_configuration)
@@ -918,6 +922,42 @@ class MinecraftDiscordBot(discord.Client):
             allowed_mentions=discord.AllowedMentions.none(),
         )
 
+    @app_commands.describe(channel="フリマ成約ログの投稿先。省略時は現在のチャンネル")
+    async def _configure_market_log_channel(
+        self,
+        interaction: discord.Interaction,
+        channel: discord.TextChannel | None = None,
+    ) -> None:
+        if not await self._require_server_manager(interaction):
+            return
+        target = channel or interaction.channel
+        if not isinstance(target, discord.TextChannel):
+            await interaction.response.send_message(
+                "フリマ成約ログの投稿先にはテキストチャンネルを指定してください。",
+                ephemeral=True,
+            )
+            return
+        await interaction.response.defer(ephemeral=True)
+        try:
+            self._ensure_same_guild(target.guild.id)
+            await self._resolve_and_validate_channel(target.id, require_embeds=True)
+            await self._save_settings(
+                replace(
+                    self._settings,
+                    guild_id=target.guild.id,
+                    market_log_channel_id=target.id,
+                )
+            )
+        except (OSError, RuntimeError, discord.DiscordException) as error:
+            LOGGER.warning("Could not configure Minecraft market log channel: %s", error)
+            await interaction.followup.send(f"設定できませんでした: {error}", ephemeral=True)
+            return
+        await interaction.followup.send(
+            f"Minecraftフリマ成約ログを {target.mention} に設定しました。",
+            ephemeral=True,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
     @app_commands.describe(
         mode="自動承認または管理者承認",
         channel="管理者承認時に申請を投稿するチャンネル",
@@ -1061,6 +1101,8 @@ class MinecraftDiscordBot(discord.Client):
                     f"{self._channel_text(self._settings.resource_shop_panel_channel_id)}",
                     "アイテムガチャパネル: "
                     f"{self._channel_text(self._settings.item_gacha_panel_channel_id)}",
+                    f"フリマ商品チャンネル: {self._channel_text(self._settings.market_channel_id)}",
+                    f"フリマ成約ログ: {self._channel_text(self._settings.market_log_channel_id)}",
                     f"承認方式: {mode}",
                     f"申請確認先: {self._channel_text(self._settings.approval_channel_id)}",
                     "人数表示: "
@@ -2621,9 +2663,16 @@ class MinecraftDiscordBot(discord.Client):
                             "minecraft",
                         )
                 if not listing.discord_purchase_notified:
+                    channel_id = self._settings.market_log_channel_id
+                    if channel_id is None:
+                        continue
                     try:
-                        await self._send(
-                            format_market_purchase(
+                        channel = await self._resolve_and_validate_channel(
+                            channel_id,
+                            require_embeds=True,
+                        )
+                        await channel.send(
+                            embed=format_market_purchase(
                                 server_name=server_name,
                                 buyer_name=buyer.server_player_name,
                                 buyer_discord_user_id=listing.buyer_discord_user_id,
@@ -2632,7 +2681,8 @@ class MinecraftDiscordBot(discord.Client):
                                 item_name=listing.display_item_name,
                                 item_count=listing.item_count,
                                 price_xp=listing.price_xp,
-                            )
+                            ),
+                            allowed_mentions=discord.AllowedMentions.none(),
                         )
                     except (RuntimeError, discord.DiscordException) as error:
                         LOGGER.warning(

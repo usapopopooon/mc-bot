@@ -134,8 +134,10 @@ XPを消費しません。
 商品カードの「購入」「出品取消」はエフェメラル画面から操作できます。
 購入成立後は売却済みの商品カードをフリマチャンネルから削除し、Bot再起動時にも
 残っている売却済みカードを清掃します。
-購入内容は買い手・売り手・商品・数量・価格をMinecraft全体チャットとDiscordの
-通知ログチャンネルへ投稿し、未送信分はBot再起動後も再送します。
+購入内容は買い手・売り手・商品・数量・価格をMinecraft全体チャットへ従来どおり投稿し、
+Discordでは `/mc-config market-log-channel` で設定したフリマ成約ログ専用チャンネルへ
+投稿します。専用チャンネルが未設定の間は一般ログへ流さず、未送信分として保持し、
+設定後またはBot再起動後に再送します。
 通常のMinecraftアイテム名はMinecraft Java 26.2の日本語名で表示し、名付けられた
 カスタムアイテムはその名前を保持します。
 購入確認には現在XPと購入後XPを表示します。受取成功後に表示価格を買い手から差し引いて
@@ -191,6 +193,7 @@ mc-botコンテナ
 /mc-config player-count action:有効化
 /mc-config item-gacha-panel channel:#minecraftガチャ
 /mc-config market-channel channel:#minecraftマーケット
+/mc-config market-log-channel channel:#minecraftフリマ成約ログ
 /mc-config show
 ```
 

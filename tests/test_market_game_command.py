@@ -102,7 +102,7 @@ def test_game_market_wires_listing_buyer_seller_price_and_delivery(tmp_path) -> 
         created_by=2003,
         player_uuid=BUYER_UUID,
     )
-    bot._settings = RuntimeSettings(guild_id=1001)
+    bot._settings = RuntimeSettings(guild_id=1001, market_log_channel_id=777)
     bot._rcon = MarketRcon()  # type: ignore[assignment]
     wallet_before = MinecraftXpWallet(5_000, 0, 5_000)
     wallet_after = MinecraftXpWallet(5_000, 3_000, 2_000)
@@ -121,8 +121,11 @@ def test_game_market_wires_listing_buyer_seller_price_and_delivery(tmp_path) -> 
     bot._level_bot_xp.fetch_market_wallet = AsyncMock(  # type: ignore[method-assign]
         return_value=wallet_after
     )
-    send_log = AsyncMock()
-    bot._send = send_log  # type: ignore[method-assign]
+    market_log_channel = AsyncMock()
+    bot._resolve_and_validate_channel = AsyncMock(  # type: ignore[method-assign]
+        return_value=market_log_channel
+    )
+    bot._send = AsyncMock()  # type: ignore[method-assign]
     milliseconds = int(datetime.now(UTC).timestamp() * 1_000)
     lines = [
         _line(
@@ -175,8 +178,9 @@ def test_game_market_wires_listing_buyer_seller_price_and_delivery(tmp_path) -> 
     public_messages = [command for command in rcon.commands if command.startswith("tellraw @a ")]
     assert len(public_messages) == 1
     assert all(value in public_messages[0] for value in ("Buyer", "Seller", "古代の残骸", "3,000"))
-    send_log.assert_awaited_once()
-    discord_log = str(send_log.await_args.args[0].description)
+    market_log_channel.send.assert_awaited_once()
+    bot._send.assert_not_awaited()  # type: ignore[attr-defined]
+    discord_log = str(market_log_channel.send.await_args.kwargs["embed"].description)
     assert all(value in discord_log for value in ("Buyer", "Seller", "古代の残骸", "3,000"))
     assert listing.minecraft_purchase_notified
     assert listing.discord_purchase_notified
@@ -324,17 +328,36 @@ def test_market_purchase_notifications_retry_only_failed_destination(tmp_path) -
     bot._settings = RuntimeSettings(guild_id=1001)
     rcon = MarketRcon()
     bot._rcon = rcon  # type: ignore[assignment]
-    send_log = AsyncMock(side_effect=[RuntimeError("Discord unavailable"), None])
-    bot._send = send_log  # type: ignore[method-assign]
+    market_log_channel = AsyncMock()
+    market_log_channel.send = AsyncMock(side_effect=[RuntimeError("Discord unavailable"), None])
+    bot._resolve_and_validate_channel = AsyncMock(  # type: ignore[method-assign]
+        return_value=market_log_channel
+    )
+    bot._send = AsyncMock()  # type: ignore[method-assign]
 
-    async def exercise() -> None:
+    async def exercise() -> tuple[bool, bool]:
+        await bot._deliver_market_purchase_notifications()
+        before_channel_configuration = bot._market.get(17)
+        assert before_channel_configuration is not None
+        state = (
+            before_channel_configuration.minecraft_purchase_notified,
+            before_channel_configuration.discord_purchase_notified,
+        )
+        bot._settings = RuntimeSettings(
+            guild_id=1001,
+            market_log_channel_id=777,
+        )
         await bot._deliver_market_purchase_notifications()
         await bot._deliver_market_purchase_notifications()
+        return state
 
-    asyncio.run(exercise())
+    state_before_channel_configuration = asyncio.run(exercise())
 
+    assert state_before_channel_configuration == (True, False)
     assert sum(command.startswith("tellraw @a ") for command in rcon.commands) == 1
-    assert send_log.await_count == 2
+    assert market_log_channel.send.await_count == 2
+    bot._send.assert_not_awaited()  # type: ignore[attr-defined]
+    assert bot._resolve_and_validate_channel.await_count == 2  # type: ignore[attr-defined]
     listing = bot._market.get(17)
     assert listing is not None
     assert listing.minecraft_purchase_notified

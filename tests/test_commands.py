@@ -398,6 +398,7 @@ def test_registers_manager_only_configuration_commands() -> None:
         "channel",
         "item-gacha-panel",
         "market-channel",
+        "market-log-channel",
         "panel",
         "player-count",
         "resource-panel",
@@ -416,6 +417,41 @@ def test_registers_manager_only_configuration_commands() -> None:
     assert isinstance(voice, app_commands.Command)
     assert voice.guild_only
     assert voice.default_permissions is None
+
+
+def test_configures_specific_market_log_channel(tmp_path) -> None:
+    async def exercise() -> None:
+        bot = MinecraftDiscordBot(
+            Config(discord_token="secret", settings_path=tmp_path / "settings.json")
+        )
+        bot._require_server_manager = AsyncMock(return_value=True)  # type: ignore[method-assign]
+        target = Mock(spec=discord.TextChannel)
+        target.id = 777
+        target.guild = Mock()
+        target.guild.id = 1001
+        target.mention = "<#777>"
+        bot._resolve_and_validate_channel = AsyncMock(  # type: ignore[method-assign]
+            return_value=target
+        )
+        interaction = Mock(spec=discord.Interaction)
+        interaction.channel = target
+        interaction.response.defer = AsyncMock()
+        interaction.followup.send = AsyncMock()
+
+        await bot._configure_market_log_channel(interaction)
+
+        assert bot._settings.guild_id == 1001
+        assert bot._settings.market_log_channel_id == 777
+        assert bot._settings_store.load() == bot._settings
+        bot._resolve_and_validate_channel.assert_awaited_once_with(  # type: ignore[attr-defined]
+            777,
+            require_embeds=True,
+        )
+        response = interaction.followup.send.await_args
+        assert "フリマ成約ログ" in response.args[0]
+        assert response.kwargs["ephemeral"] is True
+
+    asyncio.run(exercise())
 
 
 def test_vc_command_connects_to_callers_current_voice_channel() -> None:
