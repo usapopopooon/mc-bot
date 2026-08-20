@@ -149,6 +149,7 @@ from mc_bot.quest_ui import (
     quest_action_confirmation_embed,
     quest_guide_embed,
     quest_listing_embed,
+    quest_listing_has_current_controls,
     quest_log_embed,
     quest_mine_embed,
     quest_panel_embed,
@@ -3313,7 +3314,7 @@ class MinecraftDiscordBot(discord.Client):
         try:
             channel = await self._resolve_and_validate_channel(channel_id, require_embeds=True)
             message = await channel.fetch_message(quest.discord_message_id)
-            if not edit_existing:
+            if not edit_existing and quest_listing_has_current_controls(message, quest.quest_id):
                 return
             await message.edit(
                 embed=quest_listing_embed(quest),

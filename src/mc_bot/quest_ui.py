@@ -130,6 +130,26 @@ class QuestListingView(discord.ui.View):
                 style=discord.ButtonStyle.primary,
             )
         )
+        self.add_item(
+            _QuestButton(
+                bot,
+                quest_id,
+                action="cancel",
+                label="依頼取消",
+                style=discord.ButtonStyle.danger,
+            )
+        )
+
+
+def quest_listing_has_current_controls(message: discord.Message, quest_id: int) -> bool:
+    expected = {f"mc-quest:accept:{quest_id}", f"mc-quest:cancel:{quest_id}"}
+    actual: set[str] = set()
+    for row in message.components:
+        for component in getattr(row, "children", ()):
+            custom_id = getattr(component, "custom_id", None)
+            if custom_id is not None:
+                actual.add(custom_id)
+    return expected.issubset(actual)
 
 
 class _QuestConfirmationCancelButton(discord.ui.Button[discord.ui.View]):
@@ -508,6 +528,7 @@ __all__ = [
     "quest_action_confirmation_embed",
     "quest_guide_embed",
     "quest_listing_embed",
+    "quest_listing_has_current_controls",
     "quest_log_embed",
     "quest_mine_embed",
     "quest_panel_embed",

@@ -21,10 +21,18 @@ from mc_bot.settings import RuntimeSettings
 
 
 class FakeMessage:
-    def __init__(self, message_id: int) -> None:
+    def __init__(self, message_id: int, *, component_custom_ids: set[str] | None = None) -> None:
         self.id = message_id
         self.deleted = False
         self.edits: list[dict[str, object]] = []
+        self.components = [
+            SimpleNamespace(
+                children=[
+                    SimpleNamespace(custom_id=custom_id)
+                    for custom_id in sorted(component_custom_ids or set())
+                ]
+            )
+        ]
 
     async def delete(self) -> None:
         self.deleted = True
@@ -117,7 +125,10 @@ def test_quest_panel_has_guide_mine_and_claim_buttons() -> None:
         "mc-quest:mine:0",
         "mc-quest:claim:0",
     }
-    assert {child.custom_id for child in listing.children} == {"mc-quest:accept:17"}
+    assert {child.custom_id for child in listing.children} == {
+        "mc-quest:accept:17",
+        "mc-quest:cancel:17",
+    }
 
 
 @pytest.mark.parametrize(
@@ -179,6 +190,46 @@ def test_public_accept_button_opens_confirmation_before_running_action() -> None
             interaction, 17, "accept", return_page=None
         )
         bot.accept_quest.assert_not_awaited()  # type: ignore[attr-defined]
+
+    asyncio.run(exercise())
+
+
+def test_public_cancel_button_opens_owner_checked_confirmation() -> None:
+    async def exercise() -> None:
+        bot = MinecraftDiscordBot(Config(discord_token="secret"))
+        bot.show_quest_action_confirmation = AsyncMock()  # type: ignore[method-assign]
+        interaction = Mock(spec=discord.Interaction)
+        button = next(
+            child
+            for child in QuestListingView(bot, 17).children
+            if child.custom_id == "mc-quest:cancel:17"
+        )
+
+        await button.callback(interaction)
+
+        bot.show_quest_action_confirmation.assert_awaited_once_with(  # type: ignore[attr-defined]
+            interaction, 17, "cancel", return_page=None
+        )
+
+    asyncio.run(exercise())
+
+
+def test_public_cancel_confirmation_rejects_a_non_owner() -> None:
+    async def exercise() -> None:
+        bot = MinecraftDiscordBot(Config(discord_token="secret"))
+        bot._quests.get = Mock(return_value=_quest(status="open", message_id=901))  # type: ignore[method-assign]
+        interaction = Mock(spec=discord.Interaction)
+        interaction.user.id = 2003
+        interaction.response.defer = AsyncMock()
+        interaction.followup.send = AsyncMock()
+
+        await bot.show_quest_action_confirmation(interaction, 17, "cancel")
+
+        interaction.response.defer.assert_awaited_once_with(ephemeral=True, thinking=True)
+        interaction.followup.send.assert_awaited_once_with(
+            "取り消せるのは募集中の自分の依頼だけです。",
+            ephemeral=True,
+        )
 
     asyncio.run(exercise())
 
@@ -485,7 +536,10 @@ def test_quest_recovery_skips_unchanged_edit_but_state_refresh_still_edits() -> 
     bot = MinecraftDiscordBot(Config(discord_token="secret"))
     bot._settings = RuntimeSettings(guild_id=1, quest_channel_id=2)
     quest = _quest(status="open", message_id=901)
-    message = FakeMessage(901)
+    message = FakeMessage(
+        901,
+        component_custom_ids={"mc-quest:accept:17", "mc-quest:cancel:17"},
+    )
     channel = FakeChannel(message)
     bot._quests.get = Mock(return_value=quest)  # type: ignore[method-assign]
     bot._resolve_and_validate_channel = AsyncMock(  # type: ignore[method-assign]
@@ -501,6 +555,28 @@ def test_quest_recovery_skips_unchanged_edit_but_state_refresh_still_edits() -> 
     asyncio.run(bot._refresh_quest_listing(17, move_panel=False))
 
     assert len(message.edits) == 1
+
+
+def test_quest_recovery_adds_cancel_button_to_a_legacy_open_card() -> None:
+    bot = MinecraftDiscordBot(Config(discord_token="secret"))
+    bot._settings = RuntimeSettings(guild_id=1, quest_channel_id=2)
+    quest = _quest(status="open", message_id=901)
+    message = FakeMessage(901, component_custom_ids={"mc-quest:accept:17"})
+    channel = FakeChannel(message)
+    bot._quests.get = Mock(return_value=quest)  # type: ignore[method-assign]
+    bot._resolve_and_validate_channel = AsyncMock(  # type: ignore[method-assign]
+        return_value=channel
+    )
+
+    asyncio.run(bot._refresh_quest_listing(17, move_panel=False, edit_existing=False))
+
+    assert len(message.edits) == 1
+    view = message.edits[0]["view"]
+    assert isinstance(view, QuestListingView)
+    assert {child.custom_id for child in view.children} == {
+        "mc-quest:accept:17",
+        "mc-quest:cancel:17",
+    }
 
 
 def test_accepted_quest_card_is_deleted_instead_of_left_on_board() -> None:
