@@ -223,6 +223,48 @@ def test_refresh_quest_panel_reuses_existing_message_on_restart(tmp_path) -> Non
     assert bot._settings.quest_panel_message_id == 800
 
 
+def test_quest_recovery_checks_existing_open_quest_without_editing() -> None:
+    bot = MinecraftDiscordBot(Config(discord_token="secret"))
+    quest = _quest(status="open", message_id=901)
+    bot._quests.list_nonopen_with_discord_message = Mock(  # type: ignore[method-assign]
+        return_value=[]
+    )
+    bot._quests.list_open = Mock(return_value=[quest])  # type: ignore[method-assign]
+    bot._refresh_quest_listing = AsyncMock()  # type: ignore[method-assign]
+    bot._deliver_quest_logs = AsyncMock()  # type: ignore[method-assign]
+
+    asyncio.run(bot._recover_quests())
+
+    bot._refresh_quest_listing.assert_awaited_once_with(  # type: ignore[attr-defined]
+        17,
+        move_panel=False,
+        edit_existing=False,
+    )
+    bot._deliver_quest_logs.assert_awaited_once()  # type: ignore[attr-defined]
+
+
+def test_quest_recovery_skips_unchanged_edit_but_state_refresh_still_edits() -> None:
+    bot = MinecraftDiscordBot(Config(discord_token="secret"))
+    bot._settings = RuntimeSettings(guild_id=1, quest_channel_id=2)
+    quest = _quest(status="open", message_id=901)
+    message = FakeMessage(901)
+    channel = FakeChannel(message)
+    bot._quests.get = Mock(return_value=quest)  # type: ignore[method-assign]
+    bot._resolve_and_validate_channel = AsyncMock(  # type: ignore[method-assign]
+        return_value=channel
+    )
+
+    asyncio.run(bot._refresh_quest_listing(17, move_panel=False, edit_existing=False))
+
+    assert not message.deleted
+    assert message.edits == []
+    assert channel.sent == []
+
+    asyncio.run(bot._refresh_quest_listing(17, move_panel=False))
+
+    assert len(message.edits) == 1
+
+
 def test_accepted_quest_card_is_deleted_instead_of_left_on_board() -> None:
     bot = MinecraftDiscordBot(Config(discord_token="secret"))
     bot._settings = RuntimeSettings(guild_id=1, quest_channel_id=2)

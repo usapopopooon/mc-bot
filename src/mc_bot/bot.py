@@ -2655,7 +2655,13 @@ class MinecraftDiscordBot(discord.Client):
             except (OSError, RuntimeError, discord.DiscordException) as error:
                 LOGGER.warning("Could not move market panel after a new listing: %s", error)
 
-    async def _refresh_market_listing(self, listing_id: int, *, move_panel: bool = True) -> None:
+    async def _refresh_market_listing(
+        self,
+        listing_id: int,
+        *,
+        move_panel: bool = True,
+        edit_existing: bool = True,
+    ) -> None:
         listing = await asyncio.to_thread(self._market.get, listing_id)
         channel_id = self._settings.market_channel_id
         if listing is None or channel_id is None:
@@ -2676,6 +2682,8 @@ class MinecraftDiscordBot(discord.Client):
                 await self._post_market_listing(listing, move_panel=move_panel)
                 return
             message = await channel.fetch_message(listing.discord_message_id)
+            if not edit_existing:
+                return
             await message.edit(
                 embed=market_listing_embed(listing),
                 view=MarketListingView(
@@ -2742,7 +2750,11 @@ class MinecraftDiscordBot(discord.Client):
                     if listing.discord_message_id is None:
                         await self._post_market_listing(listing)
                     else:
-                        await self._refresh_market_listing(listing.listing_id, move_panel=False)
+                        await self._refresh_market_listing(
+                            listing.listing_id,
+                            move_panel=False,
+                            edit_existing=False,
+                        )
                     continue
                 if listing.purchase_request_id is None:
                     continue
@@ -3233,7 +3245,13 @@ class MinecraftDiscordBot(discord.Client):
         if move_panel:
             await self._refresh_quest_panel(move_to_bottom=True)
 
-    async def _refresh_quest_listing(self, quest_id: int, *, move_panel: bool = True) -> None:
+    async def _refresh_quest_listing(
+        self,
+        quest_id: int,
+        *,
+        move_panel: bool = True,
+        edit_existing: bool = True,
+    ) -> None:
         quest = await asyncio.to_thread(self._quests.get, quest_id)
         if quest is None:
             return
@@ -3249,6 +3267,8 @@ class MinecraftDiscordBot(discord.Client):
         try:
             channel = await self._resolve_and_validate_channel(channel_id, require_embeds=True)
             message = await channel.fetch_message(quest.discord_message_id)
+            if not edit_existing:
+                return
             await message.edit(
                 embed=quest_listing_embed(quest),
                 view=QuestListingView(self, quest.quest_id),
@@ -3313,7 +3333,11 @@ class MinecraftDiscordBot(discord.Client):
                 LOGGER.exception("Could not remove inactive quest card quest=%d", quest.quest_id)
         for quest in await asyncio.to_thread(self._quests.list_open):
             try:
-                await self._refresh_quest_listing(quest.quest_id, move_panel=False)
+                await self._refresh_quest_listing(
+                    quest.quest_id,
+                    move_panel=False,
+                    edit_existing=False,
+                )
             except OSError, RuntimeError, discord.DiscordException:
                 LOGGER.exception("Could not restore open quest card quest=%d", quest.quest_id)
         await self._deliver_quest_logs()
