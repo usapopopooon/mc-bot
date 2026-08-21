@@ -126,6 +126,12 @@ from mc_bot.market_ui import (
     market_panel_embed,
     market_purchase_confirmation_embed,
 )
+from mc_bot.material_buyback import (
+    material_buyback_command,
+    material_buyback_release_command,
+    parse_material_buyback_release_result,
+    parse_material_buyback_result,
+)
 from mc_bot.player_count import (
     PLAYER_COUNT_CHANNEL_NAME,
     PLAYER_COUNT_DISABLED_STATUS,
@@ -2090,7 +2096,10 @@ class MinecraftDiscordBot(discord.Client):
         self,
         request: MinecraftExchangeRequest,
     ) -> None:
-        if self._fresh_game_request_time(request.requested_at) is None:
+        if (
+            request.kind != "material_buyback"
+            and self._fresh_game_request_time(request.requested_at) is None
+        ):
             await self._send_minecraft_private_message(
                 request.player_name,
                 "この交換要求は期限切れです。もう一度 /exchange を実行してください。",
@@ -2098,6 +2107,7 @@ class MinecraftDiscordBot(discord.Client):
             return
         guild_id = self._settings.guild_id
         if guild_id is None or self._rcon is None:
+            await self._release_material_buyback_if_needed(request)
             await self._send_minecraft_private_message(
                 request.player_name,
                 "交換所は現在準備中です。少し待ってからお試しください。",
@@ -2106,6 +2116,7 @@ class MinecraftDiscordBot(discord.Client):
         if request.kind != "emerald_diamond" and (
             not self._config.level_bot_api_url or not self._config.level_bot_api_token
         ):
+            await self._release_material_buyback_if_needed(request)
             await self._send_minecraft_private_message(
                 request.player_name,
                 "交換所は現在準備中です。少し待ってからお試しください。",
@@ -2123,12 +2134,14 @@ class MinecraftDiscordBot(discord.Client):
                 request.player_uuid,
                 error,
             )
+            await self._release_material_buyback_if_needed(request)
             await self._send_minecraft_private_message(
                 request.player_name,
                 "アカウント連携を安全に確認できませんでした。管理者へご連絡ください。",
             )
             return
         if account is None or account.status != "active" or account.discord_user_id is None:
+            await self._release_material_buyback_if_needed(request)
             await self._send_minecraft_private_message(
                 request.player_name,
                 "交換所の利用にはDiscordアカウントとの連携が必要です。",
@@ -2157,6 +2170,7 @@ class MinecraftDiscordBot(discord.Client):
                     request.player_uuid,
                     error,
                 )
+                await self._release_material_buyback_if_needed(request)
                 await self._send_minecraft_private_message(
                     request.player_name,
                     "現在のプレイヤー名を安全に確認できませんでした。管理者へご連絡ください。",
@@ -2189,6 +2203,14 @@ class MinecraftDiscordBot(discord.Client):
                 request,
                 guild_id=guild_id,
                 user_id=user_id,
+            )
+            return
+        if request.kind == "material_buyback":
+            await self._handle_minecraft_material_buyback_request(
+                request,
+                guild_id=guild_id,
+                user_id=user_id,
+                account_id=account.id,
             )
             return
         await self._handle_minecraft_emerald_exchange_request(request)
@@ -3630,6 +3652,162 @@ class MinecraftDiscordBot(discord.Client):
         await self._send_minecraft_private_message(
             request.player_name,
             messages[result.status],
+        )
+
+    async def _handle_minecraft_material_buyback_request(
+        self,
+        request: MinecraftExchangeRequest,
+        *,
+        guild_id: int,
+        user_id: int,
+        account_id: int,
+    ) -> None:
+        reservation = await self._level_bot_xp.request_material_buyback(
+            request_id=request.request_id,
+            guild_id=guild_id,
+            user_id=user_id,
+            account_id=account_id,
+            item_id=request.target,
+            item_count=request.amount,
+            expected_reward_xp=request.expected_reward,
+        )
+        if reservation is None:
+            raise RuntimeError("material buyback reservation could not be confirmed")
+        if reservation.status in {"daily_limit", "unavailable", "conflict"}:
+            await self._release_material_buyback_request(request)
+            await self._send_minecraft_private_message(
+                request.player_name,
+                reservation.message,
+            )
+            return
+        if (
+            reservation.request_id != request.request_id
+            or reservation.item_id != request.target
+            or reservation.item_count != request.amount
+            or reservation.reward_xp != request.expected_reward
+        ):
+            raise RuntimeError("level-bot returned an unbound material buyback reservation")
+        if reservation.status == "completed":
+            await self._release_material_buyback_request(request)
+            message = await self._material_buyback_success_message(
+                guild_id=guild_id,
+                user_id=user_id,
+                item_name=reservation.item_name,
+                item_count=reservation.item_count,
+                reward_xp=reservation.reward_xp,
+                daily_reserved_xp=reservation.daily_reserved_xp,
+                daily_limit_xp=reservation.daily_limit_xp,
+                duplicate=True,
+            )
+            await self._send_minecraft_private_message(
+                request.player_name,
+                message,
+            )
+            return
+
+        response = await self._execute_rcon(
+            material_buyback_command(
+                request.player_uuid,
+                request.target,
+                request.amount,
+                request.request_id,
+            )
+        )
+        result = parse_material_buyback_result(
+            response,
+            expected_request_id=request.request_id,
+            expected_item_id=request.target,
+            expected_item_count=request.amount,
+        )
+        if result.status == "completed":
+            if not await self._level_bot_xp.update_material_buyback(
+                request_id=request.request_id,
+                guild_id=guild_id,
+                user_id=user_id,
+                action="complete",
+            ):
+                raise RuntimeError("material buyback XP completion could not be confirmed")
+            await self._release_material_buyback_request(request)
+            message = await self._material_buyback_success_message(
+                guild_id=guild_id,
+                user_id=user_id,
+                item_name=reservation.item_name,
+                item_count=request.amount,
+                reward_xp=reservation.reward_xp,
+                daily_reserved_xp=reservation.daily_reserved_xp,
+                daily_limit_xp=reservation.daily_limit_xp,
+                duplicate=result.duplicate,
+            )
+            await self._send_minecraft_private_message(
+                request.player_name,
+                message,
+            )
+            return
+
+        if not await self._level_bot_xp.update_material_buyback(
+            request_id=request.request_id,
+            guild_id=guild_id,
+            user_id=user_id,
+            action="cancel",
+        ):
+            raise RuntimeError("material buyback cancellation could not be confirmed")
+        await self._release_material_buyback_request(request)
+        messages = {
+            "insufficient_items": (
+                f"通常の{reservation.item_name}が不足しています。"
+                "名前や特殊データのない資材を64個単位で入れてください。"
+            ),
+            "player_offline": "プレイヤーのオンライン状態を確認できませんでした。",
+            "storage_error": (
+                "資材の保存処理を完了できませんでした。アイテム数を確認し、"
+                "不明な場合は管理者へご連絡ください。"
+            ),
+        }
+        await self._send_minecraft_private_message(
+            request.player_name,
+            messages[result.status],
+        )
+
+    async def _release_material_buyback_if_needed(self, request: MinecraftExchangeRequest) -> None:
+        if request.kind == "material_buyback":
+            await self._release_material_buyback_request(request)
+
+    async def _release_material_buyback_request(self, request: MinecraftExchangeRequest) -> None:
+        response = await self._execute_rcon(
+            material_buyback_release_command(request.player_uuid, request.request_id)
+        )
+        parse_material_buyback_release_result(
+            response,
+            expected_player_uuid=request.player_uuid,
+            expected_request_id=request.request_id,
+        )
+
+    async def _material_buyback_success_message(
+        self,
+        *,
+        guild_id: int,
+        user_id: int,
+        item_name: str | None,
+        item_count: int,
+        reward_xp: int,
+        daily_reserved_xp: int,
+        daily_limit_xp: int,
+        duplicate: bool,
+    ) -> str:
+        if item_name is None:
+            raise RuntimeError("material buyback completion has no item name")
+        status = "買取完了（処理済み）" if duplicate else "買取完了"  # noqa: RUF001
+        message = f"{status}: 通常の{item_name} x{item_count:,} → +{reward_xp:,} サーバーXP"
+        shop = await self._level_bot_xp.fetch_xp_shop(guild_id, user_id)
+        if shop is not None:
+            message += f" / 現在 {shop.wallet.available_xp:,} サーバーXP"
+        else:
+            message += " / 現在の残高は /exchange balance で確認できます"
+        remaining = max(0, daily_limit_xp - daily_reserved_xp)
+        return (
+            message
+            + f" / 本日の残り買取枠 {remaining:,} サーバーXP。"
+            + "エメラルドは /exchange の「資源へ交換」から交換できます。"
         )
 
     @staticmethod
@@ -5844,6 +6022,19 @@ class MinecraftDiscordBot(discord.Client):
                 await asyncio.to_thread(self._tailer.acknowledge, pending_line)
                 continue
             if exchange_request is not None:
+                if exchange_request.kind == "material_buyback":
+                    processed = await self._retry_integration_log_operation(
+                        description=(
+                            f"material-buyback={exchange_request.request_id} "
+                            f"player_uuid={exchange_request.player_uuid}"
+                        ),
+                        operation=lambda request=exchange_request: (
+                            self._handle_minecraft_exchange_request(request)
+                        ),
+                    )
+                    if processed:
+                        await asyncio.to_thread(self._tailer.acknowledge, pending_line)
+                    continue
                 try:
                     await self._handle_minecraft_exchange_request(exchange_request)
                 except Exception:

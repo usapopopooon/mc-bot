@@ -102,15 +102,24 @@ def minecraft_resource_shop_embed(
                 f"`エメラルド x{emeralds}` → `ダイヤモンド x{diamonds}`"
                 for emeralds, diamonds in EMERALD_DIAMOND_PACKS
             )
+            + "\n\n**通常資材 → サーバーXP / ゲーム内**\n"
+            "`土 x64` → `30 サーバーXP` / `砂 x64` → `40 サーバーXP`\n"
+            "`砂岩 x64` → `50 サーバーXP` / `深層岩 x64` → `35 サーバーXP`\n"
+            "`深層岩の丸石 x64` → `35 サーバーXP` / "
+            "`凝灰岩 x64` → `40 サーバーXP`\n"
+            "1人1日 **1,500 サーバーXP** まで / 毎日0時・日本時間に更新\n"
+            "本日の残り枠は処理時に確認し、上限超過時は資材を回収しません。\n"
+            "獲得したサーバーXPは、同じ交換所の「資源へ交換」からエメラルドにも交換できます。"
         ),
         inline=False,
     )
     embed.add_field(
         name="🎮 ゲーム内コマンド",
         value=(
-            "スマホ版・Bedrock版: `/exchange` で交換メニューを開く\n"
+            "Java版・統合版: `/exchange` で交換メニューを開く\n"
             "XP→資源: `/exchange resource <diamond|emerald> <個数>`\n"
             "手持ち交換: `/exchange emerald-diamond <32|64>`\n"
+            "資材買取: 対象資材を持って `/exchange buyback <1|2|4|8|16|max|all>`\n"
             "XP残高: `/exchange balance`\n"
             "個数: diamondは `1|3|8|16|32|64`、emeraldは `4|16|32|64`"
         ),
@@ -127,8 +136,10 @@ def minecraft_resource_shop_embed(
     embed.add_field(
         name="📢 交換完了時の通知",
         value=(
-            "交換が完了すると、交換したことが**Discordのログチャンネル**と"
-            "**Minecraft内チャット**に通知されます。"
+            "XPから資源への交換と手持ちエメラルド交換は、完了すると"
+            "**Discordのログチャンネル**と**Minecraft内チャット**に通知されます。\n"
+            "資材買取の結果・現在のサーバーXP・当日の残り買取枠は、"
+            "Minecraft内で本人だけに表示されます。"
         ),
         inline=False,
     )

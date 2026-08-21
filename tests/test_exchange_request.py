@@ -31,6 +31,7 @@ def test_parses_confirmed_resource_exchange_request() -> None:
         "xp|minecraft:experience|500|100|500",
         "resource|minecraft:emerald|16|360|16",
         "emerald_diamond|minecraft:diamond|64|0|2",
+        "material_buyback|minecraft:sandstone|256|0|200",
     ],
 )
 def test_accepts_each_exchange_kind(selection: str) -> None:
@@ -69,6 +70,9 @@ def test_accepts_safe_star_floodgate_prefix() -> None:
         "emerald_diamond|minecraft:diamond|16|0|1",
         "emerald_diamond|minecraft:diamond|32|100|1",
         "unknown|balance|0|0|0",
+        "material_buyback|minecraft:diamond|64|0|30",
+        "material_buyback|minecraft:dirt|63|0|30",
+        "material_buyback|minecraft:dirt|64|1|30",
     ],
 )
 def test_rejects_tampered_exchange_selection(selection: str) -> None:

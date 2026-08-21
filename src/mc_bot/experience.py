@@ -5,6 +5,7 @@ import logging
 import re
 import uuid
 from dataclasses import dataclass
+from datetime import date
 
 import aiohttp
 
@@ -27,6 +28,14 @@ _QUERY_RESULT = re.compile(r"\bhas\s+(\d+)\s+experience\s+(levels?|points?)\b", 
 _RESOURCE_ITEM_NAMES = {
     "minecraft:diamond": "ダイヤモンド",
     "minecraft:emerald": "エメラルド",
+}
+_MATERIAL_BUYBACK_RATES = {
+    "minecraft:dirt": ("土", 30),
+    "minecraft:sand": ("砂", 40),
+    "minecraft:sandstone": ("砂岩", 50),
+    "minecraft:deepslate": ("深層岩", 35),
+    "minecraft:cobbled_deepslate": ("深層岩の丸石", 35),
+    "minecraft:tuff": ("凝灰岩", 40),
 }
 
 
@@ -150,6 +159,21 @@ class MinecraftMarketPurchaseRequest:
     request_id: str | None
     wallet_before: MinecraftXpWallet
     wallet_after: MinecraftXpWallet
+    duplicate: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class MinecraftMaterialBuybackRequest:
+    status: str
+    message: str
+    request_id: str | None
+    item_id: str | None
+    item_name: str | None
+    item_count: int
+    reward_xp: int
+    reward_day: str
+    daily_reserved_xp: int
+    daily_limit_xp: int
     duplicate: bool = False
 
 
@@ -706,6 +730,109 @@ class LevelBotXpClient:
                 )
         except (aiohttp.ClientError, TimeoutError) as error:
             LOGGER.warning("Could not %s market purchase: %s", action, error)
+        return False
+
+    async def request_material_buyback(
+        self,
+        *,
+        request_id: str,
+        guild_id: int,
+        user_id: int,
+        account_id: int,
+        item_id: str,
+        item_count: int,
+        expected_reward_xp: int,
+    ) -> MinecraftMaterialBuybackRequest | None:
+        if not self._token:
+            return None
+        session = self._require_session()
+        try:
+            async with session.post(
+                f"{self._base_url}/api/v1/integrations/minecraft/material-buybacks",
+                headers={"Authorization": f"Bearer {self._token}"},
+                json={
+                    "request_id": request_id,
+                    "guild_id": str(guild_id),
+                    "user_id": str(user_id),
+                    "minecraft_account_id": f"mc-bot:{account_id}",
+                    "item_id": item_id,
+                    "item_count": item_count,
+                    "expected_reward_xp": expected_reward_xp,
+                },
+            ) as response:
+                if response.status not in {200, 409}:
+                    body = await response.text()
+                    LOGGER.warning(
+                        "level-bot material buyback rejected status=%d body=%s",
+                        response.status,
+                        body[:300],
+                    )
+                    return None
+                result = self._parse_material_buyback_request(await response.json())
+                if response.status == 200:
+                    return result
+                normalized_request_id = str(uuid.UUID(request_id))
+                if result.status == "conflict" and not result.duplicate:
+                    return result
+                if (
+                    result.status in {"reserved", "completed"}
+                    and result.duplicate
+                    and result.request_id == normalized_request_id
+                ):
+                    LOGGER.info(
+                        "level-bot reports material buyback already %s request=%s",
+                        result.status,
+                        normalized_request_id,
+                    )
+                    return result
+                LOGGER.warning(
+                    "level-bot returned invalid material buyback conflict request=%s "
+                    "status=%s duplicate=%s response_request=%s",
+                    normalized_request_id,
+                    result.status,
+                    result.duplicate,
+                    result.request_id,
+                )
+                return None
+        except (
+            aiohttp.ClientError,
+            TimeoutError,
+            KeyError,
+            TypeError,
+            ValueError,
+        ) as error:
+            LOGGER.warning("Could not request material buyback from level-bot: %s", error)
+            return None
+
+    async def update_material_buyback(
+        self,
+        *,
+        request_id: str,
+        guild_id: int,
+        user_id: int,
+        action: str,
+    ) -> bool:
+        if action not in {"complete", "cancel"} or not self._token:
+            return False
+        session = self._require_session()
+        try:
+            async with session.post(
+                f"{self._base_url}/api/v1/integrations/minecraft/material-buybacks/"
+                f"{request_id}/{action}",
+                headers={"Authorization": f"Bearer {self._token}"},
+                json={"guild_id": str(guild_id), "user_id": str(user_id)},
+            ) as response:
+                if response.status == 204:
+                    return True
+                body = await response.text()
+                LOGGER.warning(
+                    "level-bot material buyback %s rejected status=%d body=%s",
+                    action,
+                    response.status,
+                    body[:300],
+                )
+        except (aiohttp.ClientError, TimeoutError) as error:
+            LOGGER.warning("Could not %s material buyback: %s", action, error)
         return False
 
     async def fetch_resource_shop(
@@ -1278,5 +1405,70 @@ class LevelBotXpClient:
             request_id=normalized_request,
             wallet_before=cls._parse_wallet(item["wallet_before"]),
             wallet_after=cls._parse_wallet(item["wallet_after"]),
+            duplicate=duplicate,
+        )
+
+    @staticmethod
+    def _parse_material_buyback_request(item: object) -> MinecraftMaterialBuybackRequest:
+        if not isinstance(item, dict):
+            raise ValueError("material buyback must be an object")
+        status = str(item["status"])
+        if status not in {
+            "reserved",
+            "completed",
+            "daily_limit",
+            "unavailable",
+            "conflict",
+        }:
+            raise ValueError("material buyback has invalid status")
+        duplicate = item.get("duplicate", False)
+        if not isinstance(duplicate, bool):
+            raise ValueError("material buyback has invalid duplicate flag")
+        request_id_value = item.get("request_id")
+        request_id = str(uuid.UUID(str(request_id_value))) if request_id_value is not None else None
+        item_id_value = item.get("item_id")
+        item_id = str(item_id_value) if item_id_value is not None else None
+        item_name_value = item.get("item_name")
+        item_name = str(item_name_value) if item_name_value is not None else None
+        item_count = int(item["item_count"])
+        reward_xp = int(item["reward_xp"])
+        daily_reserved_xp = int(item["daily_reserved_xp"])
+        daily_limit_xp = int(item["daily_limit_xp"])
+        reward_day = date.fromisoformat(str(item["reward_day"])).isoformat()
+        expected_rate = _MATERIAL_BUYBACK_RATES.get(item_id or "")
+        item_present = expected_rate is not None
+        if (
+            item_count < 0
+            or reward_xp < 0
+            or daily_reserved_xp < 0
+            or daily_limit_xp <= 0
+            or (item_id is None) != (item_name is None)
+            or (item_present and item_name != expected_rate[0])
+            or (item_id is not None and not item_present)
+            or (
+                item_present
+                and (
+                    not 64 <= item_count <= 2_304
+                    or item_count % 64 != 0
+                    or reward_xp != item_count // 64 * expected_rate[1]
+                )
+            )
+            or (status in {"reserved", "completed"} and (request_id is None or not item_present))
+            or (status in {"daily_limit", "unavailable", "conflict"} and request_id is not None)
+            or (status in {"unavailable", "conflict"} and item_id is not None)
+            or (duplicate and status not in {"reserved", "completed"})
+        ):
+            raise ValueError("material buyback contains invalid values")
+        return MinecraftMaterialBuybackRequest(
+            status=status,
+            message=str(item["message"]),
+            request_id=request_id,
+            item_id=item_id,
+            item_name=item_name,
+            item_count=item_count,
+            reward_xp=reward_xp,
+            reward_day=reward_day,
+            daily_reserved_xp=daily_reserved_xp,
+            daily_limit_xp=daily_limit_xp,
             duplicate=duplicate,
         )

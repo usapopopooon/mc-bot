@@ -1,11 +1,12 @@
 import asyncio
 import base64
 from datetime import UTC, datetime
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 from mc_bot.bot import MinecraftDiscordBot
 from mc_bot.config import Config
 from mc_bot.experience import (
+    MinecraftMaterialBuybackRequest,
     MinecraftResourceExchangeRequest,
     MinecraftResourcePack,
     MinecraftResourceShop,
@@ -34,8 +35,10 @@ class LineTailer:
 
 
 class ExchangeRcon:
-    def __init__(self) -> None:
+    def __init__(self, *, release_status: str | None = None) -> None:
         self.commands: list[str] = []
+        self.released_buybacks: set[str] = set()
+        self.release_status = release_status
 
     def execute(self, command: str) -> str:
         self.commands.append(command)
@@ -44,6 +47,24 @@ class ExchangeRcon:
         if command.startswith("usapo-event-bridge emerald-diamond-v2 "):
             request_id = command.rsplit(" ", 1)[1]
             return f"USAPO_EMERALD_EXCHANGE_RESULT|2|{request_id}|completed|64|2|new"
+        if command.startswith("usapo-event-bridge material-buyback "):
+            _, _, player_uuid, item_id, item_count, request_id = command.split()
+            assert player_uuid == PLAYER_UUID
+            buyback_attempts = sum(
+                item.startswith("usapo-event-bridge material-buyback ") for item in self.commands
+            )
+            disposition = "duplicate" if buyback_attempts > 1 else "new"
+            return (
+                f"USAPO_MATERIAL_BUYBACK_RESULT|1|{request_id}|completed|"
+                f"{item_id}|{item_count}|{disposition}"
+            )
+        if command.startswith("usapo-event-bridge material-buyback-release "):
+            _, _, player_uuid, request_id = command.split()
+            status = self.release_status or (
+                "not_pending" if request_id in self.released_buybacks else "released"
+            )
+            self.released_buybacks.add(request_id)
+            return f"USAPO_MATERIAL_BUYBACK_RELEASE_RESULT|1|{request_id}|{player_uuid}|{status}"
         raise AssertionError(f"unexpected RCON command: {command}")
 
 
@@ -128,6 +149,23 @@ def _bot(tmp_path, *, linked: bool = True) -> MinecraftDiscordBot:
             wallet_after=MinecraftXpWallet(50_000, 3_160, 46_840),
             pack=MinecraftResourcePack("minecraft:diamond", "ダイヤモンド", 3, 2_160),
         )
+    )
+    bot._level_bot_xp.request_material_buyback = AsyncMock(  # type: ignore[method-assign]
+        return_value=MinecraftMaterialBuybackRequest(
+            status="reserved",
+            message="砂岩の買取を受け付けました。",
+            request_id="55555555-5555-4555-8555-555555555555",
+            item_id="minecraft:sandstone",
+            item_name="砂岩",
+            item_count=256,
+            reward_xp=200,
+            reward_day="2026-08-21",
+            daily_reserved_xp=200,
+            daily_limit_xp=1_500,
+        )
+    )
+    bot._level_bot_xp.update_material_buyback = AsyncMock(  # type: ignore[method-assign]
+        return_value=True
     )
     return bot
 
@@ -298,3 +336,174 @@ def test_game_exchange_updates_current_name_by_uuid_before_async_delivery(tmp_pa
     assert isinstance(rcon, ExchangeRcon)
     assert len(rcon.commands) == 1
     assert rcon.commands[0].startswith("tellraw Alex ")
+
+
+def test_material_buyback_wires_account_item_count_and_xp_before_acknowledging(tmp_path) -> None:
+    bot = _bot(tmp_path)
+    request_id = "55555555-5555-4555-8555-555555555555"
+    line = _line(
+        500,
+        request_id=request_id,
+        selection="material_buyback|minecraft:sandstone|256|0|200",
+    )
+    tailer = LineTailer([line])
+    bot._tailer = tailer  # type: ignore[assignment]
+
+    asyncio.run(bot._forward_logs())
+
+    assert tailer.acknowledged == [line]
+    bot._level_bot_xp.request_material_buyback.assert_awaited_once_with(  # type: ignore[attr-defined]
+        request_id=request_id,
+        guild_id=456,
+        user_id=123,
+        account_id=1,
+        item_id="minecraft:sandstone",
+        item_count=256,
+        expected_reward_xp=200,
+    )
+    bot._level_bot_xp.update_material_buyback.assert_awaited_once_with(  # type: ignore[attr-defined]
+        request_id=request_id,
+        guild_id=456,
+        user_id=123,
+        action="complete",
+    )
+    rcon = bot._rcon
+    assert isinstance(rcon, ExchangeRcon)
+    assert rcon.commands[0] == (
+        f"usapo-event-bridge material-buyback {PLAYER_UUID} minecraft:sandstone 256 {request_id}"
+    )
+    assert rcon.commands[1] == (
+        f"usapo-event-bridge material-buyback-release {PLAYER_UUID} {request_id}"
+    )
+    assert "買取完了: 通常の砂岩 x256 → +200 サーバーXP" in rcon.commands[2]
+    assert "現在 49,000 サーバーXP" in rcon.commands[2]
+    assert "本日の残り買取枠 1,300 サーバーXP" in rcon.commands[2]
+    assert "「資源へ交換」から交換" in rcon.commands[2]
+
+
+def test_material_buyback_retries_completion_without_double_removal(tmp_path) -> None:
+    bot = _bot(tmp_path)
+    request_id = "55555555-5555-4555-8555-555555555555"
+    line = _line(
+        500,
+        request_id=request_id,
+        selection="material_buyback|minecraft:sandstone|256|0|200",
+    )
+    tailer = LineTailer([line])
+    bot._tailer = tailer  # type: ignore[assignment]
+    bot._level_bot_xp.update_material_buyback = AsyncMock(  # type: ignore[method-assign]
+        side_effect=[False, True]
+    )
+
+    with patch("mc_bot.bot.asyncio.sleep", new=AsyncMock()):
+        asyncio.run(bot._forward_logs())
+
+    assert tailer.acknowledged == [line]
+    assert bot._level_bot_xp.request_material_buyback.await_count == 2  # type: ignore[attr-defined]
+    assert bot._level_bot_xp.update_material_buyback.await_count == 2  # type: ignore[attr-defined]
+    rcon = bot._rcon
+    assert isinstance(rcon, ExchangeRcon)
+    item_commands = [
+        command
+        for command in rcon.commands
+        if command.startswith("usapo-event-bridge material-buyback ")
+    ]
+    assert len(item_commands) == 2
+    release_commands = [
+        command
+        for command in rcon.commands
+        if command.startswith("usapo-event-bridge material-buyback-release ")
+    ]
+    assert len(release_commands) == 1
+    assert "買取完了（処理済み）: 通常の砂岩 x256" in rcon.commands[-1]  # noqa: RUF001
+
+
+def test_material_buyback_resumes_after_delay_instead_of_leaving_a_reserved_slot(
+    tmp_path,
+) -> None:
+    bot = _bot(tmp_path)
+    request_id = "55555555-5555-4555-8555-555555555555"
+    line = _line(
+        500,
+        request_id=request_id,
+        selection="material_buyback|minecraft:sandstone|256|0|200",
+        requested_at_ms=int(datetime.now(UTC).timestamp() * 1_000) - 600_000,
+    )
+    tailer = LineTailer([line])
+    bot._tailer = tailer  # type: ignore[assignment]
+
+    asyncio.run(bot._forward_logs())
+
+    assert tailer.acknowledged == [line]
+    bot._level_bot_xp.request_material_buyback.assert_awaited_once()  # type: ignore[attr-defined]
+    bot._level_bot_xp.update_material_buyback.assert_awaited_once()  # type: ignore[attr-defined]
+    rcon = bot._rcon
+    assert isinstance(rcon, ExchangeRcon)
+    assert rcon.commands[0].startswith("usapo-event-bridge material-buyback ")
+    assert rcon.commands[1].startswith("usapo-event-bridge material-buyback-release ")
+
+
+def test_material_buyback_daily_limit_releases_pending_request_without_item_removal(
+    tmp_path,
+) -> None:
+    bot = _bot(tmp_path)
+    request_id = "55555555-5555-4555-8555-555555555555"
+    bot._level_bot_xp.request_material_buyback = AsyncMock(  # type: ignore[method-assign]
+        return_value=MinecraftMaterialBuybackRequest(
+            status="daily_limit",
+            message="本日の残り買取枠は 20 サーバーXPです。",
+            request_id=None,
+            item_id="minecraft:sandstone",
+            item_name="砂岩",
+            item_count=256,
+            reward_xp=200,
+            reward_day="2026-08-21",
+            daily_reserved_xp=1_480,
+            daily_limit_xp=1_500,
+        )
+    )
+    line = _line(
+        500,
+        request_id=request_id,
+        selection="material_buyback|minecraft:sandstone|256|0|200",
+    )
+    tailer = LineTailer([line])
+    bot._tailer = tailer  # type: ignore[assignment]
+
+    asyncio.run(bot._forward_logs())
+
+    assert tailer.acknowledged == [line]
+    bot._level_bot_xp.update_material_buyback.assert_not_awaited()  # type: ignore[attr-defined]
+    rcon = bot._rcon
+    assert isinstance(rcon, ExchangeRcon)
+    assert rcon.commands[0] == (
+        f"usapo-event-bridge material-buyback-release {PLAYER_UUID} {request_id}"
+    )
+    assert all(
+        not command.startswith("usapo-event-bridge material-buyback ") for command in rcon.commands
+    )
+    assert "残り買取枠は 20 サーバーXP" in rcon.commands[1]
+
+
+def test_unlinked_old_buyback_does_not_stall_when_a_new_request_is_pending(tmp_path) -> None:
+    bot = _bot(tmp_path, linked=False)
+    bot._rcon = ExchangeRcon(release_status="request_mismatch")  # type: ignore[assignment]
+    request_id = "55555555-5555-4555-8555-555555555555"
+    line = _line(
+        500,
+        request_id=request_id,
+        selection="material_buyback|minecraft:sandstone|256|0|200",
+    )
+    tailer = LineTailer([line])
+    bot._tailer = tailer  # type: ignore[assignment]
+
+    asyncio.run(bot._forward_logs())
+
+    assert tailer.acknowledged == [line]
+    bot._level_bot_xp.request_material_buyback.assert_not_awaited()  # type: ignore[attr-defined]
+    rcon = bot._rcon
+    assert isinstance(rcon, ExchangeRcon)
+    assert rcon.commands[0] == (
+        f"usapo-event-bridge material-buyback-release {PLAYER_UUID} {request_id}"
+    )
+    assert "Discordアカウントとの連携" in rcon.commands[1]
