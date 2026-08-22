@@ -1281,7 +1281,7 @@ def test_allows_same_discord_user_to_restore_missing_uuid_registration(tmp_path)
     assert restored.status == "pending_add"
 
 
-def test_reconciles_database_statuses_with_actual_whitelist(tmp_path) -> None:
+def test_reconciles_access_without_skipping_pending_removal_cleanup(tmp_path) -> None:
     store = AccountStore(tmp_path / "accounts.db")
     store.initialize()
     managed_missing = store.create_registration(
@@ -1319,11 +1319,11 @@ def test_reconciles_database_statuses_with_actual_whitelist(tmp_path) -> None:
 
     changes = store.reconcile_whitelist(["Added"])
 
-    assert changes == (1, 1, 1)
+    assert changes == (1, 1, 0)
     assert store.get(managed_missing.id).status == "pending_add"  # type: ignore[union-attr]
     assert store.get(completed_add.id).status == "active"  # type: ignore[union-attr]
-    assert store.get(completed_remove.id).status == "missing"  # type: ignore[union-attr]
-    assert store.count_summary()[0] == 2
+    assert store.get(completed_remove.id).status == "pending_remove"  # type: ignore[union-attr]
+    assert store.count_summary()[0] == 3
 
 
 def test_preserves_removed_protected_whitelist_registration(tmp_path) -> None:

@@ -242,6 +242,18 @@ class MarketStore:
             ).fetchall()
         return [_listing(row) for row in rows]
 
+    def list_revoke_pending_for_seller(self, seller_account_id: int) -> list[MarketListing]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM minecraft_market_listings
+                WHERE seller_account_id = ? AND status IN ('active', 'reserved', 'cancelling')
+                ORDER BY listing_id
+                """,
+                (seller_account_id,),
+            ).fetchall()
+        return [_listing(row) for row in rows]
+
     def list_sold_with_discord_message(self) -> list[MarketListing]:
         with self._connect() as connection:
             rows = connection.execute(
@@ -465,7 +477,7 @@ class MarketStore:
 def market_transfer_command(
     action: str, listing_id: int, recipient_uuid: str, request_id: str
 ) -> str:
-    if action not in {"deliver", "return"} or listing_id <= 0:
+    if action not in {"deliver", "return", "mailbox-return"} or listing_id <= 0:
         raise ValueError("invalid market transfer")
     recipient = str(uuid.UUID(recipient_uuid))
     request = str(uuid.UUID(request_id))

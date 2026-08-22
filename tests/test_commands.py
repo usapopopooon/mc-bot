@@ -223,7 +223,7 @@ def test_account_owner_can_manually_retry_exhausted_whitelist_removal() -> None:
         interaction.response.defer.assert_awaited_once_with()
         bot._remove_from_whitelist.assert_awaited_once_with(account)
         response = interaction.edit_original_response.await_args.kwargs
-        assert "Whitelist解除を再試行し、完了" in response["content"]
+        assert "参加登録解除と取引整理を再試行し、完了" in response["content"]
         assert response["view"] is None
 
     asyncio.run(exercise())
@@ -264,7 +264,7 @@ def test_failed_manual_removal_retry_starts_a_new_bounded_retry_cycle() -> None:
 
         bot._accounts.update_status.assert_called_once_with(account.id, "pending_remove")
         response = interaction.edit_original_response.await_args.kwargs
-        assert "解除を再試行しましたが、反映できませんでした" in response["content"]
+        assert "解除処理を再試行しましたが、取引整理まで完了できませんでした" in response["content"]
         assert f"最大{WHITELIST_RETRY_LIMIT}回" in response["content"]
 
     asyncio.run(exercise())

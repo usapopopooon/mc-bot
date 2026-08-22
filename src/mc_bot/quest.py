@@ -357,6 +357,12 @@ class QuestStore:
             (user_id, user_id),
         )
 
+    def list_active_for_account(self, account_id: int) -> list[Quest]:
+        return self._list(
+            "status IN ('open', 'accepted') AND (owner_account_id = ? OR worker_account_id = ?)",
+            (account_id, account_id),
+        )
+
     def list_terminal_unnotified(self) -> list[Quest]:
         return self._list("status IN ('completed', 'cancelled') AND discord_log_notified = 0", ())
 

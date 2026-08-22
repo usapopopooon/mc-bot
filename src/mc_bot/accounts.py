@@ -1276,8 +1276,9 @@ class AccountStore:
                     new_status = "active"
                     completed_adds += 1
                 elif row["status"] == "pending_remove" and not is_present:
-                    new_status = "missing"
-                    completed_removals += 1
+                    # Whitelistが消えただけでは、フリマ・クエストの退会整理が完了したとは
+                    # 限らない。bot._remove_from_whitelist が整理を確認してから missing にする。
+                    continue
                 if new_status is not None:
                     connection.execute(
                         """

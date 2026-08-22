@@ -42,6 +42,9 @@ class MarketRcon:
         if command.startswith("usapo-event-bridge market-return "):
             fields = command.split()
             return f"USAPO_MARKET_TRANSFER_RESULT|1|{fields[4]}|{fields[2]}|completed|cancelled|new"
+        if command.startswith("usapo-event-bridge market-mailbox-return "):
+            fields = command.split()
+            return f"USAPO_MARKET_TRANSFER_RESULT|1|{fields[4]}|{fields[2]}|completed|cancelled|new"
         if command.startswith("tellraw @a "):
             return ""
         if command.startswith("tellraw Buyer "):
@@ -190,6 +193,103 @@ def test_game_market_wires_listing_buyer_seller_price_and_delivery(tmp_path) -> 
     assert listing.discord_purchase_notified
     assert any("残りのサーバーXPは 2,000 XP" in command for command in rcon.commands)
     assert any("現在のサーバーXP: 2,000 XP" in command for command in rcon.commands)
+
+
+def test_unlinked_listing_is_cancelled_to_persistent_mailbox(tmp_path) -> None:
+    bot = MinecraftDiscordBot(
+        Config(
+            discord_token="test",
+            accounts_path=tmp_path / "accounts.db",
+            rcon_password="test",
+        )
+    )
+    bot._accounts.initialize()
+    bot._market.initialize()
+    rcon = MarketRcon()
+    bot._rcon = rcon  # type: ignore[assignment]
+    bot._send_minecraft_private_message = AsyncMock()  # type: ignore[method-assign]
+    milliseconds = int(datetime.now(UTC).timestamp() * 1_000)
+    line = _line(
+        100,
+        f"USAPO_MARKET_LISTING|1|{LISTING_EVENT_ID}|17|{SELLER_UUID}|"
+        f"{_encode('Seller')}|{_encode('minecraft:diamond')}|"
+        f"{_encode('ダイヤモンド')}|3|500|{milliseconds}",
+    )
+    tailer = LineTailer([line])
+    bot._tailer = tailer  # type: ignore[assignment]
+
+    asyncio.run(bot._forward_logs())
+
+    assert tailer.acknowledged == [line]
+    assert bot._market.get(17) is None
+    assert (
+        f"usapo-event-bridge market-mailbox-return 17 {SELLER_UUID} {LISTING_EVENT_ID}"
+        in rcon.commands
+    )
+    bot._send_minecraft_private_message.assert_awaited_once_with(  # type: ignore[attr-defined]
+        "Seller",
+        "マーケット利用にはDiscordアカウント連携が必要です。"
+        "出品アイテムはフリマ返却受取箱へ移しました。",
+    )
+
+
+def test_terminal_listing_log_replay_does_not_start_a_second_return(tmp_path) -> None:
+    bot = MinecraftDiscordBot(
+        Config(
+            discord_token="test",
+            accounts_path=tmp_path / "accounts.db",
+            rcon_password="test",
+        )
+    )
+    bot._accounts.initialize()
+    bot._market.initialize()
+    seller = bot._accounts.create_registration(
+        edition="java",
+        minecraft_name="Seller",
+        server_player_name="Seller",
+        discord_user_id=2002,
+        discord_username="seller",
+        source="self",
+        status="active",
+        created_by=2002,
+        player_uuid=SELLER_UUID,
+    )
+    bot._market.add_listing(
+        listing_id=17,
+        event_id=LISTING_EVENT_ID,
+        seller_account_id=seller.id,
+        seller_discord_user_id=2002,
+        seller_uuid=SELLER_UUID,
+        seller_name="Seller",
+        item_id="minecraft:diamond",
+        item_name="ダイヤモンド",
+        item_count=3,
+        price_xp=500,
+        created_at="2026-08-23T00:00:00+00:00",
+    )
+    assert bot._market.begin_cancel(
+        listing_id=17,
+        seller_account_id=seller.id,
+        request_id=CANCEL_ID,
+    )
+    assert bot._market.set_status(17, CANCEL_ID, "cancelled")
+    bot._accounts.update_status(seller.id, "missing")
+    rcon = MarketRcon()
+    bot._rcon = rcon  # type: ignore[assignment]
+    milliseconds = int(datetime.now(UTC).timestamp() * 1_000)
+    line = _line(
+        100,
+        f"USAPO_MARKET_LISTING|1|{LISTING_EVENT_ID}|17|{SELLER_UUID}|"
+        f"{_encode('Seller')}|{_encode('minecraft:diamond')}|"
+        f"{_encode('ダイヤモンド')}|3|500|{milliseconds}",
+    )
+    tailer = LineTailer([line])
+    bot._tailer = tailer  # type: ignore[assignment]
+
+    asyncio.run(bot._forward_logs())
+
+    assert tailer.acknowledged == [line]
+    assert rcon.commands == []
 
 
 def test_game_market_keeps_xp_reserved_when_delivery_was_recorded_but_save_failed(

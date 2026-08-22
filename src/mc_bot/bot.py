@@ -269,6 +269,7 @@ _VOICE_BONUS_NOTIFICATION_COOLDOWN_SECONDS = 60.0
 _GAME_REQUEST_MAX_AGE = timedelta(minutes=5)
 _GAME_REQUEST_CLOCK_SKEW = timedelta(minutes=1)
 _MARKET_RECOVERY_INTERVAL_SECONDS = 30.0
+_ACCOUNT_EXCHANGE_CLEANUP_NAMESPACE = uuid.UUID("8135ade1-5c63-4d8a-955b-9ecb73ada3ad")
 
 
 @dataclass(frozen=True, slots=True)
@@ -2453,18 +2454,41 @@ class MinecraftDiscordBot(discord.Client):
             )
             account = None
         if account is None or account.status != "active" or account.discord_user_id is None:
+            existing = await asyncio.to_thread(self._market.get, event.listing_id)
+            if existing is not None:
+                same_listing = (
+                    existing.event_id == event.event_id
+                    and existing.seller_uuid == event.seller_uuid
+                    and existing.item_id == event.item_id
+                    and existing.item_count == event.item_count
+                    and existing.price_xp == event.price_xp
+                )
+                if not same_listing:
+                    raise RuntimeError("unlinked market listing conflicts with local state")
+                if existing.status in {"sold", "cancelled"}:
+                    # 取引確定後、ログACK直前に停止したケース。異なる返却IDを送ると、
+                    # 正常に終わった取引を未確定として延々再処理してしまう。
+                    return
+            return_request_id = event.event_id
+            if account is not None:
+                return_request_id = str(
+                    uuid.uuid5(
+                        _ACCOUNT_EXCHANGE_CLEANUP_NAMESPACE,
+                        f"account:{account.id}:market:{event.listing_id}",
+                    )
+                )
             try:
                 response = await self._execute_rcon(
                     market_transfer_command(
-                        "return",
+                        "mailbox-return",
                         event.listing_id,
                         event.seller_uuid,
-                        event.event_id,
+                        return_request_id,
                     )
                 )
                 transfer = parse_market_transfer_result(
                     response,
-                    request_id=event.event_id,
+                    request_id=return_request_id,
                     listing_id=event.listing_id,
                 )
             except (OSError, RconError, RuntimeError, ValueError) as error:
@@ -2481,7 +2505,8 @@ class MinecraftDiscordBot(discord.Client):
                 )
             await self._send_minecraft_private_message(
                 event.seller_name,
-                "マーケット利用にはDiscordアカウント連携が必要です。出品アイテムを返却しました。",
+                "マーケット利用にはDiscordアカウント連携が必要です。"
+                "出品アイテムはフリマ返却受取箱へ移しました。",
             )
             return
         listing, created = await asyncio.to_thread(
@@ -3638,8 +3663,9 @@ class MinecraftDiscordBot(discord.Client):
         player_uuid: str,
         *,
         player_name: str | None = None,
+        request_id: str | None = None,
     ):
-        request_id = str(uuid.uuid4())
+        effective_request_id = request_id or str(uuid.uuid4())
         try:
             async with self._quest_lock:
                 response = await self._execute_rcon(
@@ -3647,13 +3673,13 @@ class MinecraftDiscordBot(discord.Client):
                         action,
                         quest.quest_id,
                         player_uuid,
-                        request_id,
+                        effective_request_id,
                         player_name=player_name,
                     )
                 )
                 return parse_quest_action_result(
                     response,
-                    request_id=request_id,
+                    request_id=effective_request_id,
                     quest_id=quest.quest_id,
                 )
         except (OSError, RconError, RuntimeError, ValueError) as error:
@@ -3661,7 +3687,7 @@ class MinecraftDiscordBot(discord.Client):
                 "Quest action is ambiguous quest=%d action=%s request=%s: %s",
                 quest.quest_id,
                 action,
-                request_id,
+                effective_request_id,
                 error,
             )
             return None
@@ -5268,9 +5294,9 @@ class MinecraftDiscordBot(discord.Client):
             await interaction.edit_original_response(
                 content=(
                     (
-                        "Whitelistからの解除を再試行しましたが、反映できませんでした: "
+                        "参加登録の解除処理を再試行しましたが、取引整理まで完了できませんでした: "
                         if retrying_removal
-                        else "解除を保存しましたが、Minecraftへの反映待ちです: "
+                        else "解除を保存しました。Whitelist解除または取引整理の反映待ちです: "
                     )
                     + f"{error}\n"
                     f"最大{WHITELIST_RETRY_LIMIT}回で自動再試行を停止します。"
@@ -5282,9 +5308,9 @@ class MinecraftDiscordBot(discord.Client):
             content=(
                 f"**{discord.utils.escape_markdown(account.minecraft_name)}** の"
                 + (
-                    "Whitelist解除を再試行し、完了しました。"
+                    "参加登録解除と取引整理を再試行し、完了しました。"
                     if retrying_removal
-                    else "参加登録を解除しました。"
+                    else "参加登録を解除し、フリマ・クエストを整理しました。"
                 )
             ),
             view=None,
@@ -6058,7 +6084,161 @@ class MinecraftDiscordBot(discord.Client):
                 "Skipped kick because the current player name could not be verified for UUID %s",
                 player_uuid,
             )
+        await self._revoke_account_exchange_state(account, player_uuid=player_uuid)
         await asyncio.to_thread(self._accounts.update_status, account.id, "missing")
+
+    async def _revoke_account_exchange_state(
+        self, account: MinecraftAccount, *, player_uuid: str
+    ) -> None:
+        await asyncio.to_thread(self._market.initialize)
+        await asyncio.to_thread(self._quests.initialize)
+        await self._settle_departing_seller_reservations(account)
+        await self._return_departing_seller_listings(account)
+        quests = await asyncio.to_thread(self._quests.list_active_for_account, account.id)
+        for quest in quests:
+            if quest.owner_account_id == account.id:
+                action = "invalidate"
+                actor_uuid = quest.owner_uuid
+                expected_statuses = {"cancelled", "completed"}
+            elif quest.status == "accepted" and quest.worker_account_id == account.id:
+                action = "abandon"
+                actor_uuid = quest.worker_uuid or player_uuid
+                expected_statuses = {"open", "cancelled", "completed"}
+            else:
+                continue
+            request_id = str(
+                uuid.uuid5(
+                    _ACCOUNT_EXCHANGE_CLEANUP_NAMESPACE,
+                    f"account:{account.id}:quest:{quest.quest_id}:{action}",
+                )
+            )
+            result = await self._run_quest_action(
+                action,
+                quest,
+                actor_uuid,
+                request_id=request_id,
+            )
+            if result is None or (
+                result.status != "completed" and result.quest_status not in expected_statuses
+            ):
+                state = "unknown" if result is None else f"{result.status}/{result.quest_status}"
+                raise RuntimeError(
+                    f"クエスト #{quest.quest_id} の退会整理を確認できませんでした: {state}"
+                )
+
+    async def _settle_departing_seller_reservations(self, account: MinecraftAccount) -> None:
+        listings = await asyncio.to_thread(self._market.list_revoke_pending_for_seller, account.id)
+        for listing in listings:
+            if listing.status != "reserved":
+                continue
+            if (
+                self._settings.guild_id is None
+                or listing.purchase_request_id is None
+                or listing.buyer_account_id is None
+                or listing.buyer_discord_user_id is None
+            ):
+                raise RuntimeError(
+                    f"フリマ出品 #{listing.listing_id} の購入予約情報が不足しています"
+                )
+            buyer = await asyncio.to_thread(self._accounts.get, listing.buyer_account_id)
+            if (
+                buyer is None
+                or buyer.player_uuid is None
+                or buyer.discord_user_id != listing.buyer_discord_user_id
+            ):
+                raise RuntimeError(
+                    f"フリマ出品 #{listing.listing_id} の購入者を確認できませんでした"
+                )
+            await self._purchase_market(
+                guild_id=self._settings.guild_id,
+                listing_id=listing.listing_id,
+                request_id=listing.purchase_request_id,
+                expected_price_xp=listing.price_xp,
+                buyer=buyer,
+            )
+            current = await asyncio.to_thread(self._market.get, listing.listing_id)
+            if current is None or current.status == "reserved":
+                raise RuntimeError(f"フリマ出品 #{listing.listing_id} の購入処理が確定していません")
+
+    async def _return_departing_seller_listings(self, account: MinecraftAccount) -> None:
+        async with self._market_lock:
+            listings = await asyncio.to_thread(
+                self._market.list_revoke_pending_for_seller, account.id
+            )
+            for listing in listings:
+                if listing.status == "reserved":
+                    raise RuntimeError(
+                        f"フリマ出品 #{listing.listing_id} の購入処理が確定していません"
+                    )
+                request_id = str(
+                    uuid.uuid5(
+                        _ACCOUNT_EXCHANGE_CLEANUP_NAMESPACE,
+                        f"account:{account.id}:market:{listing.listing_id}",
+                    )
+                )
+                if listing.status == "cancelling":
+                    cancelling = listing if listing.purchase_request_id == request_id else None
+                else:
+                    cancelling = await asyncio.to_thread(
+                        self._market.begin_cancel,
+                        listing_id=listing.listing_id,
+                        seller_account_id=account.id,
+                        request_id=request_id,
+                    )
+                if cancelling is None:
+                    raise RuntimeError(
+                        f"フリマ出品 #{listing.listing_id} に別の返却処理が残っています"
+                    )
+                response = await self._execute_rcon(
+                    market_transfer_command(
+                        "mailbox-return",
+                        listing.listing_id,
+                        listing.seller_uuid,
+                        request_id,
+                    )
+                )
+                transfer = parse_market_transfer_result(
+                    response,
+                    request_id=request_id,
+                    listing_id=listing.listing_id,
+                )
+                if transfer.status != "completed" and transfer.listing_status != "cancelled":
+                    if transfer.listing_status == "active":
+                        await asyncio.to_thread(
+                            self._market.set_status,
+                            listing.listing_id,
+                            request_id,
+                            "active",
+                        )
+                    raise RuntimeError(
+                        f"フリマ出品 #{listing.listing_id} の退会返却を確認できませんでした: "
+                        f"{transfer.status}/{transfer.listing_status}"
+                    )
+                changed = await asyncio.to_thread(
+                    self._market.set_status,
+                    listing.listing_id,
+                    request_id,
+                    "cancelled",
+                )
+                if not changed:
+                    current = await asyncio.to_thread(self._market.get, listing.listing_id)
+                    if current is None or current.status != "cancelled":
+                        raise RuntimeError(
+                            f"フリマ出品 #{listing.listing_id} の退会返却を保存できませんでした"
+                        )
+                try:
+                    await self._refresh_market_listing(listing.listing_id, move_panel=False)
+                except (OSError, RuntimeError, discord.DiscordException) as error:
+                    LOGGER.warning(
+                        "Could not remove revoked market listing card %d: %s",
+                        listing.listing_id,
+                        error,
+                    )
+        try:
+            await self._refresh_market_panel()
+            await self._try_deliver_market_cancellation_logs()
+        except (OSError, RuntimeError, discord.DiscordException) as error:
+            LOGGER.warning("Could not refresh market UI after account revocation: %s", error)
 
     async def _ensure_player_whitelist_state_locked(
         self,
