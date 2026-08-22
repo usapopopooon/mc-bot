@@ -15,6 +15,7 @@ _PREFIX = "[UsapoEventBridge] USAPO_ACTIVITY|1|"
 class ActivityKind(StrEnum):
     FISHING = "fishing"
     WOODCUTTING = "woodcutting"
+    WOODCUTTING_RESET = "woodcutting_reset"
     EXPERIENCE = "experience"
 
 

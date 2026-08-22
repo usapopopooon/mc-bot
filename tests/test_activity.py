@@ -38,6 +38,20 @@ def test_parses_batched_natural_experience_amount() -> None:
     assert event.amount == 37
 
 
+def test_parses_woodcutting_reset_from_log_placement() -> None:
+    line = (
+        "[00:00:01] [Server thread/INFO]: [UsapoEventBridge] USAPO_ACTIVITY|1|"
+        "11111111-1111-1111-1111-111111111111|woodcutting_reset|"
+        "22222222-2222-2222-2222-222222222222|U3RldmU|1|1786406400000"
+    )
+
+    event = parse_activity_event(line)
+
+    assert event is not None
+    assert event.kind is ActivityKind.WOODCUTTING_RESET
+    assert event.amount == 1
+
+
 @pytest.mark.parametrize(
     "payload",
     [

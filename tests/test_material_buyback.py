@@ -17,6 +17,9 @@ def test_builds_and_parses_bound_material_buyback_command() -> None:
     assert material_buyback_command(PLAYER_UUID, "minecraft:sandstone", 256, REQUEST_ID) == (
         f"usapo-event-bridge material-buyback {PLAYER_UUID} minecraft:sandstone 256 {REQUEST_ID}"
     )
+    assert material_buyback_command(PLAYER_UUID, "minecraft:emerald", 64, REQUEST_ID) == (
+        f"usapo-event-bridge material-buyback {PLAYER_UUID} minecraft:emerald 64 {REQUEST_ID}"
+    )
     assert parse_material_buyback_result(
         f"USAPO_MATERIAL_BUYBACK_RESULT|1|{REQUEST_ID}|completed|minecraft:sandstone|256|duplicate",
         expected_request_id=REQUEST_ID,

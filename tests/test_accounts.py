@@ -345,7 +345,9 @@ def test_resource_notification_migration_does_not_replay_existing_exchanges(
     assert tuple(row) == (1, 1)
 
 
-def test_resource_delivery_migration_adds_gunpowder_without_losing_rows(tmp_path) -> None:
+def test_resource_delivery_migration_allows_dynamic_items_without_losing_rows(
+    tmp_path,
+) -> None:
     database = tmp_path / "accounts.db"
     with sqlite3.connect(database) as connection:
         connection.row_factory = sqlite3.Row
@@ -431,6 +433,34 @@ def test_resource_delivery_migration_adds_gunpowder_without_losing_rows(tmp_path
         ).fetchone()
         assert gunpowder is not None
         assert tuple(gunpowder) == ("minecraft:gunpowder", 64, 150)
+        connection.execute(
+            """
+            INSERT INTO minecraft_resource_exchange_claims
+                (exchange_id, claim_token, created_at)
+            VALUES ('dynamic-exchange', 'dynamic-token', '2026-08-22T00:00:02+00:00')
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO minecraft_resource_exchange_deliveries (
+                exchange_id, level_exchange_id, account_id, discord_user_id,
+                guild_id, player_name, item_id, item_name, item_count, cost_xp,
+                claim_token, created_at
+            ) VALUES (
+                'dynamic-exchange', 3, 1, 2, 3, 'Steve', 'minecraft:copper_ingot',
+                '銅インゴット', 16, 240, 'dynamic-token', '2026-08-22T00:00:02+00:00'
+            )
+            """
+        )
+        dynamic = connection.execute(
+            """
+            SELECT item_id, item_count, cost_xp
+            FROM minecraft_resource_exchange_deliveries
+            WHERE exchange_id = 'dynamic-exchange'
+            """
+        ).fetchone()
+        assert dynamic is not None
+        assert tuple(dynamic) == ("minecraft:copper_ingot", 16, 240)
 
 
 def test_imports_existing_whitelist_as_protected_and_unlinked(tmp_path) -> None:
@@ -2031,6 +2061,62 @@ def test_event_driven_woodcutting_deduplicates_non_reward_events(tmp_path) -> No
     assert reward is not None
     assert (reward.log_count, reward.combo_count, reward.reward_xp) == (5, 5, 5)
     assert store.list_pending_woodcutting_reward_deliveries() == [reward]
+
+
+def test_placing_log_resets_only_future_woodcutting_combo_and_is_idempotent(tmp_path) -> None:
+    store = AccountStore(tmp_path / "accounts.db")
+    store.initialize()
+    account = store.create_registration(
+        edition="java",
+        minecraft_name="Steve",
+        server_player_name="Steve",
+        discord_user_id=123,
+        discord_username="hoge",
+        source="self",
+        status="active",
+        created_by=123,
+    )
+    common = {
+        "account_id": account.id,
+        "discord_user_id": 123,
+        "guild_id": 456,
+        "combo_window_seconds": 30,
+    }
+
+    for index in range(1, 5):
+        assert (
+            store.record_woodcutting_log(
+                **common,
+                event_id=f"10000000-0000-0000-0000-{index:012d}",
+                observed_at=f"2026-08-11T00:00:0{index}+00:00",
+            )
+            is None
+        )
+    reset = {
+        **common,
+        "event_id": "20000000-0000-0000-0000-000000000005",
+        "observed_at": "2026-08-11T00:00:05+00:00",
+    }
+    assert store.reset_woodcutting_combo(**reset)
+    assert not store.reset_woodcutting_combo(**reset)
+
+    for index in range(6, 10):
+        assert (
+            store.record_woodcutting_log(
+                **common,
+                event_id=f"30000000-0000-0000-0000-{index:012d}",
+                observed_at=f"2026-08-11T00:00:0{index}+00:00",
+            )
+            is None
+        )
+    reward = store.record_woodcutting_log(
+        **common,
+        event_id="30000000-0000-0000-0000-000000000010",
+        observed_at="2026-08-11T00:00:10+00:00",
+    )
+
+    assert reward is not None
+    assert (reward.log_count, reward.combo_count, reward.reward_xp) == (9, 5, 5)
 
 
 def test_tracks_woodcutting_milestones_resets_and_excludes_reward_from_sync(tmp_path) -> None:

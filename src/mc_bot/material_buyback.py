@@ -7,6 +7,7 @@ _RESULT_PREFIX = "USAPO_MATERIAL_BUYBACK_RESULT|1|"
 _RELEASE_RESULT_PREFIX = "USAPO_MATERIAL_BUYBACK_RELEASE_RESULT|1|"
 _ITEM_IDS = frozenset(
     {
+        "minecraft:emerald",
         "minecraft:dirt",
         "minecraft:sand",
         "minecraft:sandstone",

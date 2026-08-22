@@ -309,6 +309,8 @@ def test_validates_rcon_command_response() -> None:
         validate_rcon_response("Unknown command. Type /help for help.")
     with pytest.raises(ValueError, match="No entity"):
         validate_rcon_response("No entity was found")
+    with pytest.raises(ValueError, match="Unknown item"):
+        validate_rcon_response("Unknown item 'minecraft:not_a_real_item'")
 
 
 def test_reads_actual_whitelist_state(tmp_path) -> None:

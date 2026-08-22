@@ -18,6 +18,7 @@ _PLAYER_LIST = re.compile(
 )
 _RCON_ERROR_MARKERS = (
     "unknown command",
+    "unknown item",
     "unknown or incomplete command",
     "incorrect argument",
     "no player was found",

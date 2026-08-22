@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING
 import discord
 
 from mc_bot.accounts import MinecraftAccount
+from mc_bot.admin_quest import AdminQuestCreateModal
 
 if TYPE_CHECKING:
     from mc_bot.bot import MinecraftDiscordBot
@@ -38,7 +39,7 @@ def admin_panel_embed() -> discord.Embed:
         title="🛠 Minecraft管理メニュー",
         description=(
             "代理登録、既存whitelistの紐付け・修正、登録状況の確認に加え、\n"
-            "稼働中のMinecraftサーバーをリアルタイムで操作できます。"
+            "稼働中のMinecraftサーバー操作や、Bot発行クエストの作成ができます。"
         ),
         color=discord.Color.blurple(),
     )
@@ -173,6 +174,17 @@ class AdminPanelView(discord.ui.View):
     async def voice(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if await self.bot.validate_panel_interaction(interaction, admin=True):
             await self.bot.show_voice_controls(interaction)
+
+    @discord.ui.button(
+        label="Bot発行クエスト",
+        emoji="📜",
+        style=discord.ButtonStyle.primary,
+        custom_id="mc-admin:quest-create",
+        row=2,
+    )
+    async def quest_create(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if await self.bot.validate_panel_interaction(interaction, admin=True):
+            await interaction.response.send_modal(AdminQuestCreateModal(self.bot))
 
 
 class RegistrationModal(discord.ui.Modal):

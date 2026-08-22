@@ -8,6 +8,7 @@ from mc_bot.accounts import FishingComboRewardEvent, WoodcuttingComboRewardEvent
 from mc_bot.experience import (
     LevelBotXpClient,
     MinecraftLevelUpEvent,
+    MinecraftResourceCatalog,
     actionbar_clear_command,
     advancement_reward_tellraw_command,
     experience_add_points_command,
@@ -185,6 +186,82 @@ def test_exchange_request_sends_idempotency_id_and_expected_rate() -> None:
             "user_id": "2001",
             "cost_xp": 10,
             "expected_reward_xp": 50,
+        }
+
+    asyncio.run(exercise())
+
+
+def test_resource_catalog_mutations_send_exact_guild_actor_and_pack_fields() -> None:
+    class CatalogResponse:
+        status = 200
+
+        async def __aenter__(self) -> Any:
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        async def json(self) -> dict[str, object]:
+            return {
+                "guild_id": "1001",
+                "revision": 8,
+                "packs": [
+                    {
+                        "item_id": "minecraft:copper_ingot",
+                        "item_name": "銅インゴット",
+                        "item_count": 16,
+                        "cost_xp": 240,
+                    }
+                ],
+            }
+
+    class CatalogSession:
+        closed = False
+
+        def __init__(self) -> None:
+            self.calls: list[dict[str, object]] = []
+
+        def request(self, method: str, url: str, **kwargs: object) -> CatalogResponse:
+            self.calls.append({"method": method, "url": url, **kwargs})
+            return CatalogResponse()
+
+    async def exercise() -> None:
+        client = LevelBotXpClient("https://levels.example.test", "secret")
+        session = CatalogSession()
+        client._session = session  # type: ignore[assignment]
+
+        updated = await client.upsert_resource_pack(
+            guild_id=1001,
+            actor_user_id=9001,
+            item_id="minecraft:copper_ingot",
+            item_name="銅インゴット",
+            item_count=16,
+            cost_xp=240,
+        )
+        removed = await client.remove_resource_pack(
+            guild_id=1001,
+            actor_user_id=9001,
+            item_id="minecraft:copper_ingot",
+            item_count=16,
+        )
+
+        assert isinstance(updated, MinecraftResourceCatalog)
+        assert isinstance(removed, MinecraftResourceCatalog)
+        assert session.calls[0]["method"] == "PUT"
+        assert session.calls[0]["json"] == {
+            "guild_id": "1001",
+            "actor_user_id": "9001",
+            "item_id": "minecraft:copper_ingot",
+            "item_name": "銅インゴット",
+            "item_count": 16,
+            "cost_xp": 240,
+        }
+        assert session.calls[1]["method"] == "POST"
+        assert session.calls[1]["json"] == {
+            "guild_id": "1001",
+            "actor_user_id": "9001",
+            "item_id": "minecraft:copper_ingot",
+            "item_count": 16,
         }
 
     asyncio.run(exercise())

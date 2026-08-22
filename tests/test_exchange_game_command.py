@@ -47,6 +47,9 @@ class ExchangeRcon:
         if command.startswith("usapo-event-bridge emerald-diamond-v2 "):
             request_id = command.rsplit(" ", 1)[1]
             return f"USAPO_EMERALD_EXCHANGE_RESULT|2|{request_id}|completed|64|2|new"
+        if command.startswith("usapo-event-bridge diamond-emerald-v1 "):
+            request_id = command.rsplit(" ", 1)[1]
+            return f"USAPO_DIAMOND_EXCHANGE_RESULT|1|{request_id}|completed|4|64|new"
         if command.startswith("usapo-event-bridge material-buyback "):
             _, _, player_uuid, item_id, item_count, request_id = command.split()
             assert player_uuid == PLAYER_UUID
@@ -153,7 +156,7 @@ def _bot(tmp_path, *, linked: bool = True) -> MinecraftDiscordBot:
     bot._level_bot_xp.request_material_buyback = AsyncMock(  # type: ignore[method-assign]
         return_value=MinecraftMaterialBuybackRequest(
             status="reserved",
-            message="砂岩の買取を受け付けました。",
+            message="砂岩の売却を受け付けました。",
             request_id="55555555-5555-4555-8555-555555555555",
             item_id="minecraft:sandstone",
             item_name="砂岩",
@@ -161,7 +164,7 @@ def _bot(tmp_path, *, linked: bool = True) -> MinecraftDiscordBot:
             reward_xp=200,
             reward_day="2026-08-21",
             daily_reserved_xp=200,
-            daily_limit_xp=1_500,
+            daily_limit_xp=3_000,
         )
     )
     bot._level_bot_xp.update_material_buyback = AsyncMock(  # type: ignore[method-assign]
@@ -193,6 +196,11 @@ def test_game_exchange_wires_every_selection_to_the_existing_authority(tmp_path)
             request_id="44444444-4444-4444-8444-444444444444",
             selection="emerald_diamond|minecraft:diamond|64|0|2",
         ),
+        _line(
+            450,
+            request_id="44444444-4444-4444-8444-444444444445",
+            selection="diamond_emerald|minecraft:emerald|4|0|64",
+        ),
     ]
     tailer = LineTailer(lines)
     bot._tailer = tailer  # type: ignore[assignment]
@@ -223,12 +231,17 @@ def test_game_exchange_wires_every_selection_to_the_existing_authority(tmp_path)
         "usapo-event-bridge emerald-diamond-v2 "
         f"{PLAYER_UUID} 64 44444444-4444-4444-8444-444444444444"
     ) in rcon.commands
+    assert (
+        "usapo-event-bridge diamond-emerald-v1 "
+        f"{PLAYER_UUID} 4 44444444-4444-4444-8444-444444444445"
+    ) in rcon.commands
     private = [command for command in rcon.commands if command.startswith("tellraw Steve ")]
-    assert len(private) == 4
+    assert len(private) == 5
     assert "現在XP: 49,000 XP" in private[0]
     assert "Minecraft 500 XPへの交換" in private[1]
     assert "ダイヤモンド x3への交換" in private[2]
     assert "交換完了: エメラルド x64" in private[3]
+    assert "交換完了: ダイヤモンド x4" in private[4]
 
 
 def test_changed_price_is_rejected_before_any_xp_spend(tmp_path) -> None:
@@ -375,10 +388,54 @@ def test_material_buyback_wires_account_item_count_and_xp_before_acknowledging(t
     assert rcon.commands[1] == (
         f"usapo-event-bridge material-buyback-release {PLAYER_UUID} {request_id}"
     )
-    assert "買取完了: 通常の砂岩 x256 → +200 サーバーXP" in rcon.commands[2]
+    assert "売却完了: 通常の砂岩 x256 → +200 サーバーXP" in rcon.commands[2]
     assert "現在 49,000 サーバーXP" in rcon.commands[2]
-    assert "本日の残り買取枠 1,300 サーバーXP" in rcon.commands[2]
-    assert "「資源へ交換」から交換" in rcon.commands[2]
+    assert "本日の残り売却枠 2,800 サーバーXP" in rcon.commands[2]
+
+
+def test_emerald_buyback_keeps_item_reward_and_rcon_arguments_bound(tmp_path) -> None:
+    bot = _bot(tmp_path)
+    request_id = "55555555-5555-4555-8555-555555555556"
+    bot._level_bot_xp.request_material_buyback = AsyncMock(  # type: ignore[method-assign]
+        return_value=MinecraftMaterialBuybackRequest(
+            status="reserved",
+            message="エメラルドの売却を受け付けました。",
+            request_id=request_id,
+            item_id="minecraft:emerald",
+            item_name="エメラルド",
+            item_count=64,
+            reward_xp=500,
+            reward_day="2026-08-21",
+            daily_reserved_xp=500,
+            daily_limit_xp=3_000,
+        )
+    )
+    line = _line(
+        500,
+        request_id=request_id,
+        selection="material_buyback|minecraft:emerald|64|0|500",
+    )
+    tailer = LineTailer([line])
+    bot._tailer = tailer  # type: ignore[assignment]
+
+    asyncio.run(bot._forward_logs())
+
+    assert tailer.acknowledged == [line]
+    bot._level_bot_xp.request_material_buyback.assert_awaited_once_with(  # type: ignore[attr-defined]
+        request_id=request_id,
+        guild_id=456,
+        user_id=123,
+        account_id=1,
+        item_id="minecraft:emerald",
+        item_count=64,
+        expected_reward_xp=500,
+    )
+    rcon = bot._rcon
+    assert isinstance(rcon, ExchangeRcon)
+    assert rcon.commands[0] == (
+        f"usapo-event-bridge material-buyback {PLAYER_UUID} minecraft:emerald 64 {request_id}"
+    )
+    assert "売却完了: 通常のエメラルド x64 → +500 サーバーXP" in rcon.commands[2]
 
 
 def test_material_buyback_retries_completion_without_double_removal(tmp_path) -> None:
@@ -415,7 +472,7 @@ def test_material_buyback_retries_completion_without_double_removal(tmp_path) ->
         if command.startswith("usapo-event-bridge material-buyback-release ")
     ]
     assert len(release_commands) == 1
-    assert "買取完了（処理済み）: 通常の砂岩 x256" in rcon.commands[-1]  # noqa: RUF001
+    assert "売却完了（処理済み）: 通常の砂岩 x256" in rcon.commands[-1]  # noqa: RUF001
 
 
 def test_material_buyback_resumes_after_delay_instead_of_leaving_a_reserved_slot(
@@ -451,15 +508,15 @@ def test_material_buyback_daily_limit_releases_pending_request_without_item_remo
     bot._level_bot_xp.request_material_buyback = AsyncMock(  # type: ignore[method-assign]
         return_value=MinecraftMaterialBuybackRequest(
             status="daily_limit",
-            message="本日の残り買取枠は 20 サーバーXPです。",
+            message="本日の残り売却枠は 20 サーバーXPです。",
             request_id=None,
             item_id="minecraft:sandstone",
             item_name="砂岩",
             item_count=256,
             reward_xp=200,
             reward_day="2026-08-21",
-            daily_reserved_xp=1_480,
-            daily_limit_xp=1_500,
+            daily_reserved_xp=2_980,
+            daily_limit_xp=3_000,
         )
     )
     line = _line(
@@ -482,7 +539,7 @@ def test_material_buyback_daily_limit_releases_pending_request_without_item_remo
     assert all(
         not command.startswith("usapo-event-bridge material-buyback ") for command in rcon.commands
     )
-    assert "残り買取枠は 20 サーバーXP" in rcon.commands[1]
+    assert "残り売却枠は 20 サーバーXP" in rcon.commands[1]
 
 
 def test_unlinked_old_buyback_does_not_stall_when_a_new_request_is_pending(tmp_path) -> None:

@@ -193,7 +193,7 @@ def test_public_fishing_milestone_replaces_private_actionbar_and_stays_silent(
     assert bot._accounts.list_pending_fishing_public_deliveries() == []
 
 
-def test_woodcutting_combo_rewards_with_private_actionbar_and_xp_sound(tmp_path) -> None:
+def test_log_placement_resets_woodcutting_before_next_reward(tmp_path) -> None:
     config = Config(
         discord_token="test",
         accounts_path=tmp_path / "accounts.db",
@@ -226,7 +226,10 @@ def test_woodcutting_combo_rewards_with_private_actionbar_and_xp_sound(tmp_path)
     bot._level_bot_xp.send_woodcutting_combo = send_audit  # type: ignore[method-assign]
 
     async def exercise() -> None:
-        for index in range(1, 6):
+        for index in range(1, 5):
+            await bot._record_activity_event(activity(ActivityKind.WOODCUTTING, index, index))
+        assert not await bot._record_activity_event(activity(ActivityKind.WOODCUTTING_RESET, 5, 5))
+        for index in range(6, 11):
             await bot._record_activity_event(activity(ActivityKind.WOODCUTTING, index, index))
         await bot._deliver_pending_activity_events()
 

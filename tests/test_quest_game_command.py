@@ -1,7 +1,7 @@
 import asyncio
 import base64
 from datetime import UTC, datetime, timedelta
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 from mc_bot.bot import MinecraftDiscordBot
 from mc_bot.config import Config
@@ -13,6 +13,7 @@ WORKER_UUID = "33333333-3333-4333-8333-333333333333"
 EVENT_ID = "11111111-1111-4111-8111-111111111111"
 CREATED_ID = "44444444-4444-4444-8444-444444444444"
 ACCEPTED_ID = "55555555-5555-4555-8555-555555555555"
+SYSTEM_OWNER_UUID = "00000000-0000-0000-0000-000000000000"
 
 
 class LineTailer:
@@ -54,14 +55,16 @@ def _line(
     worker_name: str = "-",
     accepted_deadline: int = 0,
     published_offset_seconds: int = 0,
+    owner_uuid: str = OWNER_UUID,
+    owner_name: str = "Owner",
 ) -> PendingLine:
     created = datetime(2026, 8, 20, tzinfo=UTC)
     created_ms = int(created.timestamp() * 1_000)
     open_expiry = int((created + timedelta(days=7)).timestamp() * 1_000)
     published = int((created + timedelta(seconds=published_offset_seconds)).timestamp() * 1_000)
     message = (
-        f"USAPO_QUEST_STATE|1|{transition_id}|{kind}|17|{EVENT_ID}|{OWNER_UUID}|"
-        f"{_encode('Owner')}|{worker_uuid}|{worker_name}|"
+        f"USAPO_QUEST_STATE|1|{transition_id}|{kind}|17|{EVENT_ID}|{owner_uuid}|"
+        f"{_encode(owner_name)}|{worker_uuid}|{worker_name}|"
         f"{_encode('minecraft:ancient_debris')}|{_encode('古代の残骸')}|8|"
         f"{_encode('minecraft:diamond')}|{_encode('ダイヤモンド')}|3|24|{status}|"
         f"{open_expiry}|{accepted_deadline}|{created_ms}|{published}"
@@ -167,6 +170,37 @@ def test_unlinked_quest_is_audited_and_cancelled_with_owner_uuid(tmp_path) -> No
     assert quest.discord_message_id is None
     assert tailer.acknowledged == [event_line]
     bot._send_minecraft_private_message.assert_awaited_once()  # type: ignore[attr-defined]
+
+
+def test_bot_issued_quest_skips_unlinked_invalidation_and_uses_the_bot_mention(tmp_path) -> None:
+    bot = MinecraftDiscordBot(Config(discord_token="test", accounts_path=tmp_path / "accounts.db"))
+    bot._accounts.initialize()
+    bot._quests.initialize()
+    bot._connection.user = Mock(id=9090)
+    line = _line(
+        offset=100,
+        transition_id=CREATED_ID,
+        kind="created",
+        status="open",
+        owner_uuid=SYSTEM_OWNER_UUID,
+        owner_name="-",
+    )
+    tailer = LineTailer([line])
+    bot._tailer = tailer  # type: ignore[assignment]
+    bot._refresh_quest_listing = AsyncMock()  # type: ignore[method-assign]
+    bot._deliver_quest_logs = AsyncMock()  # type: ignore[method-assign]
+    bot._undo_unlinked_quest_state = AsyncMock()  # type: ignore[method-assign]
+
+    asyncio.run(bot._forward_logs())
+
+    quest = bot._quests.get(17)
+    assert quest is not None
+    assert quest.owner_uuid == SYSTEM_OWNER_UUID
+    assert quest.owner_name == "-"
+    assert quest.owner_account_id is None
+    assert quest.owner_discord_user_id == 9090
+    bot._undo_unlinked_quest_state.assert_not_awaited()  # type: ignore[attr-defined]
+    bot._refresh_quest_listing.assert_awaited_once_with(17)  # type: ignore[attr-defined]
 
 
 def test_stale_unlinked_creation_does_not_block_later_completed_state(tmp_path) -> None:

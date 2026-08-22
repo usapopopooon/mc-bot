@@ -138,6 +138,38 @@ def test_parses_versioned_listing_and_request_with_exact_price() -> None:
     assert request.expected_price_xp == listing.price_xp
 
 
+def test_listing_event_and_card_preserve_ordinary_item_enchantments(tmp_path) -> None:
+    milliseconds = int(datetime(2026, 8, 18, tzinfo=UTC).timestamp() * 1_000)
+    item_name = "トライデント（召雷 / 水生特効 V / 忠誠 III / 修繕 / 耐久力 III）"  # noqa: RUF001
+    event = parse_market_listing(
+        "[08:24:00] [Server thread/INFO]: [UsapoEventBridge] "
+        f"USAPO_MARKET_LISTING|1|{REQUEST_ID}|17|{SELLER_UUID}|"
+        f"{_encoded('.Yuki')}|{_encoded('minecraft:trident')}|"
+        f"{_encoded(item_name)}|1|3000|{milliseconds}"
+    )
+
+    assert event is not None
+    assert event.item_name == item_name
+
+    store = MarketStore(tmp_path / "market.db")
+    store.initialize()
+    listing, _ = store.add_listing(
+        listing_id=event.listing_id,
+        event_id=event.event_id,
+        seller_account_id=2,
+        seller_discord_user_id=2002,
+        seller_uuid=event.seller_uuid,
+        seller_name=event.seller_name,
+        item_id=event.item_id,
+        item_name=event.item_name,
+        item_count=event.item_count,
+        price_xp=event.price_xp,
+        created_at=event.created_at,
+    )
+
+    assert market_listing_embed(listing).title == f"#17 {item_name} x1"
+
+
 def test_rejects_tampered_balance_and_invalid_item_namespace() -> None:
     milliseconds = int(datetime.now(UTC).timestamp() * 1_000)
     with pytest.raises(ValueError):

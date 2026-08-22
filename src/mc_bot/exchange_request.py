@@ -8,16 +8,20 @@ from datetime import UTC, datetime
 from typing import Literal, cast
 
 from mc_bot.player_names import is_safe_server_player_name
+from mc_bot.resource_catalog import is_valid_resource_item_id
 
-ExchangeRequestKind = Literal["balance", "xp", "resource", "emerald_diamond", "material_buyback"]
+ExchangeRequestKind = Literal[
+    "balance",
+    "xp",
+    "resource",
+    "emerald_diamond",
+    "diamond_emerald",
+    "material_buyback",
+]
 
 _PREFIX = "[UsapoEventBridge] USAPO_EXCHANGE_REQUEST|1|"
-_RESOURCE_TARGETS = {
-    "minecraft:diamond",
-    "minecraft:emerald",
-    "minecraft:gunpowder",
-}
 _MATERIAL_BUYBACK_TARGETS = {
+    "minecraft:emerald",
     "minecraft:dirt",
     "minecraft:sand",
     "minecraft:sandstone",
@@ -72,6 +76,7 @@ def parse_exchange_request(line: str) -> MinecraftExchangeRequest | None:
             "xp",
             "resource",
             "emerald_diamond",
+            "diamond_emerald",
             "material_buyback",
         }:
             raise ValueError("unknown exchange request kind")
@@ -118,7 +123,7 @@ def _valid_selection(
         )
     if kind == "resource":
         return (
-            target in _RESOURCE_TARGETS
+            is_valid_resource_item_id(target)
             and 1 <= amount <= 64
             and expected_cost_xp > 0
             and expected_reward == amount
@@ -137,6 +142,12 @@ def _valid_selection(
         and amount in {32, 64}
         and expected_cost_xp == 0
         and expected_reward == amount // 32
+    ) or (
+        kind == "diamond_emerald"
+        and target == "minecraft:emerald"
+        and amount in {1, 4}
+        and expected_cost_xp == 0
+        and expected_reward == amount * 16
     )
 
 

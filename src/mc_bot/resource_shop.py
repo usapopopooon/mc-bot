@@ -9,42 +9,42 @@ import discord
 
 from mc_bot.experience import MinecraftResourcePack, MinecraftResourceShop
 from mc_bot.player_names import is_safe_server_player_name
+from mc_bot.resource_catalog import is_valid_resource_item_id
 from mc_bot.xp_shop import wallet_text
 
 if TYPE_CHECKING:
     from mc_bot.bot import MinecraftDiscordBot
 
-_RESOURCE_NAMES = {
-    "minecraft:diamond": "ダイヤモンド",
-    "minecraft:emerald": "エメラルド",
-    "minecraft:gunpowder": "火薬",
-}
 _RESOURCE_EMOJIS = {
     "minecraft:diamond": "💎",
     "minecraft:emerald": "🟢",
     "minecraft:gunpowder": "🧨",
 }
 EMERALD_DIAMOND_PACKS = ((32, 1), (64, 2))
+DIAMOND_EMERALD_PACKS = ((1, 16), (4, 64))
 
 
 def resource_give_command(player_name: str, item_id: str, item_count: int) -> str:
     if not is_safe_server_player_name(player_name):
         raise ValueError("player_name contains unsafe RCON characters")
-    if item_id not in _RESOURCE_NAMES:
-        raise ValueError("resource item is not allowed")
+    if not is_valid_resource_item_id(item_id):
+        raise ValueError("resource item is invalid")
     if not 1 <= item_count <= 64:
         raise ValueError("item_count must be between 1 and 64")
     return f"give {player_name} {item_id} {item_count}"
 
 
 def resource_exchange_actionbar_command(
-    player_name: str, item_id: str, item_count: int, cost_xp: int
+    player_name: str,
+    item_id: str,
+    item_name: str,
+    item_count: int,
+    cost_xp: int,
 ) -> str:
     resource_give_command(player_name, item_id, item_count)
-    if cost_xp <= 0:
-        raise ValueError("cost_xp must be positive")
+    _validate_resource_label_and_cost(item_name, cost_xp)
     component = {
-        "text": f"交換完了: {_RESOURCE_NAMES[item_id]} x{item_count} ({cost_xp} XP)",
+        "text": f"交換完了: {item_name} x{item_count} ({cost_xp} XP)",
         "color": "aqua",
         "bold": True,
     }
@@ -58,12 +58,12 @@ def resource_exchange_tellraw_command(
     server_name: str,
     player_name: str,
     item_id: str,
+    item_name: str,
     item_count: int,
     cost_xp: int,
 ) -> str:
     resource_give_command(player_name, item_id, item_count)
-    if cost_xp <= 0:
-        raise ValueError("cost_xp must be positive")
+    _validate_resource_label_and_cost(item_name, cost_xp)
     components = [
         {"text": "["},
         {"text": server_name, "color": "aqua"},
@@ -73,13 +73,24 @@ def resource_exchange_tellraw_command(
         {"text": str(cost_xp), "color": "green", "bold": True},
         {"text": "を交換し、"},
         {
-            "text": f"{_RESOURCE_NAMES[item_id]} x{item_count}",
+            "text": f"{item_name} x{item_count}",
             "color": "aqua",
             "bold": True,
         },
         {"text": "を獲得しました!"},
     ]
     return f"tellraw @a {json.dumps(components, ensure_ascii=False, separators=(',', ':'))}"
+
+
+def _validate_resource_label_and_cost(item_name: str, cost_xp: int) -> None:
+    if (
+        not item_name.strip()
+        or len(item_name) > 64
+        or any(ord(character) < 32 for character in item_name)
+    ):
+        raise ValueError("resource item_name is invalid")
+    if cost_xp <= 0:
+        raise ValueError("cost_xp must be positive")
 
 
 def minecraft_resource_shop_embed(
@@ -89,15 +100,16 @@ def minecraft_resource_shop_embed(
         title="Minecraft 資源交換所",
         description=(
             "活動で貯めたサーバーXPをMinecraft内の資源へ交換できます。\n"
-            "手持ちのエメラルドもダイヤモンドへ交換できます。\n"
+            "手持ちのダイヤモンドとエメラルドも両替できます。\n"
             "連携したMinecraftアカウントでサーバーに参加中のみ交換できます。\n"
             "数量は小口から最大 **64個・1スタック** まで選べます。"
         ),
         color=discord.Color.teal(),
     )
-    embed.add_field(
-        name="交換内容",
-        value=(
+    _add_bounded_fields(
+        embed,
+        "交換内容",
+        (
             "**サーバーXP → 資源**\n"
             + _resource_pack_lines(packs)
             + "\n\n**手持ち資源 → 資源**\n"
@@ -105,29 +117,35 @@ def minecraft_resource_shop_embed(
                 f"`エメラルド x{emeralds}` → `ダイヤモンド x{diamonds}`"
                 for emeralds, diamonds in EMERALD_DIAMOND_PACKS
             )
-            + "\n\n**通常資材 → サーバーXP / ゲーム内**\n"
+            + "\n"
+            + "\n".join(
+                f"`ダイヤモンド x{diamonds}` → `エメラルド x{emeralds}`"
+                for diamonds, emeralds in DIAMOND_EMERALD_PACKS
+            )
+            + "\n\n**手持ち資源 → サーバーXP / ゲーム内**\n"
+            "**エメラルド**\n"
+            "`エメラルド x64` → `500 サーバーXP`\n\n"
+            "**資材**\n"
             "`土 x64` → `30 サーバーXP` / `砂 x64` → `40 サーバーXP`\n"
             "`砂岩 x64` → `50 サーバーXP` / `深層岩 x64` → `35 サーバーXP`\n"
             "`深層岩の丸石 x64` → `35 サーバーXP` / "
             "`凝灰岩 x64` → `40 サーバーXP`\n"
-            "1人1日 **1,500 サーバーXP** まで / 毎日0時・日本時間に更新\n"
-            "本日の残り枠は処理時に確認し、上限超過時は資材を回収しません。\n"
-            "獲得したサーバーXPは、同じ交換所の「資源へ交換」からエメラルドにも交換できます。"
+            "1人1日 **3,000 サーバーXP** まで / 毎日0時・日本時間に更新\n"
+            "本日の残り枠は処理時に確認し、上限超過時は資源を回収しません。\n"
+            "名前や特殊データのない通常アイテムだけが対象です。"
         ),
-        inline=False,
     )
-    embed.add_field(
-        name="🎮 ゲーム内コマンド",
-        value=(
+    _add_bounded_fields(
+        embed,
+        "🎮 ゲーム内コマンド",
+        (
             "Java版・統合版: `/exchange` で交換メニューを開く\n"
-            "XP→資源: `/exchange resource <diamond|emerald|gunpowder> <個数>`\n"
-            "手持ち交換: `/exchange emerald-diamond <32|64>`\n"
-            "資材買取: 対象資材を持って `/exchange buyback <1|2|4|8|16|max|all>`\n"
-            "XP残高: `/exchange balance`\n"
-            "個数: diamondは `1|3|8|16|32|64`、emeraldは `4|16|32|64`、"
-            "gunpowderは `8|32|64`"
+            "XP→資源: `/exchange resource <資源ID> <個数>`\n"
+            "両替: `/exchange emerald-diamond <32|64>`\n"
+            "両替: `/exchange diamond-emerald <1|4>`\n"
+            "資源売却: 対象アイテムを持って `/exchange buyback <1|2|4|8|16|max|all>`\n"
+            "XP残高: `/exchange balance`\n" + _resource_command_help(packs)
         ),
-        inline=False,
     )
     embed.add_field(
         name="⚠️ 交換前にご確認ください",
@@ -140,14 +158,39 @@ def minecraft_resource_shop_embed(
     embed.add_field(
         name="📢 交換完了時の通知",
         value=(
-            "XPから資源への交換と手持ちエメラルド交換は、完了すると"
+            "XPから資源への交換とダイヤ・エメラルドの両替は、完了すると"
             "**Discordのログチャンネル**と**Minecraft内チャット**に通知されます。\n"
-            "資材買取の結果・現在のサーバーXP・当日の残り買取枠は、"
+            "資源売却の結果・現在のサーバーXP・当日の残り売却枠は、"
             "Minecraft内で本人だけに表示されます。"
         ),
         inline=False,
     )
     embed.set_footer(text="残高・選択・確認画面は本人にのみ表示されます")
+    return embed
+
+
+def resource_catalog_management_embed(
+    packs: tuple[MinecraftResourcePack, ...],
+    *,
+    revision: int,
+    synchronized: bool,
+    synchronization_error: str | None,
+) -> discord.Embed:
+    embed = discord.Embed(
+        title="Minecraft 資源交換カタログ",
+        description="現在の商品・受取個数・必要サーバーXPです。",
+        color=discord.Color.green() if synchronized else discord.Color.orange(),
+    )
+    lines = [
+        f"`{pack.item_id}` x{pack.item_count:,} → "
+        f"{discord.utils.escape_markdown(pack.item_name)} / {pack.cost_xp:,} XP\n"
+        for pack in packs
+    ]
+    _add_bounded_fields(embed, "商品一覧", "".join(lines))
+    sync_text = (
+        "確認済み" if synchronized else "未反映 / " + (synchronization_error or "理由不明")[:180]
+    )
+    embed.set_footer(text=f"世代 {revision} / Minecraft同期: {sync_text}")
     return embed
 
 
@@ -157,7 +200,7 @@ class MinecraftResourceShopPanelView(discord.ui.View):
         self.bot = bot
 
     @discord.ui.button(
-        label="資源を交換",
+        label="XPで資源を購入",
         emoji="💎",
         style=discord.ButtonStyle.primary,
         custom_id="mc-resource-shop:open",
@@ -167,7 +210,7 @@ class MinecraftResourceShopPanelView(discord.ui.View):
             await self.bot.show_minecraft_resource_shop(interaction)
 
     @discord.ui.button(
-        label="エメラルドを交換",
+        label="ダイヤ・エメラルドを両替",
         emoji="🔄",
         style=discord.ButtonStyle.success,
         custom_id="mc-resource-shop:emerald-diamond",
@@ -205,7 +248,7 @@ class MinecraftResourcePackSelect(discord.ui.Select):
                 discord.SelectOption(
                     label=f"{pack.item_name} x{pack.item_count:,}",
                     description=f"必要: {pack.cost_xp:,} サーバーXP",
-                    emoji=_RESOURCE_EMOJIS[pack.item_id],
+                    emoji=_RESOURCE_EMOJIS.get(pack.item_id, "📦"),
                     value=str(index),
                 )
                 for index, pack in enumerate(shop.packs)
@@ -284,8 +327,42 @@ def _resource_pack_lines(packs: tuple[MinecraftResourcePack, ...]) -> str:
             f"`サーバーXP {pack.cost_xp:,}` → `{pack.item_name} x{pack.item_count:,}`"
             for pack in item_packs
         )
-        sections.append(f"**{_RESOURCE_EMOJIS[item_id]} {item_name}**\n{rates}")
+        sections.append(f"**{_RESOURCE_EMOJIS.get(item_id, '📦')} {item_name}**\n{rates}")
     return "\n\n".join(sections)
+
+
+def _resource_command_help(packs: tuple[MinecraftResourcePack, ...]) -> str:
+    grouped: dict[str, list[int]] = {}
+    for pack in packs:
+        grouped.setdefault(pack.item_id.removeprefix("minecraft:"), []).append(pack.item_count)
+    return "利用可能な資源IDと個数 (Tab補完あり):\n" + "\n".join(
+        f"{item_id}は `{'|'.join(str(count) for count in counts)}`"
+        for item_id, counts in grouped.items()
+    )
+
+
+def _add_bounded_fields(embed: discord.Embed, name: str, value: str) -> None:
+    chunks: list[str] = []
+    current = ""
+    for line in value.splitlines(keepends=True):
+        while len(line) > 1024:
+            if current:
+                chunks.append(current.rstrip())
+                current = ""
+            chunks.append(line[:1024].rstrip())
+            line = line[1024:]
+        if current and len(current) + len(line) > 1024:
+            chunks.append(current.rstrip())
+            current = ""
+        current += line
+    if current:
+        chunks.append(current.rstrip())
+    for index, chunk in enumerate(chunks):
+        embed.add_field(
+            name=name if index == 0 else f"{name} (続き)",
+            value=chunk,
+            inline=False,
+        )
 
 
 class MinecraftResourceConfirmView(discord.ui.View):
@@ -430,6 +507,67 @@ class EmeraldDiamondPackSelectView(discord.ui.View):
     def __init__(self, bot: MinecraftDiscordBot, *, owner_id: int) -> None:
         super().__init__(timeout=180)
         self.add_item(EmeraldDiamondPackSelect(bot, owner_id=owner_id))
+        self.add_item(DiamondEmeraldPackSelect(bot, owner_id=owner_id))
+
+
+class DiamondEmeraldPackSelect(discord.ui.Select):
+    def __init__(self, bot: MinecraftDiscordBot, *, owner_id: int) -> None:
+        self.bot = bot
+        self.owner_id = owner_id
+        super().__init__(
+            placeholder="ダイヤモンド → エメラルド",
+            min_values=1,
+            max_values=1,
+            options=[
+                discord.SelectOption(
+                    label=f"ダイヤモンド x{diamonds} → エメラルド x{emeralds}",
+                    value=str(diamonds),
+                )
+                for diamonds, emeralds in DIAMOND_EMERALD_PACKS
+            ],
+        )
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message(
+                "この交換メニューを使えるのは開いた本人だけです。", ephemeral=True
+            )
+            return
+        try:
+            diamond_count = int(self.values[0])
+            emerald_count = dict(DIAMOND_EMERALD_PACKS)[diamond_count]
+        except KeyError, ValueError:
+            await interaction.response.send_message(
+                "この交換内容は利用できません。", ephemeral=True
+            )
+            return
+        embed = discord.Embed(
+            title="交換内容の確認",
+            description=(
+                f"手持ちの **ダイヤモンド x{diamond_count}** を使い、"
+                f"**エメラルド x{emerald_count}** を獲得します。\n"
+                "サーバーXPは使用しません。"
+            ),
+            color=discord.Color.teal(),
+        )
+        embed.add_field(
+            name="交換前にご確認ください",
+            value=(
+                "Minecraftサーバーに参加した状態で交換してください。\n"
+                "エメラルドを受け取る空きがない場合、交換は行われません。"
+            ),
+            inline=False,
+        )
+        await interaction.response.send_message(
+            embed=embed,
+            view=DiamondEmeraldConfirmView(
+                self.bot,
+                owner_id=self.owner_id,
+                request_id=str(uuid4()),
+                diamond_count=diamond_count,
+            ),
+            ephemeral=True,
+        )
 
 
 class EmeraldDiamondConfirmView(discord.ui.View):
@@ -527,8 +665,105 @@ class EmeraldDiamondConfirmView(discord.ui.View):
         )
 
 
+class DiamondEmeraldConfirmView(discord.ui.View):
+    def __init__(
+        self,
+        bot: MinecraftDiscordBot,
+        *,
+        owner_id: int,
+        request_id: str,
+        diamond_count: int,
+    ) -> None:
+        super().__init__(timeout=180)
+        self.bot = bot
+        self.owner_id = owner_id
+        self.request_id = request_id
+        self.diamond_count = diamond_count
+        self._operation_lock = asyncio.Lock()
+        self._completed = False
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id == self.owner_id:
+            return True
+        await interaction.response.send_message(
+            "この交換を操作できるのは本人だけです。", ephemeral=True
+        )
+        return False
+
+    @discord.ui.button(label="交換する", style=discord.ButtonStyle.primary)
+    async def confirm(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if self._operation_lock.locked() or self._completed:
+            await interaction.response.send_message(
+                "この交換は処理中または処理済みです。", ephemeral=True
+            )
+            return
+        async with self._operation_lock:
+            for child in self.children:
+                child.disabled = True
+            await interaction.response.edit_message(view=self)
+            result = await self.bot.confirm_diamond_emerald_exchange(
+                interaction,
+                request_id=self.request_id,
+                diamond_count=self.diamond_count,
+            )
+            if result is None:
+                self._enable_retry()
+                await interaction.edit_original_response(view=self)
+                await interaction.followup.send(
+                    "交換結果を確認できませんでした。"
+                    "同じ確認画面から再試行しても二重交換にはなりません。",
+                    ephemeral=True,
+                )
+                return
+            if result.status == "completed":
+                self._completed = True
+                message = (
+                    f"交換しました: ダイヤモンド x{result.diamond_count} → "
+                    f"エメラルド x{result.emerald_count}"
+                )
+            else:
+                self._enable_retry()
+                await interaction.edit_original_response(view=self)
+                message = {
+                    "insufficient_diamonds": (
+                        f"手持ちのダイヤモンドが{result.diamond_count}個未満のため"
+                        "交換できませんでした。"
+                    ),
+                    "inventory_full": (
+                        "エメラルドを受け取る空きがないため交換できませんでした。"
+                        "インベントリを空けて再試行してください。"
+                    ),
+                    "player_offline": (
+                        "連携したMinecraftアカウントがオンラインではありません。"
+                        "サーバーに参加してから再試行してください。"
+                    ),
+                    "account_ambiguous": (
+                        "連携したMinecraftアカウントが複数同時にオンラインです。"
+                        "交換に使う1アカウントだけで参加してから再試行してください。"
+                    ),
+                }[result.status]
+            await interaction.followup.send(message, ephemeral=True)
+
+    def _enable_retry(self) -> None:
+        self.confirm.disabled = False
+        self.cancel.disabled = False
+
+    @discord.ui.button(label="キャンセル", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if self._operation_lock.locked():
+            await interaction.response.send_message(
+                "交換処理中のためキャンセルできません。", ephemeral=True
+            )
+            return
+        await interaction.response.edit_message(
+            content="交換をキャンセルしました。", embed=None, view=None
+        )
+
+
 __all__ = [
+    "DIAMOND_EMERALD_PACKS",
     "EMERALD_DIAMOND_PACKS",
+    "DiamondEmeraldConfirmView",
     "EmeraldDiamondConfirmView",
     "EmeraldDiamondPackSelectView",
     "MinecraftResourceConfirmView",

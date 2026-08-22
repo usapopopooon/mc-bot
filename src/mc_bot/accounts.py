@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from pathlib import Path
 
+from mc_bot.resource_catalog import is_valid_resource_item_id
+
 WHITELIST_RETRY_LIMIT = 5
 ITEM_GACHA_NOTIFICATION_RETRY_LIMIT = 5
 
@@ -248,10 +250,7 @@ class AccountStore:
                     discord_user_id INTEGER NOT NULL,
                     guild_id INTEGER NOT NULL,
                     player_name TEXT NOT NULL,
-                    item_id TEXT NOT NULL
-                        CHECK (item_id IN (
-                            'minecraft:diamond', 'minecraft:emerald', 'minecraft:gunpowder'
-                        )),
+                    item_id TEXT NOT NULL,
                     item_name TEXT NOT NULL,
                     item_count INTEGER NOT NULL CHECK (item_count > 0),
                     cost_xp INTEGER NOT NULL CHECK (cost_xp > 0),
@@ -448,7 +447,7 @@ class AccountStore:
 
     @staticmethod
     def _upgrade_resource_exchange_items(connection: sqlite3.Connection) -> None:
-        """Allow gunpowder deliveries without discarding existing delivery state."""
+        """Remove the static item allow-list without discarding delivery state."""
         table = "minecraft_resource_exchange_deliveries"
         row = connection.execute(
             "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?",
@@ -456,7 +455,7 @@ class AccountStore:
         ).fetchone()
         if row is None:
             raise RuntimeError("minecraft resource exchange delivery table is missing")
-        if "minecraft:gunpowder" in str(row["sql"]):
+        if "CHECK (item_id IN" not in str(row["sql"]):
             return
         connection.executescript(
             """
@@ -471,10 +470,7 @@ class AccountStore:
                 discord_user_id INTEGER NOT NULL,
                 guild_id INTEGER NOT NULL,
                 player_name TEXT NOT NULL,
-                item_id TEXT NOT NULL
-                    CHECK (item_id IN (
-                        'minecraft:diamond', 'minecraft:emerald', 'minecraft:gunpowder'
-                    )),
+                item_id TEXT NOT NULL,
                 item_name TEXT NOT NULL,
                 item_count INTEGER NOT NULL CHECK (item_count > 0),
                 cost_xp INTEGER NOT NULL CHECK (cost_xp > 0),
@@ -1709,7 +1705,7 @@ class AccountStore:
             or discord_user_id <= 0
             or guild_id <= 0
             or not player_name
-            or item_id not in {"minecraft:diamond", "minecraft:emerald", "minecraft:gunpowder"}
+            or not is_valid_resource_item_id(item_id)
             or not item_name
             or not 1 <= item_count <= 64
             or cost_xp <= 0
@@ -2859,6 +2855,57 @@ class AccountStore:
                 (account_id, log_count, combo_count, observed_at, observed_at),
             )
         return reward
+
+    def reset_woodcutting_combo(
+        self,
+        *,
+        event_id: str,
+        account_id: int,
+        discord_user_id: int,
+        guild_id: int,
+        observed_at: str,
+        combo_window_seconds: int,
+    ) -> bool:
+        """対象の原木・幹を置いた本人の伐採コンボだけを冪等にリセットする。"""
+        normalized_event_id, observed = _validate_activity_event(
+            event_id=event_id,
+            account_id=account_id,
+            discord_user_id=discord_user_id,
+            guild_id=guild_id,
+            observed_at=observed_at,
+            combo_window_seconds=combo_window_seconds,
+        )
+        with self._connect() as connection:
+            if not _claim_activity_event(
+                connection,
+                event_id=normalized_event_id,
+                kind="woodcutting",
+                account_id=account_id,
+                observed_at=observed_at,
+            ):
+                return False
+            state = connection.execute(
+                """
+                SELECT last_log_at
+                FROM minecraft_woodcutting_combo_states
+                WHERE account_id = ?
+                """,
+                (account_id,),
+            ).fetchone()
+            if state is None or state["last_log_at"] is None:
+                return True
+            last_log_at = datetime.fromisoformat(str(state["last_log_at"]))
+            if observed < last_log_at:
+                return True
+            connection.execute(
+                """
+                UPDATE minecraft_woodcutting_combo_states
+                SET combo_count = 0, last_log_at = NULL, updated_at = ?
+                WHERE account_id = ?
+                """,
+                (observed_at, account_id),
+            )
+        return True
 
     def list_pending_woodcutting_reward_deliveries(
         self, account_id: int | None = None

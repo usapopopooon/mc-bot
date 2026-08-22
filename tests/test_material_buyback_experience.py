@@ -39,7 +39,7 @@ class FakeSession:
         return FakeResponse(
             {
                 "status": "reserved",
-                "message": "砂岩の買取を受け付けました。",
+                "message": "砂岩の売却を受け付けました。",
                 "request_id": REQUEST_ID,
                 "item_id": "minecraft:sandstone",
                 "item_name": "砂岩",
@@ -47,7 +47,7 @@ class FakeSession:
                 "reward_xp": 200,
                 "reward_day": "2026-08-21",
                 "daily_reserved_xp": 450,
-                "daily_limit_xp": 1_500,
+                "daily_limit_xp": 3_000,
                 "duplicate": self.duplicate,
             },
             status=self.reserve_status,

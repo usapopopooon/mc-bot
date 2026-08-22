@@ -28,10 +28,19 @@ from mc_bot.accounts import (
     WoodcuttingComboRewardEvent,
 )
 from mc_bot.activity import ActivityKind, MinecraftActivityEvent, parse_activity_event
+from mc_bot.admin_quest import (
+    AdminQuestDraft,
+    AdminQuestRetryView,
+    AdminQuestSuggestionView,
+)
 from mc_bot.config import Config
 from mc_bot.emerald_exchange import (
+    DiamondEmeraldExchangeResult,
     EmeraldDiamondExchangeResult,
+    diamond_emerald_exchange_command,
     emerald_diamond_exchange_command,
+    parse_diamond_emerald_exchange_event,
+    parse_diamond_emerald_exchange_result,
     parse_emerald_diamond_exchange_event,
     parse_emerald_diamond_exchange_result,
 )
@@ -41,7 +50,9 @@ from mc_bot.experience import (
     ADVANCEMENT_REWARD_IN_GAME_XP,
     ADVANCEMENT_REWARD_LEVEL_BOT_SOURCE_XP,
     LevelBotXpClient,
+    MinecraftResourceCatalog,
     MinecraftResourceExchangeRequest,
+    MinecraftResourcePack,
     MinecraftXpExchangeRequest,
     actionbar_clear_command,
     advancement_reward_tellraw_command,
@@ -63,6 +74,7 @@ from mc_bot.fishing import (
 )
 from mc_bot.formatting import (
     format_advancement_reward,
+    format_diamond_emerald_exchange,
     format_emerald_diamond_exchange,
     format_event,
     format_fishing_combo_milestone,
@@ -141,8 +153,11 @@ from mc_bot.player_count import (
     player_count_status,
 )
 from mc_bot.quest import (
+    SYSTEM_QUEST_OWNER_UUID,
     Quest,
     QuestStore,
+    admin_quest_create_command,
+    parse_admin_quest_create_result,
     parse_quest_action_result,
     quest_action_command,
     quest_log_nonce,
@@ -163,11 +178,18 @@ from mc_bot.quest_ui import (
     quest_panel_embed,
 )
 from mc_bot.rcon import RconClient, RconError
+from mc_bot.resource_catalog import (
+    is_valid_resource_item_id,
+    resource_catalog_sync_command,
+    resource_pack_validation_command,
+    validate_resource_pack,
+)
 from mc_bot.resource_shop import (
     EmeraldDiamondPackSelectView,
     MinecraftResourcePackSelectView,
     MinecraftResourceShopPanelView,
     minecraft_resource_shop_embed,
+    resource_catalog_management_embed,
     resource_exchange_actionbar_command,
     resource_exchange_tellraw_command,
     resource_give_command,
@@ -193,7 +215,11 @@ from mc_bot.status_panel import (
     status_panel_embed,
 )
 from mc_bot.tailer import LogTailer
-from mc_bot.translations import AdvancementTranslator
+from mc_bot.translations import (
+    AdvancementTranslator,
+    MinecraftItemOption,
+    MinecraftItemTranslator,
+)
 from mc_bot.ui import (
     AccessPanelView,
     AccountSelectView,
@@ -225,6 +251,7 @@ from mc_bot.xp_shop import (
 )
 
 LOGGER = logging.getLogger(__name__)
+_RESOURCE_CATALOG_REVERIFY_SECONDS = 5 * 60
 _JAVA_NAME = re.compile(r"[A-Za-z0-9_]{3,16}")
 _MODERN_GAMERTAG_SUFFIX = re.compile("^(.+)[#\uff03]([0-9\uff10-\uff19]+)$")
 _FULLWIDTH_DIGITS = str.maketrans(
@@ -330,6 +357,7 @@ class MinecraftDiscordBot(discord.Client):
         self._market_lock = asyncio.Lock()
         self._market_notification_lock = asyncio.Lock()
         self._market_panel_lock = asyncio.Lock()
+        self._resource_catalog_sync_lock = asyncio.Lock()
         self._quest_lock = asyncio.Lock()
         self._quest_panel_lock = asyncio.Lock()
         self._quest_notification_lock = asyncio.Lock()
@@ -343,7 +371,11 @@ class MinecraftDiscordBot(discord.Client):
         self._closing = False
         self._health_path = Path("/tmp/mc-bot-healthy")
         self._sync_ticks = 0
+        self._resource_catalog_revision: int | None = None
+        self._resource_catalog_verified_at = 0.0
+        self._resource_catalog_last_error: str | None = None
         self._next_status_panel_refresh_at = time.monotonic() + _STATUS_PANEL_REFRESH_SECONDS
+        self._item_translator = MinecraftItemTranslator.load()
 
     def _register_commands(self) -> None:
         group = app_commands.Group(
@@ -384,6 +416,18 @@ class MinecraftDiscordBot(discord.Client):
             name="resource-panel",
             description="Minecraft 資源交換所パネルを設置します",
         )(self._configure_resource_shop_panel)
+        group.command(
+            name="resource-exchange-set",
+            description="資源交換の商品・価格を再起動なしで追加または変更します",
+        )(self._configure_resource_exchange_set)
+        group.command(
+            name="resource-exchange-remove",
+            description="資源交換の商品を再起動なしで取り下げます",
+        )(self._configure_resource_exchange_remove)
+        group.command(
+            name="resource-exchange-list",
+            description="現在の資源交換商品とMinecraft同期状態を表示します",
+        )(self._configure_resource_exchange_list)
         group.command(
             name="item-gacha-panel",
             description="1日3回までのMinecraftアイテムガチャパネルを設置します",
@@ -883,6 +927,177 @@ class MinecraftDiscordBot(discord.Client):
             ephemeral=True,
             allowed_mentions=discord.AllowedMentions.none(),
         )
+
+    @app_commands.describe(
+        item_id="MinecraftアイテムID (例: gunpowder / minecraft:gunpowder)",
+        item_name="同じアイテムIDの全個数に表示する名前",
+        item_count="受け取る個数 (1〜64)",
+        cost_xp="必要なサーバーXP",
+    )
+    async def _configure_resource_exchange_set(
+        self,
+        interaction: discord.Interaction,
+        item_id: str,
+        item_name: str,
+        item_count: app_commands.Range[int, 1, 64],
+        cost_xp: app_commands.Range[int, 1, 10_000_000],
+    ) -> None:
+        if not await self._require_server_manager(interaction):
+            return
+        if interaction.guild_id is None:
+            return
+        normalized_item_id = self._normalize_resource_item_id(item_id)
+        pack = MinecraftResourcePack(
+            item_id=normalized_item_id,
+            item_name=item_name.strip(),
+            item_count=item_count,
+            cost_xp=cost_xp,
+        )
+        try:
+            validate_resource_pack(pack)
+            self._ensure_same_guild(interaction.guild_id)
+        except (RuntimeError, ValueError) as error:
+            await interaction.response.send_message(str(error), ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        validation_error = await self._validate_resource_pack_with_minecraft(pack)
+        if validation_error is not None:
+            reason = discord.utils.escape_markdown(validation_error[:300])
+            await interaction.followup.send(
+                f"Minecraftで確認できないため保存していません (理由: {reason})。"
+                "アイテムIDとサーバー接続を確認してください。",
+                ephemeral=True,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            return
+        catalog = await self._level_bot_xp.upsert_resource_pack(
+            guild_id=interaction.guild_id,
+            actor_user_id=interaction.user.id,
+            item_id=pack.item_id,
+            item_name=pack.item_name,
+            item_count=pack.item_count,
+            cost_xp=pack.cost_xp,
+        )
+        if catalog is None:
+            await interaction.followup.send(
+                "交換設定を保存できませんでした。level-botの状態を確認してください。",
+                ephemeral=True,
+            )
+            return
+        synchronized = await self._sync_resource_catalog(catalog=catalog, force=True)
+        await self._refresh_resource_shop_panel()
+        status = (
+            "Minecraftへ反映しました。再起動は不要です。"
+            if synchronized
+            else self._resource_catalog_pending_status()
+        )
+        await interaction.followup.send(
+            (
+                f"**{discord.utils.escape_markdown(pack.item_name)} x{pack.item_count:,}** / "
+                f"**{pack.cost_xp:,} サーバーXP** に設定しました。\n"
+                "同じアイテムIDの既存商品も、この表示名に統一されます。\n"
+                f"カタログ世代: `{catalog.revision}` — {status}"
+            ),
+            ephemeral=True,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+    @app_commands.describe(
+        item_id="取り下げるMinecraftアイテムID",
+        item_count="取り下げる交換個数",
+    )
+    async def _configure_resource_exchange_remove(
+        self,
+        interaction: discord.Interaction,
+        item_id: str,
+        item_count: app_commands.Range[int, 1, 64],
+    ) -> None:
+        if not await self._require_server_manager(interaction):
+            return
+        if interaction.guild_id is None:
+            return
+        normalized_item_id = self._normalize_resource_item_id(item_id)
+        try:
+            if not is_valid_resource_item_id(normalized_item_id):
+                raise ValueError("resource item_id is invalid")
+            self._ensure_same_guild(interaction.guild_id)
+        except (RuntimeError, ValueError) as error:
+            await interaction.response.send_message(str(error), ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        catalog = await self._level_bot_xp.remove_resource_pack(
+            guild_id=interaction.guild_id,
+            actor_user_id=interaction.user.id,
+            item_id=normalized_item_id,
+            item_count=item_count,
+        )
+        if catalog is None:
+            await interaction.followup.send(
+                "その交換商品を取り下げられませんでした。現在の一覧を確認してください。",
+                ephemeral=True,
+            )
+            return
+        synchronized = await self._sync_resource_catalog(catalog=catalog, force=True)
+        await self._refresh_resource_shop_panel()
+        status = (
+            "Minecraftへ反映しました。再起動は不要です。"
+            if synchronized
+            else self._resource_catalog_pending_status()
+        )
+        await interaction.followup.send(
+            (
+                f"`{normalized_item_id}` x{item_count:,} を取り下げました。\n"
+                f"カタログ世代: `{catalog.revision}` — {status}"
+            ),
+            ephemeral=True,
+        )
+
+    async def _configure_resource_exchange_list(self, interaction: discord.Interaction) -> None:
+        if not await self._require_server_manager(interaction):
+            return
+        if interaction.guild_id is None:
+            return
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        catalog = await self._level_bot_xp.fetch_resource_catalog(interaction.guild_id)
+        if catalog is None:
+            await interaction.followup.send("交換設定を取得できませんでした。", ephemeral=True)
+            return
+        synchronized = await self._sync_resource_catalog(catalog=catalog)
+        await interaction.followup.send(
+            embed=resource_catalog_management_embed(
+                catalog.packs,
+                revision=catalog.revision,
+                synchronized=synchronized,
+                synchronization_error=self._resource_catalog_last_error,
+            ),
+            ephemeral=True,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+    @staticmethod
+    def _normalize_resource_item_id(item_id: str) -> str:
+        normalized = item_id.strip().lower()
+        return normalized if ":" in normalized else f"minecraft:{normalized}"
+
+    def _resource_catalog_pending_status(self) -> str:
+        reason = discord.utils.escape_markdown(
+            (self._resource_catalog_last_error or "接続または応答を確認できませんでした")[:300]
+        )
+        return (
+            f"設定は保存済みですがMinecraftへ未反映です (理由: {reason})。"
+            "入力内容と接続を確認してください。未反映中は自動で再同期します。"
+        )
+
+    async def _validate_resource_pack_with_minecraft(
+        self, pack: MinecraftResourcePack
+    ) -> str | None:
+        try:
+            response = await self._execute_checked_rcon(resource_pack_validation_command(pack))
+        except (OSError, RconError, RuntimeError, ValueError) as error:
+            return str(error)
+        if response != "Resource pack valid":
+            return response or "Minecraftの応答が空です"
+        return None
 
     @app_commands.describe(channel="アイテムガチャパネルの投稿先。省略時は現在のチャンネル")
     async def _configure_item_gacha_panel(
@@ -2221,6 +2436,9 @@ class MinecraftDiscordBot(discord.Client):
                 account_id=account.id,
             )
             return
+        if request.kind == "diamond_emerald":
+            await self._handle_minecraft_diamond_exchange_request(request)
+            return
         await self._handle_minecraft_emerald_exchange_request(request)
 
     async def _handle_market_listing(self, event: MinecraftMarketListingEvent) -> None:
@@ -3014,8 +3232,124 @@ class MinecraftDiscordBot(discord.Client):
                 break
         return found
 
+    async def show_admin_quest_suggestions(
+        self,
+        interaction: discord.Interaction,
+        draft: AdminQuestDraft,
+    ) -> None:
+        if not await self._require_server_manager(interaction):
+            return
+        requested_options = self._item_translator.search(draft.requested_query)
+        reward_options = self._item_translator.search(draft.reward_query)
+        missing: list[str] = []
+        if not requested_options:
+            missing.append(f"依頼品「{draft.requested_query}」")
+        if not reward_options:
+            missing.append(f"報酬「{draft.reward_query}」")
+        if missing:
+            await interaction.response.send_message(
+                " / ".join(missing) + " に一致する候補がありません。日本語名・英語名を短くするか、"
+                "正確なIDを入力して、もう一度お試しください。",
+                view=AdminQuestRetryView(self, draft, owner_id=interaction.user.id),
+                ephemeral=True,
+            )
+            return
+        requested_item_id = self._initial_admin_quest_item(draft.requested_query, requested_options)
+        reward_item_id = self._initial_admin_quest_item(draft.reward_query, reward_options)
+        view = AdminQuestSuggestionView(
+            self,
+            draft,
+            owner_id=interaction.user.id,
+            requested_options=requested_options,
+            reward_options=reward_options,
+            requested_item_id=requested_item_id,
+            reward_item_id=reward_item_id,
+        )
+        await interaction.response.send_message(
+            view.summary(),
+            view=view,
+            ephemeral=True,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+    def _initial_admin_quest_item(
+        self, query: str, options: list[MinecraftItemOption]
+    ) -> str | None:
+        exact = [
+            option for option in options if self._item_translator.is_exact_match(query, option)
+        ]
+        if len(exact) == 1:
+            return exact[0].item_id
+        if len(options) == 1:
+            return options[0].item_id
+        return None
+
+    async def create_admin_quest(
+        self,
+        interaction: discord.Interaction,
+        draft: AdminQuestDraft,
+        *,
+        requested_item_id: str,
+        reward_item_id: str,
+    ) -> None:
+        if not await self._require_server_manager(interaction):
+            return
+        await interaction.response.defer()
+        request_id = str(uuid.uuid4())
+        try:
+            async with self._quest_lock:
+                response = await self._execute_rcon(
+                    admin_quest_create_command(
+                        requested_item_id,
+                        draft.requested_count,
+                        reward_item_id,
+                        draft.reward_count,
+                        draft.fulfillment_hours,
+                        request_id,
+                    )
+                )
+                result = parse_admin_quest_create_result(response, request_id=request_id)
+        except (OSError, RconError, RuntimeError, ValueError) as error:
+            LOGGER.warning("Admin quest creation is ambiguous request=%s: %s", request_id, error)
+            await interaction.edit_original_response(
+                content=(
+                    "作成結果を確認できませんでした。重複作成を避けるため、"
+                    "クエスト掲示板を確認してから再操作してください。"
+                ),
+                view=None,
+            )
+            return
+        if result.status == "completed":
+            duplicate = " (作成済みの同じ処理を確認しました)" if result.duplicate else ""
+            await interaction.edit_original_response(
+                content=(
+                    f"Bot発行クエスト **#{result.quest_id}** を作成しました。{duplicate}\n"
+                    "掲示板カードはMinecraftログを受信後、通常は数秒で表示されます。"
+                ),
+                view=None,
+            )
+            return
+        messages = {
+            "invalid_requested_item": "選んだ依頼品はMinecraftでアイテムとして生成できません。",
+            "invalid_requested_count": "依頼数が、そのアイテムを一括納品できる上限を超えています。",
+            "invalid_reward_item": "選んだ報酬はMinecraftでアイテムとして生成できません。",
+            "invalid_reward_count": "報酬数が、そのアイテムの1スタック上限を超えています。",
+            "invalid_hours": "納品期限は1〜72時間で指定してください。",
+            "storage_error": (
+                "Minecraft側でクエストを保存できませんでした。少し待って再操作してください。"
+            ),
+            "invalid_request": (
+                "入力内容をMinecraft側で確認できませんでした。候補と個数を選び直してください。"
+            ),
+        }
+        await interaction.edit_original_response(
+            content=messages.get(result.status, "クエストを作成できませんでした。"),
+            view=AdminQuestRetryView(self, draft, owner_id=interaction.user.id),
+        )
+
     async def _handle_quest_state(self, event: MinecraftQuestStateEvent) -> None:
-        owner = await self._quest_account(event.owner_uuid)
+        system_issued = event.owner_uuid == SYSTEM_QUEST_OWNER_UUID
+        owner = None if system_issued else await self._quest_account(event.owner_uuid)
         worker = (
             await self._quest_account(event.worker_uuid) if event.worker_uuid is not None else None
         )
@@ -3023,11 +3357,15 @@ class MinecraftDiscordBot(discord.Client):
             self._quests.apply_state,
             event,
             owner_account_id=owner.id if owner is not None else None,
-            owner_discord_user_id=(owner.discord_user_id if owner is not None else None),
+            owner_discord_user_id=(
+                self.user.id
+                if system_issued and self.user is not None
+                else (owner.discord_user_id if owner is not None else None)
+            ),
             worker_account_id=worker.id if worker is not None else None,
             worker_discord_user_id=(worker.discord_user_id if worker is not None else None),
         )
-        if event.status == "open" and owner is None:
+        if event.status == "open" and owner is None and not system_issued:
             await self._undo_unlinked_quest_state(
                 event,
                 action="invalidate",
@@ -3179,7 +3517,7 @@ class MinecraftDiscordBot(discord.Client):
                 else "このクエストは募集を終了しました。"
             )
         elif action == "cancel" and (
-            quest.status != "open" or quest.owner_discord_user_id != interaction.user.id
+            quest.status != "open" or not self._can_cancel_quest(interaction, quest)
         ):
             invalid_message = "取り消せるのは募集中の自分の依頼だけです。"
         elif action in {"submit", "abandon"} and (
@@ -3208,7 +3546,7 @@ class MinecraftDiscordBot(discord.Client):
         if (
             quest is None
             or quest.status != "open"
-            or quest.owner_discord_user_id != interaction.user.id
+            or not self._can_cancel_quest(interaction, quest)
         ):
             await interaction.followup.send(
                 "取り消せるのは募集中の自分の依頼だけです。", ephemeral=True
@@ -3217,11 +3555,15 @@ class MinecraftDiscordBot(discord.Client):
         result = await self._run_quest_action("cancel", quest, quest.owner_uuid)
         if result is not None and result.status == "completed":
             await self._delete_quest_card(quest)
-            await interaction.followup.send(
-                "依頼を取り消しました。報酬はMinecraftの `/quest` にある"
-                "「受取箱を受け取る」から受け取れます。",
-                ephemeral=True,
+            message = (
+                "Bot発行クエストを取り消しました。"
+                if quest.is_system_issued
+                else (
+                    "依頼を取り消しました。報酬はMinecraftの `/quest` にある"
+                    "「受取箱を受け取る」から受け取れます。"
+                )
             )
+            await interaction.followup.send(message, ephemeral=True)
             return
         await interaction.followup.send(
             self._quest_action_error(result.status if result is not None else "unknown"),
@@ -3325,6 +3667,18 @@ class MinecraftDiscordBot(discord.Client):
             return None
 
     @staticmethod
+    def _can_cancel_quest(interaction: discord.Interaction, quest: Quest) -> bool:
+        if quest.owner_discord_user_id == interaction.user.id:
+            return True
+        member = interaction.user
+        return (
+            quest.is_system_issued
+            and interaction.guild is not None
+            and isinstance(member, discord.Member)
+            and member.guild_permissions.manage_guild
+        )
+
+    @staticmethod
     def _quest_action_error(status: str) -> str:
         return {
             "unavailable": "そのクエストは募集を終了しました。",
@@ -3422,7 +3776,11 @@ class MinecraftDiscordBot(discord.Client):
 
     async def _post_quest_listing(self, quest: Quest, *, move_panel: bool = True) -> None:
         channel_id = self._settings.quest_channel_id
-        if channel_id is None or quest.status != "open" or quest.owner_discord_user_id is None:
+        if (
+            channel_id is None
+            or quest.status != "open"
+            or (quest.owner_discord_user_id is None and not quest.is_system_issued)
+        ):
             return
         channel = await self._resolve_and_validate_channel(channel_id, require_embeds=True)
         message = await channel.send(
@@ -3774,6 +4132,53 @@ class MinecraftDiscordBot(discord.Client):
             messages[result.status],
         )
 
+    async def _handle_minecraft_diamond_exchange_request(
+        self,
+        request: MinecraftExchangeRequest,
+    ) -> None:
+        try:
+            response = await self._execute_rcon(
+                diamond_emerald_exchange_command(
+                    request.player_uuid,
+                    request.amount,
+                    request.request_id,
+                )
+            )
+            result = parse_diamond_emerald_exchange_result(
+                response,
+                expected_request_id=request.request_id,
+                expected_diamond_count=request.amount,
+            )
+        except (OSError, RconError, RuntimeError, ValueError) as error:
+            LOGGER.warning(
+                "Could not complete game-command diamond exchange request=%s: %s",
+                request.request_id,
+                error,
+            )
+            await self._send_minecraft_private_message(
+                request.player_name,
+                "ダイヤモンド交換結果を確認できませんでした。アイテム欄を確認し、"
+                "不明な場合は管理者へご連絡ください。",
+            )
+            return
+        messages = {
+            "completed": (
+                "この交換は完了済みです。"
+                if result.duplicate
+                else (
+                    f"交換完了: ダイヤモンド x{result.diamond_count} → "
+                    f"エメラルド x{result.emerald_count}"
+                )
+            ),
+            "insufficient_diamonds": "手持ちのダイヤモンドが不足しています。",
+            "inventory_full": "エメラルドを受け取る空きがありません。",
+            "player_offline": "プレイヤーのオンライン状態を確認できませんでした。",
+        }
+        await self._send_minecraft_private_message(
+            request.player_name,
+            messages[result.status],
+        )
+
     async def _handle_minecraft_material_buyback_request(
         self,
         request: MinecraftExchangeRequest,
@@ -3875,11 +4280,11 @@ class MinecraftDiscordBot(discord.Client):
         messages = {
             "insufficient_items": (
                 f"通常の{reservation.item_name}が不足しています。"
-                "名前や特殊データのない資材を64個単位で入れてください。"
+                "名前や特殊データのない通常アイテムを64個単位で入れてください。"
             ),
             "player_offline": "プレイヤーのオンライン状態を確認できませんでした。",
             "storage_error": (
-                "資材の保存処理を完了できませんでした。アイテム数を確認し、"
+                "資源の保存処理を完了できませんでした。アイテム数を確認し、"
                 "不明な場合は管理者へご連絡ください。"
             ),
         }
@@ -3916,7 +4321,7 @@ class MinecraftDiscordBot(discord.Client):
     ) -> str:
         if item_name is None:
             raise RuntimeError("material buyback completion has no item name")
-        status = "買取完了（処理済み）" if duplicate else "買取完了"  # noqa: RUF001
+        status = "売却完了（処理済み）" if duplicate else "売却完了"  # noqa: RUF001
         message = f"{status}: 通常の{item_name} x{item_count:,} → +{reward_xp:,} サーバーXP"
         shop = await self._level_bot_xp.fetch_xp_shop(guild_id, user_id)
         if shop is not None:
@@ -3924,11 +4329,7 @@ class MinecraftDiscordBot(discord.Client):
         else:
             message += " / 現在の残高は /exchange balance で確認できます"
         remaining = max(0, daily_limit_xp - daily_reserved_xp)
-        return (
-            message
-            + f" / 本日の残り買取枠 {remaining:,} サーバーXP。"
-            + "エメラルドは /exchange の「資源へ交換」から交換できます。"
-        )
+        return message + f" / 本日の残り売却枠 {remaining:,} サーバーXP。"
 
     @staticmethod
     def _fresh_game_request_time(value: str) -> datetime | None:
@@ -4073,7 +4474,7 @@ class MinecraftDiscordBot(discord.Client):
             await interaction.followup.send(message, ephemeral=True)
             return
         await interaction.followup.send(
-            "手持ちのエメラルドと交換する数量を選んでください。\n"
+            "ダイヤモンドとエメラルドの両替内容を選んでください。\n"
             "交換完了はMinecraft内チャットとDiscordログへ通知されます。",
             view=EmeraldDiamondPackSelectView(self, owner_id=interaction.user.id),
             ephemeral=True,
@@ -4131,6 +4532,40 @@ class MinecraftDiscordBot(discord.Client):
             )
         except (OSError, RconError, RuntimeError, ValueError) as error:
             LOGGER.warning("Could not complete emerald-diamond exchange: %s", error)
+            return None
+
+    async def confirm_diamond_emerald_exchange(
+        self,
+        interaction: discord.Interaction,
+        *,
+        request_id: str,
+        diamond_count: int,
+    ) -> DiamondEmeraldExchangeResult | None:
+        try:
+            account, reason = await self._online_exchange_account(interaction.user.id)
+            if account is None:
+                return DiamondEmeraldExchangeResult(
+                    request_id=str(uuid.UUID(request_id)),
+                    status=reason or "player_offline",
+                    diamond_count=diamond_count,
+                    emerald_count=diamond_count * 16,
+                    duplicate=False,
+                )
+            if account.player_uuid is None:
+                raise ValueError("linked Minecraft account has no UUID")
+            command = diamond_emerald_exchange_command(
+                account.player_uuid,
+                diamond_count,
+                request_id,
+            )
+            response = await self._execute_rcon(command)
+            return parse_diamond_emerald_exchange_result(
+                response,
+                expected_request_id=request_id,
+                expected_diamond_count=diamond_count,
+            )
+        except (OSError, RconError, RuntimeError, ValueError) as error:
+            LOGGER.warning("Could not complete diamond-emerald exchange: %s", error)
             return None
 
     async def _online_exchange_account(
@@ -6021,6 +6456,75 @@ class MinecraftDiscordBot(discord.Client):
         except (RuntimeError, discord.DiscordException) as error:
             LOGGER.warning("Could not refresh Minecraft resource shop panel: %s", error)
 
+    async def _sync_resource_catalog(
+        self,
+        *,
+        catalog: MinecraftResourceCatalog | None = None,
+        force: bool = False,
+    ) -> bool:
+        guild_id = self._settings.guild_id
+        if guild_id is None:
+            self._resource_catalog_last_error = "Discordサーバーが未設定です"
+            return False
+        if self._rcon is None:
+            self._resource_catalog_last_error = "RCONが未設定です"
+            return False
+        async with self._resource_catalog_sync_lock:
+            if catalog is None:
+                catalog = await self._level_bot_xp.fetch_resource_catalog(guild_id)
+            if catalog is None:
+                self._resource_catalog_last_error = "level-botからカタログを取得できませんでした"
+                return False
+            if catalog.guild_id != guild_id:
+                LOGGER.error(
+                    "Ignored resource catalog for another guild expected=%d actual=%d",
+                    guild_id,
+                    catalog.guild_id,
+                )
+                self._resource_catalog_last_error = "別のDiscordサーバーのカタログです"
+                return False
+            now = time.monotonic()
+            if (
+                not force
+                and self._resource_catalog_revision == catalog.revision
+                and now - self._resource_catalog_verified_at < _RESOURCE_CATALOG_REVERIFY_SECONDS
+            ):
+                return True
+            try:
+                response = await self._execute_checked_rcon(
+                    resource_catalog_sync_command(catalog.revision, catalog.packs)
+                )
+            except (OSError, RconError, RuntimeError, ValueError) as error:
+                LOGGER.warning(
+                    "Could not synchronize Minecraft resource catalog revision=%d: %s",
+                    catalog.revision,
+                    error,
+                )
+                self._resource_catalog_last_error = str(error)
+                return False
+            accepted_responses = (
+                f"Resource catalog synchronized: revision {catalog.revision}",
+                f"Resource catalog already current: revision {catalog.revision}",
+            )
+            if not response.startswith(accepted_responses):
+                LOGGER.error(
+                    "Minecraft returned an unexpected resource catalog response: %s",
+                    response,
+                )
+                self._resource_catalog_last_error = response or "Minecraftの応答が空です"
+                return False
+            changed = self._resource_catalog_revision != catalog.revision
+            self._resource_catalog_revision = catalog.revision
+            self._resource_catalog_verified_at = now
+            self._resource_catalog_last_error = None
+            if changed:
+                LOGGER.info(
+                    "Minecraft resource catalog synchronized revision=%d packs=%d",
+                    catalog.revision,
+                    len(catalog.packs),
+                )
+            return True
+
     async def _refresh_item_gacha_panel(self) -> None:
         channel_id = self._settings.item_gacha_panel_channel_id
         message_id = self._settings.item_gacha_panel_message_id
@@ -6181,6 +6685,60 @@ class MinecraftDiscordBot(discord.Client):
                         item_gacha_request.player_uuid,
                     )
                 await asyncio.to_thread(self._tailer.acknowledge, pending_line)
+                continue
+            try:
+                diamond_exchange = parse_diamond_emerald_exchange_event(pending_line.text)
+            except ValueError as error:
+                LOGGER.warning("Ignored malformed Minecraft diamond exchange event: %s", error)
+                await asyncio.to_thread(self._tailer.acknowledge, pending_line)
+                continue
+            if diamond_exchange is not None:
+                if integration_only and self._channel is None:
+                    await asyncio.to_thread(self._tailer.acknowledge, pending_line)
+                    continue
+                try:
+                    account = await asyncio.to_thread(
+                        self._accounts.get_by_player_uuid,
+                        diamond_exchange.player_uuid,
+                    )
+                except ValueError as error:
+                    LOGGER.warning(
+                        "Could not identify diamond exchange account by UUID %s: %s",
+                        diamond_exchange.player_uuid,
+                        error,
+                    )
+                    account = None
+                guild = self.get_guild(self._settings.guild_id or 0)
+                server_name = guild.name if guild is not None else "サーバー"
+                embed = format_diamond_emerald_exchange(
+                    server_name=server_name,
+                    player_name=diamond_exchange.player_name,
+                    discord_user_id=(
+                        account.discord_user_id
+                        if account is not None and account.status == "active"
+                        else None
+                    ),
+                    diamond_count=diamond_exchange.diamond_count,
+                    emerald_count=diamond_exchange.emerald_count,
+                )
+                retry_delay = 1
+                while not self.is_closed():
+                    await self.wait_until_ready()
+                    try:
+                        await self._send(embed)
+                    except (RuntimeError, discord.DiscordException) as error:
+                        self._delivery_healthy = False
+                        LOGGER.warning(
+                            "Discord diamond exchange log failed; retrying in %ds: %s",
+                            retry_delay,
+                            error,
+                        )
+                        await asyncio.sleep(retry_delay)
+                        retry_delay = min(retry_delay * 2, 30)
+                        continue
+                    await asyncio.to_thread(self._tailer.acknowledge, pending_line)
+                    self._delivery_healthy = True
+                    break
                 continue
             try:
                 emerald_exchange = parse_emerald_diamond_exchange_event(pending_line.text)
@@ -6440,6 +6998,17 @@ class MinecraftDiscordBot(discord.Client):
                 observed_at=event.occurred_at,
                 combo_window_seconds=WOODCUTTING_COMBO_WINDOW_SECONDS,
             )
+        elif event.kind is ActivityKind.WOODCUTTING_RESET:
+            await asyncio.to_thread(
+                self._accounts.reset_woodcutting_combo,
+                event_id=event.event_id,
+                account_id=account.id,
+                discord_user_id=account.discord_user_id,
+                guild_id=guild_id,
+                observed_at=event.occurred_at,
+                combo_window_seconds=WOODCUTTING_COMBO_WINDOW_SECONDS,
+            )
+            return False
         else:
             reward = await asyncio.to_thread(
                 self._accounts.record_minecraft_xp_gain,
@@ -7103,6 +7672,10 @@ class MinecraftDiscordBot(discord.Client):
     async def _minecraft_xp_loop(self) -> None:
         while not self.is_closed():
             try:
+                await self._sync_resource_catalog()
+            except Exception:
+                LOGGER.exception("Unexpected Minecraft resource catalog synchronization failure")
+            try:
                 await self._sync_minecraft_level_up_announcements()
                 await self._sync_minecraft_xp()
             except (OSError, RconError, RuntimeError, ValueError) as error:
@@ -7527,6 +8100,7 @@ class MinecraftDiscordBot(discord.Client):
                         resource_exchange_actionbar_command(
                             delivery.player_name,
                             delivery.item_id,
+                            delivery.item_name,
                             delivery.item_count,
                             delivery.cost_xp,
                         )
@@ -7550,6 +8124,7 @@ class MinecraftDiscordBot(discord.Client):
                             server_name,
                             delivery.player_name,
                             delivery.item_id,
+                            delivery.item_name,
                             delivery.item_count,
                             delivery.cost_xp,
                         ),

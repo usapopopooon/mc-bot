@@ -6,7 +6,10 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from mc_bot.quest import (
+    SYSTEM_QUEST_OWNER_UUID,
     QuestStore,
+    admin_quest_create_command,
+    parse_admin_quest_create_result,
     parse_quest_action_result,
     quest_action_command,
     quest_log_nonce,
@@ -268,6 +271,53 @@ def test_quest_rcon_protocol_requires_name_only_for_accept() -> None:
     )
     assert quest_log_nonce(ACCEPTED_ID) == quest_log_nonce(ACCEPTED_ID)
     assert 0 <= quest_log_nonce(ACCEPTED_ID) < 2**64
+
+
+def test_admin_quest_create_protocol_binds_all_items_counts_and_request_id() -> None:
+    command = admin_quest_create_command(
+        "minecraft:stone",
+        32,
+        "minecraft:diamond",
+        3,
+        24,
+        CREATED_ID,
+    )
+    result = parse_admin_quest_create_result(
+        f"Done USAPO_QUEST_CREATE_RESULT|1|{CREATED_ID}|17|completed|new\n",
+        request_id=CREATED_ID,
+    )
+
+    assert command == (
+        "usapo-event-bridge quest-admin-create minecraft:stone 32 "
+        f"minecraft:diamond 3 24 {CREATED_ID}"
+    )
+    assert result.quest_id == 17
+    assert result.status == "completed"
+    assert result.duplicate is False
+
+
+def test_system_quest_card_uses_bot_mention_and_has_no_minecraft_owner(tmp_path) -> None:
+    event = _event(owner_uuid=SYSTEM_QUEST_OWNER_UUID, owner_name="-")
+    store = QuestStore(tmp_path / "quests.db")
+    store.initialize()
+
+    quest, _ = store.apply_state(
+        event,
+        owner_account_id=None,
+        owner_discord_user_id=999,
+        worker_account_id=None,
+        worker_discord_user_id=None,
+    )
+    card = quest_listing_embed(quest)
+    cancelled_log = quest_log_embed(
+        replace(quest, status="cancelled", last_transition_kind="cancelled")
+    )
+
+    assert quest.is_system_issued
+    assert quest.owner_account_id is None
+    assert card.fields[0].value == "<@999>"
+    assert "理由: 管理者が取消" in (cancelled_log.description or "")
+    assert "返却アイテムはありません" in (cancelled_log.footer.text or "")
 
 
 def test_quest_cards_explain_visibility_claims_and_terminal_result(tmp_path) -> None:

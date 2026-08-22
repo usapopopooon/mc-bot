@@ -6,8 +6,10 @@ import pytest
 from discord import app_commands
 
 from mc_bot.accounts import WHITELIST_RETRY_LIMIT, AccountStore, MinecraftAccount
+from mc_bot.admin_quest import AdminQuestCreateModal
 from mc_bot.bot import MinecraftDiscordBot
 from mc_bot.config import Config
+from mc_bot.experience import MinecraftResourceCatalog, MinecraftResourcePack
 from mc_bot.settings import RuntimeSettings
 from mc_bot.ui import (
     AccountSelect,
@@ -404,6 +406,9 @@ def test_registers_manager_only_configuration_commands() -> None:
         "panel",
         "player-count",
         "resource-panel",
+        "resource-exchange-list",
+        "resource-exchange-remove",
+        "resource-exchange-set",
         "show",
         "status-panel",
         "xp-panel",
@@ -457,6 +462,100 @@ def test_configures_specific_market_log_channel(tmp_path) -> None:
         response = interaction.followup.send.await_args
         assert "フリマ取引ログ" in response.args[0]
         assert response.kwargs["ephemeral"] is True
+
+    asyncio.run(exercise())
+
+
+def test_resource_exchange_set_wires_exact_admin_input_to_api_and_minecraft(
+    tmp_path,
+) -> None:
+    async def exercise() -> None:
+        bot = MinecraftDiscordBot(
+            Config(discord_token="secret", settings_path=tmp_path / "settings.json")
+        )
+        bot._settings = RuntimeSettings(guild_id=1001)
+        bot._require_server_manager = AsyncMock(return_value=True)  # type: ignore[method-assign]
+        catalog = MinecraftResourceCatalog(
+            guild_id=1001,
+            revision=9,
+            packs=(MinecraftResourcePack("minecraft:copper_ingot", "銅インゴット", 16, 240),),
+        )
+        bot._level_bot_xp.upsert_resource_pack = AsyncMock(  # type: ignore[method-assign]
+            return_value=catalog
+        )
+        bot._validate_resource_pack_with_minecraft = AsyncMock(  # type: ignore[method-assign]
+            return_value=None
+        )
+        bot._sync_resource_catalog = AsyncMock(return_value=True)  # type: ignore[method-assign]
+        bot._refresh_resource_shop_panel = AsyncMock()  # type: ignore[method-assign]
+        interaction = Mock(spec=discord.Interaction)
+        interaction.guild_id = 1001
+        interaction.user = Mock()
+        interaction.user.id = 9001
+        interaction.response.defer = AsyncMock()
+        interaction.response.send_message = AsyncMock()
+        interaction.followup.send = AsyncMock()
+
+        await bot._configure_resource_exchange_set(
+            interaction,
+            item_id=" Copper_Ingot ",
+            item_name=" 銅インゴット ",
+            item_count=16,
+            cost_xp=240,
+        )
+
+        bot._level_bot_xp.upsert_resource_pack.assert_awaited_once_with(  # type: ignore[attr-defined]
+            guild_id=1001,
+            actor_user_id=9001,
+            item_id="minecraft:copper_ingot",
+            item_name="銅インゴット",
+            item_count=16,
+            cost_xp=240,
+        )
+        bot._sync_resource_catalog.assert_awaited_once_with(  # type: ignore[attr-defined]
+            catalog=catalog, force=True
+        )
+        bot._refresh_resource_shop_panel.assert_awaited_once()  # type: ignore[attr-defined]
+        message = interaction.followup.send.await_args.args[0]
+        assert "再起動は不要" in message
+        assert "カタログ世代: `9`" in message
+
+    asyncio.run(exercise())
+
+
+def test_resource_exchange_set_does_not_save_a_pack_rejected_by_minecraft(
+    tmp_path,
+) -> None:
+    async def exercise() -> None:
+        bot = MinecraftDiscordBot(
+            Config(discord_token="secret", settings_path=tmp_path / "settings.json")
+        )
+        bot._settings = RuntimeSettings(guild_id=1001)
+        bot._require_server_manager = AsyncMock(return_value=True)  # type: ignore[method-assign]
+        bot._level_bot_xp.upsert_resource_pack = AsyncMock()  # type: ignore[method-assign]
+        bot._validate_resource_pack_with_minecraft = AsyncMock(  # type: ignore[method-assign]
+            return_value="Resource pack rejected: resource is not a giveable item"
+        )
+        interaction = Mock(spec=discord.Interaction)
+        interaction.guild_id = 1001
+        interaction.user = Mock()
+        interaction.user.id = 9001
+        interaction.response.defer = AsyncMock()
+        interaction.response.send_message = AsyncMock()
+        interaction.followup.send = AsyncMock()
+
+        await bot._configure_resource_exchange_set(
+            interaction,
+            item_id="not_a_real_item",
+            item_name="謎",
+            item_count=1,
+            cost_xp=1,
+        )
+
+        bot._level_bot_xp.upsert_resource_pack.assert_not_awaited()  # type: ignore[attr-defined]
+        message = interaction.followup.send.await_args.args[0]
+        assert "保存していません" in message
+        assert "not a giveable item" in message
 
     asyncio.run(exercise())
 
@@ -724,6 +823,7 @@ def test_admin_panel_exposes_server_controls() -> None:
         "Minecraft IDを修正",
         "Discord紐付け先を修正",
         "サーバー操作",
+        "Bot発行クエスト",
     }
     assert {item.label for item in controls.children} == {
         "Whitelist",
@@ -742,6 +842,29 @@ def test_admin_panel_exposes_server_controls() -> None:
         "読み上げ確認",
         "切断",
     }
+
+
+def test_admin_panel_opens_the_bot_issued_quest_form_after_permission_check() -> None:
+    async def exercise() -> None:
+        bot = MinecraftDiscordBot(Config(discord_token="secret"))
+        bot.validate_panel_interaction = AsyncMock(return_value=True)  # type: ignore[method-assign]
+        interaction = Mock(spec=discord.Interaction)
+        interaction.response.send_modal = AsyncMock()
+        button = next(
+            item
+            for item in AdminPanelView(bot).children
+            if item.custom_id == "mc-admin:quest-create"
+        )
+
+        await button.callback(interaction)
+
+        bot.validate_panel_interaction.assert_awaited_once_with(  # type: ignore[attr-defined]
+            interaction, admin=True
+        )
+        modal = interaction.response.send_modal.await_args.args[0]
+        assert isinstance(modal, AdminQuestCreateModal)
+
+    asyncio.run(exercise())
 
 
 def test_relink_selects_account_then_new_discord_user() -> None:

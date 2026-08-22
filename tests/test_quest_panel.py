@@ -234,6 +234,36 @@ def test_public_cancel_confirmation_rejects_a_non_owner() -> None:
     asyncio.run(exercise())
 
 
+def test_server_manager_can_open_cancellation_for_a_bot_issued_quest() -> None:
+    async def exercise() -> None:
+        bot = MinecraftDiscordBot(Config(discord_token="secret"))
+        system_quest = replace(
+            _quest(status="open", message_id=901),
+            owner_account_id=None,
+            owner_discord_user_id=999,
+            owner_uuid="00000000-0000-0000-0000-000000000000",
+            owner_name="-",
+        )
+        bot._quests.get = Mock(return_value=system_quest)  # type: ignore[method-assign]
+        member = Mock(spec=discord.Member)
+        member.id = 2003
+        member.guild_permissions.manage_guild = True
+        interaction = Mock(spec=discord.Interaction)
+        interaction.user = member
+        interaction.guild = Mock(spec=discord.Guild)
+        interaction.response.defer = AsyncMock()
+        interaction.followup.send = AsyncMock()
+
+        await bot.show_quest_action_confirmation(interaction, 17, "cancel")
+
+        response = interaction.followup.send.await_args.kwargs
+        assert response["ephemeral"] is True
+        assert "報酬アイテムの返却は発生しません" in (response["embed"].description or "")
+        assert isinstance(response["view"], QuestActionConfirmationView)
+
+    asyncio.run(exercise())
+
+
 def test_public_accept_confirmation_is_private_and_owner_locked() -> None:
     async def exercise() -> None:
         bot = MinecraftDiscordBot(Config(discord_token="secret"))

@@ -2,6 +2,7 @@ from mc_bot.events import EventType, LogEvent
 from mc_bot.experience import MinecraftLevelUpEvent
 from mc_bot.formatting import (
     format_advancement_reward,
+    format_diamond_emerald_exchange,
     format_emerald_diamond_exchange,
     format_event,
     format_fishing_combo_milestone,
@@ -30,6 +31,20 @@ def test_formats_emerald_diamond_exchange_as_non_notifying_user_reference() -> N
     assert "Steve (<@123>)" in str(embed.description)
     assert "エメラルド x32" in str(embed.description)
     assert "ダイヤモンド x2" in str(embed.description)
+
+
+def test_formats_diamond_emerald_exchange_as_non_notifying_user_reference() -> None:
+    embed = format_diamond_emerald_exchange(
+        server_name="うさぽサーバー",
+        player_name="Steve",
+        discord_user_id=123,
+        diamond_count=1,
+        emerald_count=16,
+    )
+
+    assert "Steve (<@123>)" in str(embed.description)
+    assert "ダイヤモンド x1" in str(embed.description)
+    assert "エメラルド x16" in str(embed.description)
 
 
 def test_formats_japanese_advancement() -> None:

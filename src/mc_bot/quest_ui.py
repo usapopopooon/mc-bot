@@ -421,11 +421,7 @@ def quest_listing_embed(quest: Quest) -> discord.Embed:
         description=f"報酬: **{quest.display_reward_item_name} x{quest.reward_count}**",
         color=discord.Color.green(),
     )
-    owner = (
-        f"<@{quest.owner_discord_user_id}>"
-        if quest.owner_discord_user_id is not None
-        else quest.owner_name
-    )
+    owner = _quest_owner(quest)
     embed.add_field(name="依頼者", value=owner)
     embed.add_field(name="受注後の期限", value=f"{quest.fulfillment_hours}時間")
     embed.add_field(name="募集終了", value=_relative_time(quest.open_expires_at))
@@ -442,10 +438,16 @@ def quest_action_confirmation_embed(quest: Quest, action: str) -> discord.Embed:
             "確定後、募集カードは掲示板から消えます。"
         ),
         "cancel": (
-            f"依頼 **#{quest.quest_id} {quest.display_requested_item_name} "
+            f"Bot発行クエスト **#{quest.quest_id} {quest.display_requested_item_name} "
             f"x{quest.requested_count}** を取り消します。\n"
-            f"報酬 **{quest.display_reward_item_name} x{quest.reward_count}** は"
-            "Minecraftの受取箱へ戻ります。"
+            "元手なしの運営発行分なので、報酬アイテムの返却は発生しません。"
+            if quest.is_system_issued
+            else (
+                f"依頼 **#{quest.quest_id} {quest.display_requested_item_name} "
+                f"x{quest.requested_count}** を取り消します。\n"
+                f"報酬 **{quest.display_reward_item_name} x{quest.reward_count}** は"
+                "Minecraftの受取箱へ戻ります。"
+            )
         ),
         "submit": (
             f"Minecraftのメインハンドから **{quest.display_requested_item_name} "
@@ -496,7 +498,7 @@ def quest_mine_embed(
 
 def quest_log_embed(quest: Quest) -> discord.Embed:
     if quest.status == "completed":
-        owner = _mention_or_name(quest.owner_discord_user_id, quest.owner_name)
+        owner = _quest_owner(quest)
         worker = _mention_or_name(quest.worker_discord_user_id, quest.worker_name or "不明")
         description = (
             f"{worker} が **{quest.display_requested_item_name} "
@@ -506,10 +508,16 @@ def quest_log_embed(quest: Quest) -> discord.Embed:
         title = f"✅ クエスト #{quest.quest_id} 達成"
         color = discord.Color.green()
     else:
-        reason = {
-            "expired": "募集期限切れ",
-            "invalidated": "Discord連携が確認できず終了",
-        }.get(quest.last_transition_kind, "依頼者が取消")
+        if quest.is_system_issued:
+            reason = {
+                "expired": "募集期限切れ",
+                "invalidated": "管理者が終了",
+            }.get(quest.last_transition_kind, "管理者が取消")
+        else:
+            reason = {
+                "expired": "募集期限切れ",
+                "invalidated": "Discord連携が確認できず終了",
+            }.get(quest.last_transition_kind, "依頼者が取消")
         description = (
             f"依頼: **{quest.display_requested_item_name} x{quest.requested_count}** / "
             f"報酬: **{quest.display_reward_item_name} x{quest.reward_count}**\n理由: {reason}"
@@ -517,17 +525,24 @@ def quest_log_embed(quest: Quest) -> discord.Embed:
         title = f"🗑️ クエスト #{quest.quest_id} 終了"
         color = discord.Color.dark_grey()
     embed = discord.Embed(title=title, description=description, color=color)
-    embed.set_footer(
-        text=(
-            "アイテムはMinecraftの /quest にある受取箱から受け取れます"
-            f" • 記録ID: {quest.last_transition_id}"
-        )
-    )
+    if quest.status == "completed":
+        footer = "報酬はMinecraftの /quest にある受取箱から受け取れます"
+    elif quest.is_system_issued:
+        footer = "Bot発行クエストのため返却アイテムはありません"
+    else:
+        footer = "返却品はMinecraftの /quest にある受取箱から受け取れます"
+    embed.set_footer(text=f"{footer} • 記録ID: {quest.last_transition_id}")
     return embed
 
 
 def _mention_or_name(user_id: int | None, name: str) -> str:
     return f"<@{user_id}>" if user_id is not None else name
+
+
+def _quest_owner(quest: Quest) -> str:
+    if quest.owner_discord_user_id is not None:
+        return f"<@{quest.owner_discord_user_id}>"
+    return "@bot" if quest.is_system_issued else quest.owner_name
 
 
 def _relative_time(value: str) -> str:

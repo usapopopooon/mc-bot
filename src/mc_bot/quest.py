@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import re
 import sqlite3
 import uuid
 from dataclasses import dataclass
@@ -13,6 +14,7 @@ from mc_bot.translations import MinecraftItemTranslator
 
 _ITEM_TRANSLATOR = MinecraftItemTranslator.load()
 _QUEST_LOG_NONCE_NAMESPACE = uuid.UUID("1e5b612f-49b1-41af-b8df-3ada33187c48")
+SYSTEM_QUEST_OWNER_UUID = "00000000-0000-0000-0000-000000000000"
 
 type QuestActionStatus = Literal[
     "completed",
@@ -25,6 +27,16 @@ type QuestActionStatus = Literal[
     "item_mismatch",
     "player_offline",
     "pending_recovered",
+    "storage_error",
+    "invalid_request",
+]
+type AdminQuestCreateStatus = Literal[
+    "completed",
+    "invalid_requested_item",
+    "invalid_requested_count",
+    "invalid_reward_item",
+    "invalid_reward_count",
+    "invalid_hours",
     "storage_error",
     "invalid_request",
 ]
@@ -69,11 +81,23 @@ class Quest:
     def display_reward_item_name(self) -> str:
         return _ITEM_TRANSLATOR.translate(self.reward_item_id, self.reward_item_name)
 
+    @property
+    def is_system_issued(self) -> bool:
+        return self.owner_uuid == SYSTEM_QUEST_OWNER_UUID
+
 
 @dataclass(frozen=True, slots=True)
 class QuestActionResult:
     status: QuestActionStatus
     quest_status: str
+    duplicate: bool
+
+
+@dataclass(frozen=True, slots=True)
+class AdminQuestCreateResult:
+    request_id: str
+    quest_id: int
+    status: AdminQuestCreateStatus
     duplicate: bool
 
 
@@ -409,6 +433,38 @@ def quest_action_command(
     return " ".join(parts)
 
 
+def admin_quest_create_command(
+    requested_item_id: str,
+    requested_count: int,
+    reward_item_id: str,
+    reward_count: int,
+    fulfillment_hours: int,
+    request_id: str,
+) -> str:
+    item_pattern = re.compile(r"minecraft:[a-z0-9_]+")
+    if (
+        item_pattern.fullmatch(requested_item_id) is None
+        or item_pattern.fullmatch(reward_item_id) is None
+        or requested_count <= 0
+        or reward_count <= 0
+        or not 1 <= fulfillment_hours <= 72
+    ):
+        raise ValueError("invalid admin quest")
+    request = str(uuid.UUID(request_id))
+    return " ".join(
+        (
+            "usapo-event-bridge",
+            "quest-admin-create",
+            requested_item_id,
+            str(requested_count),
+            reward_item_id,
+            str(reward_count),
+            str(fulfillment_hours),
+            request,
+        )
+    )
+
+
 def quest_log_nonce(transition_id: str) -> int:
     normalized = str(uuid.UUID(transition_id))
     return uuid.uuid5(_QUEST_LOG_NONCE_NAMESPACE, normalized).int & ((1 << 64) - 1)
@@ -448,6 +504,41 @@ def parse_quest_action_result(
         status=cast("QuestActionStatus", fields[2]),
         quest_status=fields[3],
         duplicate=duplicates[fields[4]],
+    )
+
+
+def parse_admin_quest_create_result(response: str, *, request_id: str) -> AdminQuestCreateResult:
+    prefix = "USAPO_QUEST_CREATE_RESULT|1|"
+    marker = response.strip().find(prefix)
+    if marker < 0:
+        raise ValueError("admin quest create result is missing")
+    fields = response.strip()[marker + len(prefix) :].split("|")
+    if len(fields) != 4:
+        raise ValueError("admin quest create result is malformed")
+    normalized_request_id = str(uuid.UUID(request_id))
+    if str(uuid.UUID(fields[0])) != normalized_request_id:
+        raise ValueError("admin quest create result does not match request")
+    quest_id = int(fields[1])
+    statuses = {
+        "completed",
+        "invalid_requested_item",
+        "invalid_requested_count",
+        "invalid_reward_item",
+        "invalid_reward_count",
+        "invalid_hours",
+        "storage_error",
+        "invalid_request",
+    }
+    duplicates = {"new": False, "duplicate": True}
+    if fields[2] not in statuses or fields[3] not in duplicates:
+        raise ValueError("admin quest create result contains an unknown state")
+    if (fields[2] == "completed") != (quest_id > 0):
+        raise ValueError("admin quest create result contains an invalid quest id")
+    return AdminQuestCreateResult(
+        request_id=normalized_request_id,
+        quest_id=quest_id,
+        status=cast("AdminQuestCreateStatus", fields[2]),
+        duplicate=duplicates[fields[3]],
     )
 
 
@@ -526,9 +617,13 @@ def _now() -> str:
 
 
 __all__ = [
+    "SYSTEM_QUEST_OWNER_UUID",
+    "AdminQuestCreateResult",
     "Quest",
     "QuestActionResult",
     "QuestStore",
+    "admin_quest_create_command",
+    "parse_admin_quest_create_result",
     "parse_quest_action_result",
     "quest_action_command",
     "quest_log_nonce",

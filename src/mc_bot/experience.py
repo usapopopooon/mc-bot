@@ -15,6 +15,7 @@ from mc_bot.accounts import (
     WoodcuttingComboRewardEvent,
 )
 from mc_bot.player_names import is_safe_server_player_name
+from mc_bot.resource_catalog import MAX_RESOURCE_PACKS, validate_resource_pack
 
 ADVANCEMENT_REWARD_LEVEL_BOT_XP = 100
 MINECRAFT_XP_PER_LEVEL_BOT_XP = 100
@@ -25,12 +26,8 @@ ADVANCEMENT_REWARD_IN_GAME_XP = 100
 
 LOGGER = logging.getLogger(__name__)
 _QUERY_RESULT = re.compile(r"\bhas\s+(\d+)\s+experience\s+(levels?|points?)\b", re.I)
-_RESOURCE_ITEM_NAMES = {
-    "minecraft:diamond": "ダイヤモンド",
-    "minecraft:emerald": "エメラルド",
-    "minecraft:gunpowder": "火薬",
-}
 _MATERIAL_BUYBACK_RATES = {
+    "minecraft:emerald": ("エメラルド", 500),
     "minecraft:dirt": ("土", 30),
     "minecraft:sand": ("砂", 40),
     "minecraft:sandstone": ("砂岩", 50),
@@ -109,6 +106,13 @@ class MinecraftResourcePack:
 @dataclass(frozen=True, slots=True)
 class MinecraftResourceShop:
     wallet: MinecraftXpWallet
+    packs: tuple[MinecraftResourcePack, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class MinecraftResourceCatalog:
+    guild_id: int
+    revision: int
     packs: tuple[MinecraftResourcePack, ...]
 
 
@@ -867,6 +871,109 @@ class LevelBotXpClient:
             LOGGER.warning("Could not fetch resource shop from level-bot: %s", error)
             return None
 
+    async def fetch_resource_catalog(self, guild_id: int) -> MinecraftResourceCatalog | None:
+        if not self._token:
+            return None
+        session = self._require_session()
+        try:
+            async with session.get(
+                f"{self._base_url}/api/v1/integrations/minecraft/resource-shop/catalog",
+                headers={"Authorization": f"Bearer {self._token}"},
+                params={"guild_id": str(guild_id)},
+            ) as response:
+                if response.status != 200:
+                    body = await response.text()
+                    LOGGER.warning(
+                        "level-bot resource catalog fetch rejected status=%d body=%s",
+                        response.status,
+                        body[:300],
+                    )
+                    return None
+                return self._parse_resource_catalog(await response.json())
+        except (
+            aiohttp.ClientError,
+            TimeoutError,
+            KeyError,
+            TypeError,
+            ValueError,
+        ) as error:
+            LOGGER.warning("Could not fetch resource catalog from level-bot: %s", error)
+            return None
+
+    async def upsert_resource_pack(
+        self,
+        *,
+        guild_id: int,
+        actor_user_id: int,
+        item_id: str,
+        item_name: str,
+        item_count: int,
+        cost_xp: int,
+    ) -> MinecraftResourceCatalog | None:
+        return await self._mutate_resource_catalog(
+            "/api/v1/integrations/minecraft/resource-shop/catalog/packs",
+            method="PUT",
+            payload={
+                "guild_id": str(guild_id),
+                "actor_user_id": str(actor_user_id),
+                "item_id": item_id,
+                "item_name": item_name,
+                "item_count": item_count,
+                "cost_xp": cost_xp,
+            },
+        )
+
+    async def remove_resource_pack(
+        self,
+        *,
+        guild_id: int,
+        actor_user_id: int,
+        item_id: str,
+        item_count: int,
+    ) -> MinecraftResourceCatalog | None:
+        return await self._mutate_resource_catalog(
+            "/api/v1/integrations/minecraft/resource-shop/catalog/packs/remove",
+            method="POST",
+            payload={
+                "guild_id": str(guild_id),
+                "actor_user_id": str(actor_user_id),
+                "item_id": item_id,
+                "item_count": item_count,
+            },
+        )
+
+    async def _mutate_resource_catalog(
+        self, path: str, *, method: str, payload: dict[str, object]
+    ) -> MinecraftResourceCatalog | None:
+        if not self._token:
+            return None
+        session = self._require_session()
+        try:
+            async with session.request(
+                method,
+                f"{self._base_url}{path}",
+                headers={"Authorization": f"Bearer {self._token}"},
+                json=payload,
+            ) as response:
+                if response.status != 200:
+                    body = await response.text()
+                    LOGGER.warning(
+                        "level-bot resource catalog mutation rejected status=%d body=%s",
+                        response.status,
+                        body[:300],
+                    )
+                    return None
+                return self._parse_resource_catalog(await response.json())
+        except (
+            aiohttp.ClientError,
+            TimeoutError,
+            KeyError,
+            TypeError,
+            ValueError,
+        ) as error:
+            LOGGER.warning("Could not update resource catalog in level-bot: %s", error)
+            return None
+
     async def fetch_item_gacha_offer(
         self, guild_id: int, user_id: int
     ) -> MinecraftItemGachaOffer | None:
@@ -1282,13 +1389,7 @@ class LevelBotXpClient:
             item_count=int(item["item_count"]),
             cost_xp=int(item["cost_xp"]),
         )
-        if (
-            pack.item_id not in {"minecraft:diamond", "minecraft:emerald", "minecraft:gunpowder"}
-            or pack.item_name != _RESOURCE_ITEM_NAMES.get(pack.item_id)
-            or not 1 <= pack.item_count <= 64
-            or pack.cost_xp <= 0
-        ):
-            raise ValueError("resource pack contains invalid values")
+        validate_resource_pack(pack)
         return pack
 
     @classmethod
@@ -1297,9 +1398,35 @@ class LevelBotXpClient:
             raise ValueError("resource shop must be an object")
         packs = tuple(cls._parse_resource_pack(pack) for pack in item["packs"])
         identities = {(pack.item_id, pack.item_count) for pack in packs}
-        if not packs or len(packs) > 25 or len(identities) != len(packs):
+        if not packs or len(packs) > MAX_RESOURCE_PACKS or len(identities) != len(packs):
             raise ValueError("resource shop packs contain invalid values")
         return MinecraftResourceShop(wallet=cls._parse_wallet(item["wallet"]), packs=packs)
+
+    @classmethod
+    def _parse_resource_catalog(cls, item: object) -> MinecraftResourceCatalog:
+        if not isinstance(item, dict) or not isinstance(item.get("packs"), list):
+            raise ValueError("resource catalog must be an object")
+        catalog = MinecraftResourceCatalog(
+            guild_id=int(item["guild_id"]),
+            revision=int(item["revision"]),
+            packs=tuple(cls._parse_resource_pack(pack) for pack in item["packs"]),
+        )
+        identities = {(pack.item_id, pack.item_count) for pack in catalog.packs}
+        item_names: dict[str, str] = {}
+        consistent_names = all(
+            item_names.setdefault(pack.item_id, pack.item_name) == pack.item_name
+            for pack in catalog.packs
+        )
+        if (
+            catalog.guild_id <= 0
+            or catalog.revision < 0
+            or not catalog.packs
+            or len(catalog.packs) > MAX_RESOURCE_PACKS
+            or len(identities) != len(catalog.packs)
+            or not consistent_names
+        ):
+            raise ValueError("resource catalog contains invalid values")
+        return catalog
 
     @classmethod
     def _parse_resource_exchange_request(cls, item: object) -> MinecraftResourceExchangeRequest:
