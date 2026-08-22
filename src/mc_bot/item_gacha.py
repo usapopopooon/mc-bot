@@ -14,6 +14,7 @@ import discord
 from mc_bot.player_names import is_safe_server_player_name
 
 if TYPE_CHECKING:
+    from mc_bot.accounts import MinecraftAccount
     from mc_bot.bot import MinecraftDiscordBot
 
 _JST = ZoneInfo("Asia/Tokyo")
@@ -1354,6 +1355,8 @@ class MinecraftItemGachaConfirmView(discord.ui.View):
         cost_xp: int,
         affordable: bool,
         draw_category: ItemGachaCategory = "all",
+        known_account: MinecraftAccount | None = None,
+        retrying: bool = False,
     ) -> None:
         super().__init__(timeout=180)
         self.bot = bot
@@ -1361,9 +1364,10 @@ class MinecraftItemGachaConfirmView(discord.ui.View):
         self.draw_kind = draw_kind
         self.draw_category = draw_category
         self.cost_xp = cost_xp
+        self.known_account = known_account
         self._operation_lock = asyncio.Lock()
         self._completed = False
-        self.confirm.label = f"{cost_xp:,} XPで引く"
+        self.confirm.label = "未完了分を再開" if retrying else f"{cost_xp:,} XPで引く"
         if not affordable:
             self.confirm.disabled = True
 
@@ -1393,6 +1397,7 @@ class MinecraftItemGachaConfirmView(discord.ui.View):
                 draw_category=self.draw_category,
                 expected_cost_xp=self.cost_xp,
                 response_ready=True,
+                known_account=self.known_account,
             )
 
     @discord.ui.button(label="キャンセル", style=discord.ButtonStyle.secondary)

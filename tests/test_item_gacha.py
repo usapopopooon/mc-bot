@@ -72,6 +72,7 @@ def _store_with_account(tmp_path) -> tuple[AccountStore, int]:
         source="self",
         status="active",
         created_by=123,
+        player_uuid="11111111-1111-4111-8111-111111111111",
     )
     return store, account.id
 
@@ -122,6 +123,7 @@ def _bot_with_account(tmp_path):
         source="self",
         status="active",
         created_by=123,
+        player_uuid="11111111-1111-4111-8111-111111111111",
     )
     bot._settings = RuntimeSettings(guild_id=456)
     bot._online_exchange_account = AsyncMock(return_value=(account, None))  # type: ignore[method-assign]
@@ -774,19 +776,58 @@ def test_confirmation_keeps_an_unfinished_draw_retryable_with_low_available_xp(
     )
     interaction = _interaction()
 
-    asyncio.run(bot.show_minecraft_item_gacha_confirmation(interaction, "premium"))  # type: ignore[arg-type]
+    asyncio.run(
+        bot.show_minecraft_item_gacha_confirmation(interaction, "normal", "resources")  # type: ignore[arg-type]
+    )
 
     sent = interaction.followup.send.await_args.kwargs
     rendered = str(sent["embed"].to_dict())
-    assert sent["embed"].title == "資源・採掘・通常ガチャの確認"
+    assert sent["embed"].title == "資源・採掘・通常ガチャの再開"
     assert "未完了" in rendered
     assert "決済状態を再確認" in rendered
     assert not sent["view"].confirm.disabled
+    assert sent["view"].confirm.label == "未完了分を再開"
     assert sent["view"].draw_category == "resources"
 
 
+def test_confirmation_does_not_silently_replace_normal_with_unfinished_premium(
+    tmp_path,
+) -> None:
+    bot, account, _ = _bot_with_account(tmp_path)
+    reward = get_item_gacha_reward("r_mending")
+    draw, created = bot._accounts.reserve_minecraft_item_gacha_draw(
+        draw_id=str(uuid.uuid4()),
+        guild_id=456,
+        discord_user_id=123,
+        account_id=account.id,
+        player_name="Steve",
+        draw_day=item_gacha_day(datetime.now(UTC)),
+        draw_kind="premium",
+        draw_category="equipment",
+        cost_xp=1_000,
+        tier=reward.tier,
+        reward_key=reward.key,
+        item_spec=reward.item_spec,
+        item_name=reward.item_name,
+        item_count=reward.item_count,
+    )
+    assert created and draw.status == "reserved"
+    interaction = _interaction()
+
+    asyncio.run(bot.show_minecraft_item_gacha_confirmation(interaction, "normal"))  # type: ignore[arg-type]
+
+    sent = interaction.followup.send.await_args.kwargs
+    rendered = str(sent["embed"].to_dict())
+    assert sent["embed"].title == "未完了の装備・強化・R以上確定ガチャがあります"
+    assert "今回は**おまかせ・通常ガチャ**を選びました" in rendered
+    assert "二重抽選を防ぐため" in rendered
+    assert sent["view"].draw_kind == "premium"
+    assert sent["view"].draw_category == "equipment"
+    assert sent["view"].confirm.label == "未完了分を再開"
+
+
 def test_panel_and_confirmation_buttons_wire_the_confirmed_price(tmp_path) -> None:
-    bot, _, _ = _bot_with_account(tmp_path)
+    bot, account, _ = _bot_with_account(tmp_path)
     bot.validate_item_gacha_panel = AsyncMock(return_value=True)  # type: ignore[method-assign]
     bot.show_minecraft_item_gacha_kind_selection = AsyncMock()  # type: ignore[method-assign]
     bot.show_minecraft_item_gacha_confirmation = AsyncMock()  # type: ignore[method-assign]
@@ -810,6 +851,7 @@ def test_panel_and_confirmation_buttons_wire_the_confirmed_price(tmp_path) -> No
             draw_category="resources",
             cost_xp=100,
             affordable=True,
+            known_account=account,
         )
         await confirmation.confirm.callback(interaction)  # type: ignore[arg-type]
 
@@ -829,7 +871,25 @@ def test_panel_and_confirmation_buttons_wire_the_confirmed_price(tmp_path) -> No
         draw_category="resources",
         expected_cost_xp=100,
         response_ready=True,
+        known_account=account,
     )
+
+
+def test_confirmed_account_avoids_a_second_online_lookup(tmp_path) -> None:
+    bot, account, _ = _bot_with_account(tmp_path)
+    bot._rcon = GachaRcon()  # type: ignore[assignment]
+    interaction = _interaction()
+    bot._online_exchange_account.reset_mock()  # type: ignore[attr-defined]
+
+    asyncio.run(
+        bot.draw_minecraft_item_gacha(
+            interaction,  # type: ignore[arg-type]
+            known_account=account,
+        )
+    )
+
+    bot._online_exchange_account.assert_not_awaited()  # type: ignore[attr-defined]
+    assert "受け取りました" in interaction.followup.send.await_args.args[0]
 
 
 def test_gacha_day_resets_at_midnight_in_japan() -> None:

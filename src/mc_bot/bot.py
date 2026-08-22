@@ -1812,9 +1812,13 @@ class MinecraftDiscordBot(discord.Client):
         effective_kind: ItemGachaKind = draw_kind
         effective_category: ItemGachaCategory = draw_category
         retry_note = ""
+        selection_changed_for_retry = False
         if retrying and latest_draw is not None:
             effective_kind = "premium" if latest_draw.draw_kind == "premium" else "normal"
             effective_category = cast(ItemGachaCategory, latest_draw.draw_category)
+            selection_changed_for_retry = (
+                effective_kind != draw_kind or effective_category != draw_category
+            )
             retry_note = (
                 f"\n未完了の**{item_gacha_category_label(effective_category)}・"
                 f"{item_gacha_kind_label(effective_kind)}ガチャ**"
@@ -1841,11 +1845,26 @@ class MinecraftDiscordBot(discord.Client):
         affordable = retrying or offer.wallet.available_xp >= cost_xp
         embed = discord.Embed(
             title=(
-                f"{item_gacha_category_label(effective_category)}・"
-                f"{item_gacha_kind_label(effective_kind)}ガチャの確認"
+                (
+                    f"未完了の{item_gacha_category_label(effective_category)}・"
+                    f"{item_gacha_kind_label(effective_kind)}ガチャがあります"
+                )
+                if selection_changed_for_retry
+                else (
+                    f"{item_gacha_category_label(effective_category)}・"
+                    f"{item_gacha_kind_label(effective_kind)}ガチャの"
+                    f"{'再開' if retrying else '確認'}"
+                )
             ),
             description=(
-                f"サーバーXP **{cost_xp:,} XP**を使って、"
+                (
+                    f"今回は**{item_gacha_category_label(draw_category)}・"
+                    f"{item_gacha_kind_label(draw_kind)}ガチャ**を選びましたが、"
+                    "二重抽選を防ぐため前回の未完了分を先に再開します。\n"
+                    if selection_changed_for_retry
+                    else ""
+                )
+                + f"サーバーXP **{cost_xp:,} XP**を使って、"
                 f"本日 **{draw_count + (0 if retrying else 1)}/{ITEM_GACHA_DAILY_LIMIT}回目**"
                 "のアイテムガチャを引きます。\n"
                 f"景品の内容は確定するまで秘密です。{retry_note}"
@@ -1887,6 +1906,8 @@ class MinecraftDiscordBot(discord.Client):
                 draw_category=effective_category,
                 cost_xp=cost_xp,
                 affordable=affordable,
+                known_account=account,
+                retrying=retrying,
             ),
             ephemeral=True,
         )
@@ -1920,7 +1941,26 @@ class MinecraftDiscordBot(discord.Client):
         async with self._item_gacha_lock:
             account = known_account
             reason = None
-            if account is None:
+            if account is not None:
+                current_account = await asyncio.to_thread(self._accounts.get, account.id)
+                if (
+                    current_account is None
+                    or current_account.status != "active"
+                    or current_account.discord_user_id != interaction.user.id
+                    or current_account.player_uuid is None
+                    or current_account.player_uuid != account.player_uuid
+                ):
+                    await interaction.followup.send(
+                        "Minecraftアカウントの連携状態が更新されました。"
+                        "パネルから開き直してください。",
+                        ephemeral=True,
+                    )
+                    return
+                account = replace(
+                    current_account,
+                    server_player_name=account.server_player_name,
+                )
+            else:
                 try:
                     account, reason = await self._online_exchange_account(interaction.user.id)
                 except (OSError, RconError, RuntimeError, ValueError) as error:
