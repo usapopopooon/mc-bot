@@ -3023,7 +3023,8 @@ class MinecraftDiscordBot(discord.Client):
         )
         if result is None:
             await interaction.followup.send(
-                "受注結果を確認できませんでした。ゲーム内の `/quest mine` を確認してください。",
+                "受注結果を確認できませんでした。ゲーム内の `/quest` で"
+                "「自分の依頼・受注」を確認してください。",
                 ephemeral=True,
             )
             return
@@ -3031,8 +3032,8 @@ class MinecraftDiscordBot(discord.Client):
             await self._delete_quest_card(quest)
             await interaction.followup.send(
                 f"クエスト #{quest.quest_id} を受注しました。"
-                "納品はMinecraftで依頼品を持ち `/quest submit "
-                f"{quest.quest_id}` を実行してください。",
+                "納品はMinecraftで依頼品を持ち、`/quest` の"
+                "「自分の依頼・受注」から行ってください。",
                 ephemeral=True,
             )
             return
@@ -3102,7 +3103,8 @@ class MinecraftDiscordBot(discord.Client):
         if result is not None and result.status == "completed":
             await self._delete_quest_card(quest)
             await interaction.followup.send(
-                "依頼を取り消しました。報酬はMinecraftの `/quest claim` で受け取れます。",
+                "依頼を取り消しました。報酬はMinecraftの `/quest` にある"
+                "「受取箱を受け取る」から受け取れます。",
                 ephemeral=True,
             )
             return
@@ -3140,7 +3142,8 @@ class MinecraftDiscordBot(discord.Client):
         result = await self._run_quest_action("submit", quest, account.player_uuid)
         if result is not None and result.status == "completed":
             await interaction.followup.send(
-                "納品が完了しました。報酬はMinecraftの `/quest claim` で受け取れます。",
+                "納品が完了しました。報酬はMinecraftの `/quest` にある"
+                "「受取箱を受け取る」から受け取れます。",
                 ephemeral=True,
             )
             return
@@ -3220,7 +3223,8 @@ class MinecraftDiscordBot(discord.Client):
             "storage_error": "保存に失敗しました。少し待ってからもう一度お試しください。",
         }.get(
             status,
-            "操作結果を確認できませんでした。Minecraftの `/quest mine` を確認してください。",
+            "操作結果を確認できませんでした。Minecraftの `/quest` で"
+            "「自分の依頼・受注」を確認してください。",
         )
 
     async def show_quest_guide(
@@ -3249,7 +3253,8 @@ class MinecraftDiscordBot(discord.Client):
         options = {
             "content": (
                 "報酬・返却品・納品物はMinecraftの永続受取箱に入ります。"
-                "インベントリに空きを作り、Minecraftで `/quest claim` を実行してください。"
+                "インベントリに空きを作り、Minecraftの `/quest` で"
+                "「受取箱を受け取る」を選んでください。"
             ),
             "embed": None,
             "view": QuestBackView(self, interaction.user.id),
@@ -3279,7 +3284,7 @@ class MinecraftDiscordBot(discord.Client):
             await interaction.edit_original_response(
                 content=(
                     "進行中の依頼・受注はありません。"
-                    "受取品はMinecraftの `/quest claim` で確認できます。"
+                    "受取品はMinecraftの `/quest` にある「受取箱を受け取る」で確認できます。"
                 ),
                 embed=None,
                 view=QuestBackView(self, interaction.user.id),

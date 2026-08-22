@@ -295,6 +295,10 @@ def test_quest_cards_explain_visibility_claims_and_terminal_result(tmp_path) -> 
     )
 
     assert "受注するとカードは掲示板から消えます" in str(card.to_dict())
+    assert "Java版・Bedrock版ともMinecraftの `/quest`" in str(guide.to_dict())
+    assert "依頼を作る" in str(guide.to_dict())
+    assert "自分の依頼・受注" in str(guide.to_dict())
+    assert "受取箱を受け取る" in str(guide.to_dict())
     assert "/quest claim" in str(guide.to_dict())
     assert "古代の残骸" in str(log.to_dict())
     assert "ダイヤモンド" in str(log.to_dict())
