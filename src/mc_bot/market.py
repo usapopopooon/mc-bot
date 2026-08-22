@@ -13,6 +13,7 @@ import discord
 from mc_bot.translations import MinecraftItemTranslator
 
 _ITEM_TRANSLATOR = MinecraftItemTranslator.load()
+_MARKET_CANCEL_LOG_NONCE_NAMESPACE = uuid.UUID("f9c0ca01-df50-443e-a48c-a0fb112fc59f")
 
 type MarketTransferStatus = Literal[
     "completed",
@@ -46,6 +47,8 @@ class MarketListing:
     updated_at: str
     minecraft_purchase_notified: bool = False
     discord_purchase_notified: bool = False
+    discord_cancel_log_delivery_attempted: bool = False
+    discord_cancel_log_notified: bool = False
 
     @property
     def display_item_name(self) -> str:
@@ -95,7 +98,11 @@ class MarketStore:
                     minecraft_purchase_notified INTEGER NOT NULL DEFAULT 0
                         CHECK (minecraft_purchase_notified IN (0, 1)),
                     discord_purchase_notified INTEGER NOT NULL DEFAULT 0
-                        CHECK (discord_purchase_notified IN (0, 1))
+                        CHECK (discord_purchase_notified IN (0, 1)),
+                    discord_cancel_log_delivery_attempted INTEGER NOT NULL DEFAULT 0
+                        CHECK (discord_cancel_log_delivery_attempted IN (0, 1)),
+                    discord_cancel_log_notified INTEGER NOT NULL DEFAULT 0
+                        CHECK (discord_cancel_log_notified IN (0, 1))
                 );
                 CREATE INDEX IF NOT EXISTS minecraft_market_listing_status
                     ON minecraft_market_listings(status, listing_id);
@@ -109,9 +116,12 @@ class MarketStore:
                     "PRAGMA table_info(minecraft_market_listings)"
                 ).fetchall()
             }
+            cancel_log_tracking_is_new = "discord_cancel_log_notified" not in columns
             for column in (
                 "minecraft_purchase_notified",
                 "discord_purchase_notified",
+                "discord_cancel_log_delivery_attempted",
+                "discord_cancel_log_notified",
             ):
                 if column not in columns:
                     connection.execute(
@@ -119,6 +129,14 @@ class MarketStore:
                         "INTEGER NOT NULL DEFAULT 0 CHECK ("
                         f"{column} IN (0, 1))"
                     )
+            if cancel_log_tracking_is_new:
+                connection.execute(
+                    """
+                    UPDATE minecraft_market_listings
+                    SET discord_cancel_log_notified = 1
+                    WHERE status = 'cancelled'
+                    """
+                )
 
     def add_listing(
         self,
@@ -235,6 +253,30 @@ class MarketStore:
             ).fetchall()
         return [_listing(row) for row in rows]
 
+    def list_cancelled_with_discord_message(self) -> list[MarketListing]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM minecraft_market_listings
+                WHERE status = 'cancelled' AND discord_message_id IS NOT NULL
+                ORDER BY listing_id
+                """
+            ).fetchall()
+        return [_listing(row) for row in rows]
+
+    def list_cancelled_unnotified(self) -> list[MarketListing]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM minecraft_market_listings
+                WHERE status = 'cancelled'
+                  AND purchase_request_id IS NOT NULL
+                  AND discord_cancel_log_notified = 0
+                ORDER BY updated_at, listing_id
+                """
+            ).fetchall()
+        return [_listing(row) for row in rows]
+
     def list_pending_purchase_notifications(self) -> list[MarketListing]:
         with self._connect() as connection:
             rows = connection.execute(
@@ -270,6 +312,29 @@ class MarketStore:
             connection.execute(
                 f"UPDATE minecraft_market_listings SET {column} = 1, updated_at = ? "
                 "WHERE listing_id = ? AND purchase_request_id = ? AND status = 'sold'",
+                (_now(), listing_id, normalized_request),
+            )
+
+    def mark_cancel_log_delivery_attempted(self, listing_id: int, request_id: str) -> None:
+        self._mark_cancel_log_state(
+            listing_id,
+            request_id,
+            column="discord_cancel_log_delivery_attempted",
+        )
+
+    def mark_cancel_log_notified(self, listing_id: int, request_id: str) -> None:
+        self._mark_cancel_log_state(
+            listing_id,
+            request_id,
+            column="discord_cancel_log_notified",
+        )
+
+    def _mark_cancel_log_state(self, listing_id: int, request_id: str, *, column: str) -> None:
+        normalized_request = str(uuid.UUID(request_id))
+        with self._connect() as connection:
+            connection.execute(
+                f"UPDATE minecraft_market_listings SET {column} = 1, updated_at = ? "
+                "WHERE listing_id = ? AND purchase_request_id = ? AND status = 'cancelled'",
                 (_now(), listing_id, normalized_request),
             )
 
@@ -407,6 +472,11 @@ def market_transfer_command(
     return f"usapo-event-bridge market-{action} {listing_id} {recipient} {request}"
 
 
+def market_cancel_log_nonce(request_id: str) -> int:
+    normalized = str(uuid.UUID(request_id))
+    return uuid.uuid5(_MARKET_CANCEL_LOG_NONCE_NAMESPACE, normalized).int & ((1 << 64) - 1)
+
+
 def market_purchase_tellraw_command(
     *,
     server_name: str,
@@ -512,6 +582,8 @@ def _listing(row: sqlite3.Row) -> MarketListing:
         updated_at=str(row["updated_at"]),
         minecraft_purchase_notified=bool(row["minecraft_purchase_notified"]),
         discord_purchase_notified=bool(row["discord_purchase_notified"]),
+        discord_cancel_log_delivery_attempted=bool(row["discord_cancel_log_delivery_attempted"]),
+        discord_cancel_log_notified=bool(row["discord_cancel_log_notified"]),
     )
 
 

@@ -10,6 +10,7 @@ import pytest
 from mc_bot.experience import MinecraftXpWallet
 from mc_bot.market import (
     MarketStore,
+    market_cancel_log_nonce,
     market_listing_embed,
     market_purchase_tellraw_command,
     market_transfer_command,
@@ -75,6 +76,25 @@ def test_store_migrates_existing_listings_to_purchase_notification_tracking(
                 '2026-08-18T00:00:00+00:00',
                 '2026-08-18T00:01:00+00:00'
             );
+            INSERT INTO minecraft_market_listings VALUES (
+                18,
+                '55555555-5555-4555-8555-555555555555',
+                2,
+                2002,
+                '22222222-2222-4222-8222-222222222222',
+                'Seller',
+                'minecraft:diamond',
+                'ダイヤモンド',
+                1,
+                500,
+                'cancelled',
+                '66666666-6666-4666-8666-666666666666',
+                NULL,
+                NULL,
+                901,
+                '2026-08-18T00:00:00+00:00',
+                '2026-08-18T00:01:00+00:00'
+            );
             """
         )
 
@@ -87,6 +107,10 @@ def test_store_migrates_existing_listings_to_purchase_notification_tracking(
     assert not listing.minecraft_purchase_notified
     assert not listing.discord_purchase_notified
     assert store.list_pending_purchase_notifications() == [listing]
+    historical_cancel = store.get(18)
+    assert historical_cancel is not None
+    assert historical_cancel.discord_cancel_log_notified
+    assert store.list_cancelled_unnotified() == []
 
 
 def test_parses_versioned_listing_and_request_with_exact_price() -> None:
@@ -228,6 +252,45 @@ def test_store_serializes_purchase_and_preserves_party_mapping(tmp_path) -> None
         )
         is None
     )
+
+
+def test_store_tracks_cancelled_listing_log_delivery(tmp_path) -> None:
+    store = MarketStore(tmp_path / "accounts.db")
+    store.initialize()
+    store.add_listing(
+        listing_id=17,
+        event_id=REQUEST_ID,
+        seller_account_id=2,
+        seller_discord_user_id=2002,
+        seller_uuid=SELLER_UUID,
+        seller_name="Seller",
+        item_id="minecraft:ancient_debris",
+        item_name="古代の残骸",
+        item_count=2,
+        price_xp=3_000,
+        created_at="2026-08-18T00:00:00+00:00",
+    )
+    store.set_discord_message(17, 901)
+    cancel_id = "44444444-4444-4444-8444-444444444444"
+    cancelling = store.begin_cancel(listing_id=17, seller_account_id=2, request_id=cancel_id)
+
+    assert cancelling is not None
+    assert store.set_status(17, cancel_id, "cancelled")
+    cancelled = store.get(17)
+    assert cancelled is not None
+    assert [item.listing_id for item in store.list_cancelled_with_discord_message()] == [17]
+    assert store.list_cancelled_unnotified() == [cancelled]
+
+    store.mark_cancel_log_delivery_attempted(17, cancel_id)
+    attempted = store.get(17)
+    assert attempted is not None and attempted.discord_cancel_log_delivery_attempted
+    store.mark_cancel_log_notified(17, cancel_id)
+
+    notified = store.get(17)
+    assert notified is not None and notified.discord_cancel_log_notified
+    assert store.list_cancelled_unnotified() == []
+    assert market_cancel_log_nonce(cancel_id) == market_cancel_log_nonce(cancel_id)
+    assert 0 <= market_cancel_log_nonce(cancel_id) < 2**64
 
 
 def test_store_refreshes_presentation_fields_without_weakening_listing_identity(

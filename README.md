@@ -139,12 +139,14 @@ XPを消費しません。
 再デプロイ・Bot再起動時は保存済みの説明パネルをその場で更新し、削除されている場合だけ
 再作成します。
 商品カードの「購入」「出品取消」はエフェメラル画面から操作できます。
-購入成立後は売却済みの商品カードをフリマチャンネルから削除し、Bot再起動時にも
-残っている売却済みカードを清掃します。
+購入成立または出品取消後は、対象の商品カードをフリマチャンネルから削除し、
+Bot再起動時にも残っている売却済み・取消済みカードを清掃します。
 購入内容は買い手・売り手・商品・数量・価格をMinecraft全体チャットへ従来どおり投稿し、
-Discordでは `/mc-config market-log-channel` で設定したフリマ成約ログ専用チャンネルへ
-投稿します。専用チャンネルが未設定の間は一般ログへ流さず、未送信分として保持し、
-設定後またはBot再起動後に再送します。
+Discordでは `/mc-config market-log-channel` で設定したフリマ取引ログ専用チャンネルへ、
+成約と出品取消の両方を投稿します。取消ログには出品者・商品・数量・価格と
+監査用の記録IDを含めます。専用チャンネルが未設定の間は一般ログへ流さず、未送信分として保持し、
+設定後またはBot再起動後に再送します。取消ログは固定nonceと記録IDで履歴を照合し、
+Discord投稿成功後・SQLite更新前にBotが停止した場合も同じ投稿を重複作成しません。
 通常のMinecraftアイテム名はMinecraft Java 26.2の日本語名で表示し、名付けられた
 カスタムアイテムはその名前を保持します。エンチャント本は保存されているエンチャント名と
 レベルも商品名へ併記し、5種類以上の場合は先頭4種類と残りの種類数を表示します。
@@ -236,7 +238,7 @@ mc-botコンテナ
 /mc-config player-count action:有効化
 /mc-config item-gacha-panel channel:#minecraftガチャ
 /mc-config market-channel channel:#minecraftマーケット
-/mc-config market-log-channel channel:#minecraftフリマ成約ログ
+/mc-config market-log-channel channel:#minecraftフリマ取引ログ
 /mc-config quest-channel channel:#minecraftクエスト
 /mc-config quest-log-channel channel:#minecraftクエストログ
 /mc-config show

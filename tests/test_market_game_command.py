@@ -14,6 +14,7 @@ BUYER_UUID = "33333333-3333-4333-8333-333333333333"
 LISTING_EVENT_ID = "11111111-1111-4111-8111-111111111111"
 PURCHASE_ID = "44444444-4444-4444-8444-444444444444"
 BALANCE_ID = "55555555-5555-4555-8555-555555555555"
+CANCEL_ID = "66666666-6666-4666-8666-666666666666"
 
 
 class LineTailer:
@@ -38,6 +39,9 @@ class MarketRcon:
         if command.startswith("usapo-event-bridge market-deliver "):
             fields = command.split()
             return f"USAPO_MARKET_TRANSFER_RESULT|1|{fields[4]}|{fields[2]}|completed|sold|new"
+        if command.startswith("usapo-event-bridge market-return "):
+            fields = command.split()
+            return f"USAPO_MARKET_TRANSFER_RESULT|1|{fields[4]}|{fields[2]}|completed|cancelled|new"
         if command.startswith("tellraw @a "):
             return ""
         if command.startswith("tellraw Buyer "):
@@ -269,6 +273,57 @@ def test_game_market_keeps_xp_reserved_when_delivery_was_recorded_but_save_faile
     assert listing is not None
     assert listing.status == "reserved"
     assert listing.purchase_request_id == PURCHASE_ID
+
+
+def test_market_cancellation_persists_status_removes_card_and_delivers_log(tmp_path) -> None:
+    bot = MinecraftDiscordBot(
+        Config(
+            discord_token="test",
+            accounts_path=tmp_path / "accounts.db",
+            rcon_password="test",
+        )
+    )
+    bot._accounts.initialize()
+    bot._market.initialize()
+    seller = bot._accounts.create_registration(
+        edition="java",
+        minecraft_name="Seller",
+        server_player_name="Seller",
+        discord_user_id=2002,
+        discord_username="seller",
+        source="self",
+        status="active",
+        created_by=2002,
+        player_uuid=SELLER_UUID,
+    )
+    bot._market.add_listing(
+        listing_id=17,
+        event_id=LISTING_EVENT_ID,
+        seller_account_id=seller.id,
+        seller_discord_user_id=2002,
+        seller_uuid=SELLER_UUID,
+        seller_name="Seller",
+        item_id="minecraft:ancient_debris",
+        item_name="古代の残骸",
+        item_count=2,
+        price_xp=3_000,
+        created_at="2026-08-18T00:00:00+00:00",
+    )
+    bot._rcon = MarketRcon()  # type: ignore[assignment]
+    bot._refresh_market_listing = AsyncMock()  # type: ignore[method-assign]
+    bot._deliver_market_cancellation_logs = AsyncMock()  # type: ignore[method-assign]
+
+    result = asyncio.run(bot._cancel_market(listing_id=17, request_id=CANCEL_ID, seller=seller))
+
+    assert result == "出品を取り消し、古代の残骸 x2を返却しました。"
+    listing = bot._market.get(17)
+    assert listing is not None and listing.status == "cancelled"
+    assert listing.purchase_request_id == CANCEL_ID
+    bot._refresh_market_listing.assert_awaited_once_with(17)  # type: ignore[attr-defined]
+    bot._deliver_market_cancellation_logs.assert_awaited_once()  # type: ignore[attr-defined]
+    rcon = bot._rcon
+    assert isinstance(rcon, MarketRcon)
+    assert f"usapo-event-bridge market-return 17 {SELLER_UUID} {CANCEL_ID}" in rcon.commands
 
 
 def test_market_purchase_notifications_retry_only_failed_destination(tmp_path) -> None:

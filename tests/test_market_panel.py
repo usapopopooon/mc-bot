@@ -1,6 +1,9 @@
 import asyncio
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
+
+import pytest
 
 from mc_bot.bot import MinecraftDiscordBot
 from mc_bot.config import Config
@@ -40,6 +43,27 @@ class FakeMarketPanelChannel:
         return self.message
 
 
+class NonceChannel:
+    def __init__(self) -> None:
+        self.messages: list[SimpleNamespace] = []
+        self.posts = 0
+
+    async def history(self, **kwargs):  # type: ignore[no-untyped-def]
+        for message in reversed(self.messages):
+            yield message
+
+    async def send(self, **kwargs):  # type: ignore[no-untyped-def]
+        self.posts += 1
+        self.messages.append(
+            SimpleNamespace(
+                author=SimpleNamespace(id=123),
+                nonce=kwargs["nonce"],
+                embeds=[kwargs["embed"]],
+            )
+        )
+        return FakeMarketPanelMessage(900 + self.posts)
+
+
 def test_market_panel_view_has_guide_and_balance_buttons() -> None:
     bot = MinecraftDiscordBot(Config(discord_token="secret"))
     view = MarketPanelView(bot)
@@ -70,6 +94,7 @@ def test_market_recovery_checks_existing_active_listing_without_editing() -> Non
     )
     bot._refresh_market_listing = AsyncMock()  # type: ignore[method-assign]
     bot._deliver_market_purchase_notifications = AsyncMock()  # type: ignore[method-assign]
+    bot._deliver_market_cancellation_logs = AsyncMock()  # type: ignore[method-assign]
 
     asyncio.run(bot._recover_market_transactions())
 
@@ -79,6 +104,7 @@ def test_market_recovery_checks_existing_active_listing_without_editing() -> Non
         edit_existing=False,
     )
     bot._deliver_market_purchase_notifications.assert_awaited_once()  # type: ignore[attr-defined]
+    bot._deliver_market_cancellation_logs.assert_awaited_once()  # type: ignore[attr-defined]
 
 
 def test_refresh_market_panel_creates_and_persists_message(tmp_path) -> None:
@@ -274,6 +300,44 @@ def test_sold_market_listing_is_deleted_instead_of_left_as_sold() -> None:
     bot._market.set_discord_message.assert_called_once_with(17, None)  # type: ignore[attr-defined]
 
 
+def test_cancelled_market_listing_is_deleted_instead_of_left_as_cancelled() -> None:
+    bot = MinecraftDiscordBot(Config(discord_token="secret"))
+    bot._settings = RuntimeSettings(guild_id=1, market_channel_id=2)
+    listing = MarketListing(
+        listing_id=17,
+        event_id="11111111-1111-4111-8111-111111111111",
+        seller_account_id=2,
+        seller_discord_user_id=2002,
+        seller_uuid="22222222-2222-4222-8222-222222222222",
+        seller_name="Seller",
+        item_id="minecraft:diamond",
+        item_name="ダイヤモンド",
+        item_count=3,
+        price_xp=720,
+        status="cancelled",
+        purchase_request_id="33333333-3333-4333-8333-333333333333",
+        buyer_account_id=None,
+        buyer_discord_user_id=None,
+        discord_message_id=901,
+        created_at="2026-08-18T00:00:00+00:00",
+        updated_at="2026-08-18T00:00:00+00:00",
+    )
+    message = FakeMarketPanelMessage(901)
+    channel = FakeMarketPanelChannel(message)
+    bot._market.get = Mock(return_value=listing)  # type: ignore[method-assign]
+    bot._market.set_discord_message = Mock()  # type: ignore[method-assign]
+    bot._resolve_and_validate_channel = AsyncMock(  # type: ignore[method-assign]
+        return_value=channel
+    )
+
+    asyncio.run(bot._refresh_market_listing(17))
+
+    assert message.deleted
+    assert message.edits == []
+    assert channel.sent == []
+    bot._market.set_discord_message.assert_called_once_with(17, None)  # type: ignore[attr-defined]
+
+
 def test_market_recovery_removes_previously_sold_listing_cards() -> None:
     bot = MinecraftDiscordBot(Config(discord_token="secret"))
     bot._settings = RuntimeSettings(guild_id=1, market_channel_id=2)
@@ -281,9 +345,13 @@ def test_market_recovery_removes_previously_sold_listing_cards() -> None:
     bot._market.list_sold_with_discord_message = Mock(  # type: ignore[attr-defined]
         return_value=[sold]
     )
+    bot._market.list_cancelled_with_discord_message = Mock(  # type: ignore[attr-defined]
+        return_value=[]
+    )
     bot._market.list_open = Mock(return_value=[])  # type: ignore[method-assign]
     bot._refresh_market_listing = AsyncMock()  # type: ignore[method-assign]
     bot._deliver_market_purchase_notifications = AsyncMock()  # type: ignore[method-assign]
+    bot._deliver_market_cancellation_logs = AsyncMock()  # type: ignore[method-assign]
 
     asyncio.run(bot._recover_market_transactions())
 
@@ -291,3 +359,71 @@ def test_market_recovery_removes_previously_sold_listing_cards() -> None:
         17, move_panel=False
     )
     bot._deliver_market_purchase_notifications.assert_awaited_once()  # type: ignore[attr-defined]
+    bot._deliver_market_cancellation_logs.assert_awaited_once()  # type: ignore[attr-defined]
+
+
+def test_market_recovery_removes_previously_cancelled_listing_cards() -> None:
+    bot = MinecraftDiscordBot(Config(discord_token="secret"))
+    bot._settings = RuntimeSettings(guild_id=1, market_channel_id=2)
+    cancelled = SimpleNamespace(status="cancelled", discord_message_id=901, listing_id=17)
+    bot._market.list_sold_with_discord_message = Mock(return_value=[])  # type: ignore[attr-defined]
+    bot._market.list_cancelled_with_discord_message = Mock(  # type: ignore[attr-defined]
+        return_value=[cancelled]
+    )
+    bot._market.list_open = Mock(return_value=[])  # type: ignore[method-assign]
+    bot._refresh_market_listing = AsyncMock()  # type: ignore[method-assign]
+    bot._deliver_market_purchase_notifications = AsyncMock()  # type: ignore[method-assign]
+    bot._deliver_market_cancellation_logs = AsyncMock()  # type: ignore[method-assign]
+
+    asyncio.run(bot._recover_market_transactions())
+
+    bot._refresh_market_listing.assert_awaited_once_with(  # type: ignore[attr-defined]
+        17, move_panel=False
+    )
+    bot._deliver_market_purchase_notifications.assert_awaited_once()  # type: ignore[attr-defined]
+    bot._deliver_market_cancellation_logs.assert_awaited_once()  # type: ignore[attr-defined]
+
+
+def test_market_cancellation_log_retry_uses_nonce_to_avoid_duplicate_discord_post() -> None:
+    bot = MinecraftDiscordBot(Config(discord_token="secret"))
+    bot._settings = RuntimeSettings(guild_id=1, market_log_channel_id=2)
+    listing = MarketListing(
+        listing_id=17,
+        event_id="11111111-1111-4111-8111-111111111111",
+        seller_account_id=2,
+        seller_discord_user_id=2002,
+        seller_uuid="22222222-2222-4222-8222-222222222222",
+        seller_name="Seller",
+        item_id="minecraft:diamond",
+        item_name="ダイヤモンド",
+        item_count=3,
+        price_xp=720,
+        status="cancelled",
+        purchase_request_id="33333333-3333-4333-8333-333333333333",
+        buyer_account_id=None,
+        buyer_discord_user_id=None,
+        discord_message_id=None,
+        created_at="2026-08-18T00:00:00+00:00",
+        updated_at="2026-08-18T00:01:00+00:00",
+    )
+    bot._market.list_cancelled_unnotified = Mock(  # type: ignore[method-assign]
+        side_effect=[
+            [listing],
+            [replace(listing, discord_cancel_log_delivery_attempted=True)],
+        ]
+    )
+    bot._market.mark_cancel_log_delivery_attempted = Mock()  # type: ignore[method-assign]
+    bot._market.mark_cancel_log_notified = Mock(  # type: ignore[method-assign]
+        side_effect=[RuntimeError("database stopped after Discord accepted the message"), None]
+    )
+    channel = NonceChannel()
+    bot._resolve_and_validate_channel = AsyncMock(  # type: ignore[method-assign]
+        return_value=channel
+    )
+
+    with pytest.raises(RuntimeError, match="database stopped"):
+        asyncio.run(bot._deliver_market_cancellation_logs())
+    asyncio.run(bot._deliver_market_cancellation_logs())
+
+    assert channel.posts == 1
+    assert len(channel.messages) == 1

@@ -6,6 +6,7 @@ from mc_bot.formatting import (
     format_event,
     format_fishing_combo_milestone,
     format_level_up_event,
+    format_market_cancellation,
     format_market_purchase,
     format_resource_exchange,
     format_server_announcement,
@@ -152,6 +153,27 @@ def test_formats_market_purchase_with_buyer_seller_item_and_price() -> None:
         r"**古代の\*残骸\* x2**を **3,000 サーバーXP**で購入しました!"
     )
     assert embed.color.value == 0x3498DB
+
+
+def test_formats_market_cancellation_with_seller_item_price_and_record_id() -> None:
+    embed = format_market_cancellation(
+        server_name="うさぽサーバー",
+        listing_id=17,
+        seller_name="_Seller_",
+        seller_discord_user_id=456,
+        item_name="古代の*残骸*",
+        item_count=2,
+        price_xp=3_000,
+        record_id="44444444-4444-4444-8444-444444444444",
+    )
+
+    assert embed.title == "🗑️ [うさぽサーバー] フリマ #17 出品取消"
+    assert embed.description == (
+        r"**\_Seller\_ (<@456>) さん** が"
+        r"**古代の\*残骸\* x2** / **3,000 サーバーXP** の出品を取り消しました。"
+    )
+    assert embed.footer.text == "記録ID: 44444444-4444-4444-8444-444444444444"
+    assert embed.color.value == 0x607D8B
 
 
 def test_formats_public_combo_milestones_for_discord_log() -> None:

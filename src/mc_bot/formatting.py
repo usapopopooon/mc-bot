@@ -199,6 +199,34 @@ def format_market_purchase(
     )
 
 
+def format_market_cancellation(
+    *,
+    server_name: str,
+    listing_id: int,
+    seller_name: str,
+    seller_discord_user_id: int,
+    item_name: str,
+    item_count: int,
+    price_xp: int,
+    record_id: str,
+) -> discord.Embed:
+    """Minecraftプレイヤーマーケットの出品取消ログ。"""
+    server_name = _escape_markdown(server_name)
+    seller_name = _escape_markdown(seller_name)
+    item_name = _escape_markdown(item_name)
+    embed = discord.Embed(
+        title=f"🗑️ [{server_name}] フリマ #{listing_id} 出品取消",
+        description=(
+            f"**{seller_name} (<@{seller_discord_user_id}>) さん** が"
+            f"**{item_name} x{item_count:,}** / **{price_xp:,} サーバーXP** "
+            "の出品を取り消しました。"
+        ),
+        color=discord.Color.dark_grey(),
+    )
+    embed.set_footer(text=f"記録ID: {record_id}")
+    return embed
+
+
 def format_emerald_diamond_exchange(
     *,
     server_name: str,

@@ -67,6 +67,7 @@ from mc_bot.formatting import (
     format_event,
     format_fishing_combo_milestone,
     format_level_up_event,
+    format_market_cancellation,
     format_market_purchase,
     format_resource_exchange,
     format_server_announcement,
@@ -106,6 +107,7 @@ from mc_bot.item_gacha_request import (
 from mc_bot.market import (
     MarketListing,
     MarketStore,
+    market_cancel_log_nonce,
     market_listing_embed,
     market_purchase_tellraw_command,
     market_transfer_command,
@@ -392,7 +394,7 @@ class MinecraftDiscordBot(discord.Client):
         )(self._configure_market_channel)
         group.command(
             name="market-log-channel",
-            description="Minecraftプレイヤーマーケットの成約ログ投稿先を設定します",
+            description="Minecraftプレイヤーマーケットの成約・取消ログ投稿先を設定します",
         )(self._configure_market_log_channel)
         group.command(
             name="quest-channel",
@@ -999,7 +1001,7 @@ class MinecraftDiscordBot(discord.Client):
             allowed_mentions=discord.AllowedMentions.none(),
         )
 
-    @app_commands.describe(channel="フリマ成約ログの投稿先。省略時は現在のチャンネル")
+    @app_commands.describe(channel="フリマ成約・取消ログの投稿先。省略時は現在のチャンネル")
     async def _configure_market_log_channel(
         self,
         interaction: discord.Interaction,
@@ -1010,14 +1012,18 @@ class MinecraftDiscordBot(discord.Client):
         target = channel or interaction.channel
         if not isinstance(target, discord.TextChannel):
             await interaction.response.send_message(
-                "フリマ成約ログの投稿先にはテキストチャンネルを指定してください。",
+                "フリマ取引ログの投稿先にはテキストチャンネルを指定してください。",
                 ephemeral=True,
             )
             return
         await interaction.response.defer(ephemeral=True)
         try:
             self._ensure_same_guild(target.guild.id)
-            await self._resolve_and_validate_channel(target.id, require_embeds=True)
+            await self._resolve_and_validate_channel(
+                target.id,
+                require_embeds=True,
+                require_message_history=True,
+            )
             await self._save_settings(
                 replace(
                     self._settings,
@@ -1025,12 +1031,14 @@ class MinecraftDiscordBot(discord.Client):
                     market_log_channel_id=target.id,
                 )
             )
+            await self._deliver_market_purchase_notifications()
+            await self._deliver_market_cancellation_logs()
         except (OSError, RuntimeError, discord.DiscordException) as error:
             LOGGER.warning("Could not configure Minecraft market log channel: %s", error)
             await interaction.followup.send(f"設定できませんでした: {error}", ephemeral=True)
             return
         await interaction.followup.send(
-            f"Minecraftフリマ成約ログを {target.mention} に設定しました。",
+            f"Minecraftフリマ取引ログを {target.mention} に設定しました。",
             ephemeral=True,
             allowed_mentions=discord.AllowedMentions.none(),
         )
@@ -1273,7 +1281,7 @@ class MinecraftDiscordBot(discord.Client):
                     "アイテムガチャパネル: "
                     f"{self._channel_text(self._settings.item_gacha_panel_channel_id)}",
                     f"フリマ商品チャンネル: {self._channel_text(self._settings.market_channel_id)}",
-                    f"フリマ成約ログ: {self._channel_text(self._settings.market_log_channel_id)}",
+                    f"フリマ取引ログ: {self._channel_text(self._settings.market_log_channel_id)}",
                     f"クエスト掲示板: {self._channel_text(self._settings.quest_channel_id)}",
                     f"クエスト完了ログ: {self._channel_text(self._settings.quest_log_channel_id)}",
                     f"承認方式: {mode}",
@@ -2571,6 +2579,8 @@ class MinecraftDiscordBot(discord.Client):
                     local_status,
                 )
                 await self._refresh_market_listing(listing.listing_id)
+                if local_status == "cancelled":
+                    await self._try_deliver_market_cancellation_logs()
                 return {
                     "player_offline": (
                         "Minecraftへ参加してから購入してください。XPは消費していません。"
@@ -2653,6 +2663,8 @@ class MinecraftDiscordBot(discord.Client):
                     local_status,
                 )
                 await self._refresh_market_listing(listing.listing_id)
+                if local_status == "cancelled":
+                    await self._try_deliver_market_cancellation_logs()
                 return {
                     "player_offline": "Minecraftへ参加してから取り消してください。",
                     "inventory_full": "インベントリを空けてから取り消してください。",
@@ -2664,6 +2676,7 @@ class MinecraftDiscordBot(discord.Client):
                 "cancelled",
             )
             await self._refresh_market_listing(listing.listing_id)
+            await self._try_deliver_market_cancellation_logs()
             return (
                 f"出品を取り消し、{listing.display_item_name} x{listing.item_count}を返却しました。"
             )
@@ -2700,7 +2713,7 @@ class MinecraftDiscordBot(discord.Client):
             return
         try:
             channel = await self._resolve_and_validate_channel(channel_id, require_embeds=True)
-            if listing.status == "sold":
+            if listing.status in {"sold", "cancelled"}:
                 if listing.discord_message_id is None:
                     return
                 try:
@@ -2768,13 +2781,18 @@ class MinecraftDiscordBot(discord.Client):
             return
         if self._settings.market_channel_id is not None:
             sold_listings = await asyncio.to_thread(self._market.list_sold_with_discord_message)
-            for listing in sold_listings:
+            cancelled_listings = await asyncio.to_thread(
+                self._market.list_cancelled_with_discord_message
+            )
+            terminal_listings = [*sold_listings, *cancelled_listings]
+            for listing in terminal_listings:
                 try:
                     await self._refresh_market_listing(listing.listing_id, move_panel=False)
                 except OSError, RuntimeError, discord.DiscordException:
                     LOGGER.exception(
-                        "Could not remove sold market listing=%d",
+                        "Could not remove terminal market listing=%d status=%s",
                         listing.listing_id,
+                        listing.status,
                     )
         for listing in await asyncio.to_thread(self._market.list_open):
             try:
@@ -2815,6 +2833,7 @@ class MinecraftDiscordBot(discord.Client):
                     listing.status,
                 )
         await self._deliver_market_purchase_notifications()
+        await self._deliver_market_cancellation_logs()
 
     async def _deliver_market_purchase_notifications(self) -> None:
         async with self._market_notification_lock:
@@ -2898,6 +2917,102 @@ class MinecraftDiscordBot(discord.Client):
                             listing.purchase_request_id,
                             "discord",
                         )
+
+    async def _try_deliver_market_cancellation_logs(self) -> None:
+        try:
+            await self._deliver_market_cancellation_logs()
+        except (OSError, RuntimeError, discord.DiscordException) as error:
+            LOGGER.warning("Could not deliver pending market cancellation logs: %s", error)
+
+    async def _deliver_market_cancellation_logs(self) -> None:
+        async with self._market_notification_lock:
+            channel_id = self._settings.market_log_channel_id
+            if channel_id is None:
+                return
+            channel = await self._resolve_and_validate_channel(
+                channel_id,
+                require_embeds=True,
+                require_message_history=True,
+            )
+            listings = await asyncio.to_thread(self._market.list_cancelled_unnotified)
+            attempted = [
+                listing for listing in listings if listing.discord_cancel_log_delivery_attempted
+            ]
+            existing = await self._existing_market_cancellation_logs(channel, attempted)
+            guild = self.get_guild(self._settings.guild_id or 0)
+            server_name = guild.name if guild is not None else "サーバー"
+            for listing in listings:
+                request_id = listing.purchase_request_id
+                if request_id is None:
+                    continue
+                if request_id in existing:
+                    await asyncio.to_thread(
+                        self._market.mark_cancel_log_notified,
+                        listing.listing_id,
+                        request_id,
+                    )
+                    continue
+                if not listing.discord_cancel_log_delivery_attempted:
+                    await asyncio.to_thread(
+                        self._market.mark_cancel_log_delivery_attempted,
+                        listing.listing_id,
+                        request_id,
+                    )
+                await channel.send(
+                    embed=format_market_cancellation(
+                        server_name=server_name,
+                        listing_id=listing.listing_id,
+                        seller_name=listing.seller_name,
+                        seller_discord_user_id=listing.seller_discord_user_id,
+                        item_name=listing.display_item_name,
+                        item_count=listing.item_count,
+                        price_xp=listing.price_xp,
+                        record_id=request_id,
+                    ),
+                    nonce=market_cancel_log_nonce(request_id),
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+                await asyncio.to_thread(
+                    self._market.mark_cancel_log_notified,
+                    listing.listing_id,
+                    request_id,
+                )
+
+    async def _existing_market_cancellation_logs(
+        self,
+        channel: discord.TextChannel,
+        listings: list[MarketListing],
+    ) -> set[str]:
+        if not listings:
+            return set()
+        pending = {
+            listing.purchase_request_id
+            for listing in listings
+            if listing.purchase_request_id is not None
+        }
+        nonces = {market_cancel_log_nonce(request_id): request_id for request_id in pending}
+        earliest = min(
+            datetime.fromisoformat(listing.updated_at) for listing in listings
+        ) - timedelta(seconds=1)
+        found: set[str] = set()
+        async for message in channel.history(limit=None, after=earliest, oldest_first=False):
+            if self.user is not None and message.author.id != self.user.id:
+                continue
+            if message.nonce is not None:
+                try:
+                    request_id = nonces.get(int(message.nonce))
+                except TypeError, ValueError:
+                    request_id = None
+                if request_id is not None:
+                    found.add(request_id)
+            for embed in message.embeds:
+                footer = embed.footer.text or ""
+                for request_id in pending - found:
+                    if f"記録ID: {request_id}" in footer:
+                        found.add(request_id)
+            if found == pending:
+                break
+        return found
 
     async def _handle_quest_state(self, event: MinecraftQuestStateEvent) -> None:
         owner = await self._quest_account(event.owner_uuid)
