@@ -31,6 +31,7 @@ from mc_bot.item_gacha import (
     draw_item_gacha_reward,
     get_item_gacha_reward,
     item_gacha_day,
+    item_gacha_enchantment_summary,
     item_gacha_give_command,
     item_gacha_panel_embed,
     item_gacha_result_embed,
@@ -855,6 +856,9 @@ def test_commands_use_only_catalog_rewards_and_safe_player_names() -> None:
     assert "【N】" in tellraw
     assert "資源・採掘ガチャ" in tellraw
     assert "鉄インゴット x64" in tellraw
+    enchanted_tellraw = item_gacha_tellraw_command("Steve", "mythic_elytra", "equipment")
+    assert "修繕付きエリトラ x1" in enchanted_tellraw
+    assert r"\nエンチャント: 耐久力 III・修繕" in enchanted_tellraw
     with pytest.raises(ValueError):
         item_gacha_give_command("@a", "n_iron")
     with pytest.raises(ValueError):
@@ -876,6 +880,41 @@ def test_private_game_response_targets_only_the_requesting_player() -> None:
         private_tellraw_command("@a", "だめ")
 
 
+def test_enchanted_equipment_summaries_are_complete_and_books_are_not_repeated() -> None:
+    expected = {
+        "ur_bow": "射撃ダメージ増加 V・パンチ II・フレイム・無限・耐久力 III",
+        "ur_axe": "効率強化 V・幸運 III・ダメージ増加 V・耐久力 III・修繕",
+        "ur_shovel": "効率強化 V・シルクタッチ・耐久力 III・修繕",
+        "ur_trident": "水生特効 V・忠誠 III・召雷・耐久力 III・修繕",
+        "mythic_sword": (
+            "ダメージ増加 V・範囲ダメージ増加 III・ドロップ増加 III・"
+            "火属性 II・ノックバック II・耐久力 III・修繕"
+        ),
+        "mythic_pickaxe": "効率強化 V・幸運 III・耐久力 III・修繕",
+        "mythic_chestplate": "ダメージ軽減 IV・棘の鎧 III・耐久力 III・修繕",
+        "mythic_elytra": "耐久力 III・修繕",
+        "mythic_mace": "重撃 V・ウィンドバースト III・火属性 II・耐久力 III・修繕",
+        "mythic_spear": (
+            "ダメージ増加 V・突進 III・ドロップ増加 III・火属性 II・"
+            "ノックバック II・耐久力 III・修繕"
+        ),
+        "mythic_helmet": ("ダメージ軽減 IV・水中呼吸 III・水中採掘・棘の鎧 III・耐久力 III・修繕"),
+        "mythic_boots": (
+            "ダメージ軽減 IV・落下耐性 IV・水中歩行 III・ソウルスピード III・"
+            "棘の鎧 III・耐久力 III・修繕"
+        ),
+    }
+    actual = {
+        reward.key: item_gacha_enchantment_summary(reward)
+        for reward in ITEM_GACHA_REWARDS
+        if "[enchantments={" in reward.item_spec
+    }
+
+    assert actual == expected
+    assert item_gacha_enchantment_summary(get_item_gacha_reward("r_mending")) is None
+    assert item_gacha_enchantment_summary(get_item_gacha_reward("n_iron")) is None
+
+
 def test_result_embed_uses_minecraft_name_and_discord_mention() -> None:
     embed = item_gacha_result_embed(
         player_name="*Steve*",
@@ -886,6 +925,30 @@ def test_result_embed_uses_minecraft_name_and_discord_mention() -> None:
     assert embed.title == "🎁 アイテムガチャ【N】"
     assert r"**\*Steve\* (<@123>) さん** が" in str(embed.description)
     assert "鉄インゴット x64" in str(embed.description)
+
+
+def test_enchanted_result_embed_and_private_response_show_exact_enchantments() -> None:
+    embed = item_gacha_result_embed(
+        player_name="Steve",
+        discord_user_id=123,
+        reward_key="mythic_elytra",
+        category="equipment",
+    )
+    draw = SimpleNamespace(
+        reward_key="mythic_elytra",
+        tier="MYTHIC",
+        item_name="修繕付きエリトラ",
+        item_count=1,
+        draw_category="equipment",
+        draw_kind="premium",
+        cost_xp=1_000,
+        draw_number=1,
+    )
+
+    assert "エンチャント: 耐久力 III・修繕" in str(embed.description)
+    received = MinecraftDiscordBot._item_gacha_received_text(draw, already=False)
+    assert "エンチャント: 耐久力 III・修繕" in received
+    assert "種類: 装備・強化" in received
 
 
 def test_store_reuses_incomplete_draw_and_allows_three_completed_draws_per_day(

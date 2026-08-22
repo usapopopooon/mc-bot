@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import secrets
 from dataclasses import dataclass
 from datetime import datetime
@@ -22,6 +23,44 @@ ITEM_GACHA_DAILY_LIMIT = 3
 ITEM_GACHA_COST_XP = ITEM_GACHA_NORMAL_COST_XP
 type ItemGachaKind = Literal["normal", "premium"]
 type ItemGachaCategory = Literal["all", "resources", "adventure", "equipment"]
+
+_NORMAL_ENCHANTMENTS_PATTERN = re.compile(r"(?<!stored_)enchantments=\{([^{}]+)\}")
+_ENCHANTMENT_JAPANESE_NAMES = {
+    "aqua_affinity": "水中採掘",
+    "channeling": "召雷",
+    "density": "重撃",
+    "depth_strider": "水中歩行",
+    "efficiency": "効率強化",
+    "feather_falling": "落下耐性",
+    "fire_aspect": "火属性",
+    "flame": "フレイム",
+    "fortune": "幸運",
+    "impaling": "水生特効",
+    "infinity": "無限",
+    "knockback": "ノックバック",
+    "looting": "ドロップ増加",
+    "loyalty": "忠誠",
+    "lunge": "突進",
+    "mending": "修繕",
+    "power": "射撃ダメージ増加",
+    "protection": "ダメージ軽減",
+    "punch": "パンチ",
+    "respiration": "水中呼吸",
+    "sharpness": "ダメージ増加",
+    "silk_touch": "シルクタッチ",
+    "soul_speed": "ソウルスピード",
+    "sweeping_edge": "範囲ダメージ増加",
+    "thorns": "棘の鎧",
+    "unbreaking": "耐久力",
+    "wind_burst": "ウィンドバースト",
+}
+_ENCHANTMENT_LEVEL_SUFFIXES = {
+    1: "",
+    2: " II",
+    3: " III",
+    4: " IV",
+    5: " V",
+}
 
 ITEM_GACHA_CATEGORIES: tuple[ItemGachaCategory, ...] = (
     "all",
@@ -1080,6 +1119,29 @@ def item_gacha_give_command(player_name: str, reward_key: str) -> str:
     return f"give {player_name} {reward.item_spec} {reward.item_count}"
 
 
+def item_gacha_enchantment_summary(reward: ItemGachaReward) -> str | None:
+    match = _NORMAL_ENCHANTMENTS_PATTERN.search(reward.item_spec)
+    if match is None:
+        return None
+    labels: list[str] = []
+    for entry in match.group(1).split(","):
+        enchantment_id, separator, raw_level = entry.rpartition(":")
+        if not separator:
+            return None
+        enchantment_id = enchantment_id.removeprefix("minecraft:")
+        try:
+            level = int(raw_level)
+        except ValueError:
+            return None
+        name = _ENCHANTMENT_JAPANESE_NAMES.get(
+            enchantment_id,
+            enchantment_id.replace("_", " "),
+        )
+        suffix = _ENCHANTMENT_LEVEL_SUFFIXES.get(level, f" {level}")
+        labels.append(f"{name}{suffix}")
+    return "・".join(labels) if labels else None
+
+
 def item_gacha_tellraw_command(
     player_name: str,
     reward_key: str,
@@ -1109,6 +1171,13 @@ def item_gacha_tellraw_command(
         },
         {"text": " を獲得しました!"},
     ]
+    if enchantments := item_gacha_enchantment_summary(reward):
+        components.append(
+            {
+                "text": f"\nエンチャント: {enchantments}",
+                "color": "gray",
+            }
+        )
     return f"tellraw @a {json.dumps(components, ensure_ascii=False, separators=(',', ':'))}"
 
 
@@ -1132,11 +1201,14 @@ def item_gacha_result_embed(
         "UR": discord.Color.gold(),
         "MYTHIC": discord.Color.red(),
     }[reward.tier]
+    enchantments = item_gacha_enchantment_summary(reward)
+    enchantment_line = f"エンチャント: {enchantments}\n" if enchantments is not None else ""
     return discord.Embed(
         title=f"🎁 アイテムガチャ【{tier}】",
         description=(
             f"**{player_name} (<@{discord_user_id}>) さん** が\n"
             f"**{reward.item_name} x{reward.item_count}** を獲得しました!\n"
+            f"{enchantment_line}"
             f"種類: **{item_gacha_category_label(category)}**"
         ),
         color=color,

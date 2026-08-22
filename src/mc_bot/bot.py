@@ -104,6 +104,7 @@ from mc_bot.item_gacha import (
     item_gacha_category_label,
     item_gacha_cost_xp,
     item_gacha_day,
+    item_gacha_enchantment_summary,
     item_gacha_give_command,
     item_gacha_kind_label,
     item_gacha_panel_embed,
@@ -4409,10 +4410,15 @@ class MinecraftDiscordBot(discord.Client):
     @staticmethod
     def _item_gacha_received_text(draw: MinecraftItemGachaDraw, *, already: bool) -> str:
         prefix = "この抽選は受取済みです" if already else "受け取りました"
+        enchantments = item_gacha_enchantment_summary(get_item_gacha_reward(draw.reward_key))
+        details_separator = (
+            f"\nエンチャント: {enchantments}\n種類: " if enchantments is not None else " / "
+        )
         return (
             f"{prefix}: **【{item_gacha_tier_label(draw.tier)}】"
             f"{discord.utils.escape_markdown(draw.item_name)} x{draw.item_count}**"
-            f" / {item_gacha_category_label(cast(ItemGachaCategory, draw.draw_category))}"
+            f"{details_separator}"
+            f"{item_gacha_category_label(cast(ItemGachaCategory, draw.draw_category))}"
             f" / {item_gacha_kind_label('premium' if draw.draw_kind == 'premium' else 'normal')}"
             f"・サーバーXP **{draw.cost_xp:,}**消費"
             f" (本日 {draw.draw_number}/{ITEM_GACHA_DAILY_LIMIT}回)"
