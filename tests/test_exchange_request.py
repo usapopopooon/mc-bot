@@ -30,6 +30,7 @@ def test_parses_confirmed_resource_exchange_request() -> None:
         "balance|balance|0|0|0",
         "xp|minecraft:experience|500|100|500",
         "resource|minecraft:emerald|16|360|16",
+        "resource|minecraft:gunpowder|64|150|64",
         "emerald_diamond|minecraft:diamond|64|0|2",
         "material_buyback|minecraft:sandstone|256|0|200",
     ],

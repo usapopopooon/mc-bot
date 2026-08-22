@@ -28,6 +28,7 @@ _QUERY_RESULT = re.compile(r"\bhas\s+(\d+)\s+experience\s+(levels?|points?)\b", 
 _RESOURCE_ITEM_NAMES = {
     "minecraft:diamond": "ダイヤモンド",
     "minecraft:emerald": "エメラルド",
+    "minecraft:gunpowder": "火薬",
 }
 _MATERIAL_BUYBACK_RATES = {
     "minecraft:dirt": ("土", 30),
@@ -1282,7 +1283,7 @@ class LevelBotXpClient:
             cost_xp=int(item["cost_xp"]),
         )
         if (
-            pack.item_id not in {"minecraft:diamond", "minecraft:emerald"}
+            pack.item_id not in {"minecraft:diamond", "minecraft:emerald", "minecraft:gunpowder"}
             or pack.item_name != _RESOURCE_ITEM_NAMES.get(pack.item_id)
             or not 1 <= pack.item_count <= 64
             or pack.cost_xp <= 0

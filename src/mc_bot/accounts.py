@@ -249,7 +249,9 @@ class AccountStore:
                     guild_id INTEGER NOT NULL,
                     player_name TEXT NOT NULL,
                     item_id TEXT NOT NULL
-                        CHECK (item_id IN ('minecraft:diamond', 'minecraft:emerald')),
+                        CHECK (item_id IN (
+                            'minecraft:diamond', 'minecraft:emerald', 'minecraft:gunpowder'
+                        )),
                     item_name TEXT NOT NULL,
                     item_count INTEGER NOT NULL CHECK (item_count > 0),
                     cost_xp INTEGER NOT NULL CHECK (cost_xp > 0),
@@ -402,6 +404,7 @@ class AccountStore:
                 "minecraft_woodcutting_combo_rewards",
             )
             self._add_resource_exchange_notification_columns(connection)
+            self._upgrade_resource_exchange_items(connection)
             self._add_whitelist_retry_columns(connection)
             self._add_item_gacha_notification_attempt_columns(connection)
             self._upgrade_item_gacha_draw_table(connection)
@@ -442,6 +445,70 @@ class AccountStore:
                 """
             )
             connection.execute(f"UPDATE {table} SET {column} = 1")
+
+    @staticmethod
+    def _upgrade_resource_exchange_items(connection: sqlite3.Connection) -> None:
+        """Allow gunpowder deliveries without discarding existing delivery state."""
+        table = "minecraft_resource_exchange_deliveries"
+        row = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?",
+            (table,),
+        ).fetchone()
+        if row is None:
+            raise RuntimeError("minecraft resource exchange delivery table is missing")
+        if "minecraft:gunpowder" in str(row["sql"]):
+            return
+        connection.executescript(
+            """
+            BEGIN IMMEDIATE;
+            DROP TABLE IF EXISTS minecraft_resource_exchange_deliveries_v2;
+            CREATE TABLE minecraft_resource_exchange_deliveries_v2 (
+                exchange_id TEXT PRIMARY KEY
+                    REFERENCES minecraft_resource_exchange_claims(exchange_id),
+                level_exchange_id INTEGER NOT NULL,
+                account_id INTEGER NOT NULL
+                    REFERENCES minecraft_accounts(id) ON DELETE CASCADE,
+                discord_user_id INTEGER NOT NULL,
+                guild_id INTEGER NOT NULL,
+                player_name TEXT NOT NULL,
+                item_id TEXT NOT NULL
+                    CHECK (item_id IN (
+                        'minecraft:diamond', 'minecraft:emerald', 'minecraft:gunpowder'
+                    )),
+                item_name TEXT NOT NULL,
+                item_count INTEGER NOT NULL CHECK (item_count > 0),
+                cost_xp INTEGER NOT NULL CHECK (cost_xp > 0),
+                claim_token TEXT NOT NULL,
+                reward_applied INTEGER NOT NULL DEFAULT 0
+                    CHECK (reward_applied IN (0, 1)),
+                level_completed INTEGER NOT NULL DEFAULT 0
+                    CHECK (level_completed IN (0, 1)),
+                minecraft_notified INTEGER NOT NULL DEFAULT 0
+                    CHECK (minecraft_notified IN (0, 1)),
+                minecraft_public_notified INTEGER NOT NULL DEFAULT 0
+                    CHECK (minecraft_public_notified IN (0, 1)),
+                discord_notified INTEGER NOT NULL DEFAULT 0
+                    CHECK (discord_notified IN (0, 1)),
+                created_at TEXT NOT NULL
+            );
+            INSERT INTO minecraft_resource_exchange_deliveries_v2 (
+                exchange_id, level_exchange_id, account_id, discord_user_id,
+                guild_id, player_name, item_id, item_name, item_count, cost_xp,
+                claim_token, reward_applied, level_completed, minecraft_notified,
+                minecraft_public_notified, discord_notified, created_at
+            )
+            SELECT
+                exchange_id, level_exchange_id, account_id, discord_user_id,
+                guild_id, player_name, item_id, item_name, item_count, cost_xp,
+                claim_token, reward_applied, level_completed, minecraft_notified,
+                minecraft_public_notified, discord_notified, created_at
+            FROM minecraft_resource_exchange_deliveries;
+            DROP TABLE minecraft_resource_exchange_deliveries;
+            ALTER TABLE minecraft_resource_exchange_deliveries_v2
+                RENAME TO minecraft_resource_exchange_deliveries;
+            COMMIT;
+            """
+        )
 
     @staticmethod
     def _add_whitelist_retry_columns(connection: sqlite3.Connection) -> None:
@@ -1642,7 +1709,7 @@ class AccountStore:
             or discord_user_id <= 0
             or guild_id <= 0
             or not player_name
-            or item_id not in {"minecraft:diamond", "minecraft:emerald"}
+            or item_id not in {"minecraft:diamond", "minecraft:emerald", "minecraft:gunpowder"}
             or not item_name
             or not 1 <= item_count <= 64
             or cost_xp <= 0

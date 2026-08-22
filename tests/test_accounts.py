@@ -345,6 +345,94 @@ def test_resource_notification_migration_does_not_replay_existing_exchanges(
     assert tuple(row) == (1, 1)
 
 
+def test_resource_delivery_migration_adds_gunpowder_without_losing_rows(tmp_path) -> None:
+    database = tmp_path / "accounts.db"
+    with sqlite3.connect(database) as connection:
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA foreign_keys = ON")
+        connection.executescript(
+            """
+            CREATE TABLE minecraft_accounts (id INTEGER PRIMARY KEY);
+            CREATE TABLE minecraft_resource_exchange_claims (
+                exchange_id TEXT PRIMARY KEY,
+                claim_token TEXT NOT NULL UNIQUE,
+                created_at TEXT NOT NULL
+            );
+            CREATE TABLE minecraft_resource_exchange_deliveries (
+                exchange_id TEXT PRIMARY KEY
+                    REFERENCES minecraft_resource_exchange_claims(exchange_id),
+                level_exchange_id INTEGER NOT NULL,
+                account_id INTEGER NOT NULL
+                    REFERENCES minecraft_accounts(id) ON DELETE CASCADE,
+                discord_user_id INTEGER NOT NULL,
+                guild_id INTEGER NOT NULL,
+                player_name TEXT NOT NULL,
+                item_id TEXT NOT NULL
+                    CHECK (item_id IN ('minecraft:diamond', 'minecraft:emerald')),
+                item_name TEXT NOT NULL,
+                item_count INTEGER NOT NULL CHECK (item_count > 0),
+                cost_xp INTEGER NOT NULL CHECK (cost_xp > 0),
+                claim_token TEXT NOT NULL,
+                reward_applied INTEGER NOT NULL DEFAULT 0,
+                level_completed INTEGER NOT NULL DEFAULT 0,
+                minecraft_notified INTEGER NOT NULL DEFAULT 0,
+                minecraft_public_notified INTEGER NOT NULL DEFAULT 0,
+                discord_notified INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL
+            );
+            INSERT INTO minecraft_accounts (id) VALUES (1);
+            INSERT INTO minecraft_resource_exchange_claims
+                (exchange_id, claim_token, created_at)
+            VALUES ('old-exchange', 'old-token', '2026-08-22T00:00:00+00:00');
+            INSERT INTO minecraft_resource_exchange_deliveries (
+                exchange_id, level_exchange_id, account_id, discord_user_id,
+                guild_id, player_name, item_id, item_name, item_count, cost_xp,
+                claim_token, reward_applied, created_at
+            ) VALUES (
+                'old-exchange', 1, 1, 2, 3, 'Steve', 'minecraft:diamond',
+                'ダイヤモンド', 1, 720, 'old-token', 1,
+                '2026-08-22T00:00:00+00:00'
+            );
+            """
+        )
+
+        AccountStore._upgrade_resource_exchange_items(connection)
+
+        old = connection.execute(
+            "SELECT item_id, reward_applied FROM minecraft_resource_exchange_deliveries"
+        ).fetchone()
+        assert old is not None
+        assert tuple(old) == ("minecraft:diamond", 1)
+        connection.execute(
+            """
+            INSERT INTO minecraft_resource_exchange_claims
+                (exchange_id, claim_token, created_at)
+            VALUES ('gunpowder-exchange', 'gunpowder-token', '2026-08-22T00:00:01+00:00')
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO minecraft_resource_exchange_deliveries (
+                exchange_id, level_exchange_id, account_id, discord_user_id,
+                guild_id, player_name, item_id, item_name, item_count, cost_xp,
+                claim_token, created_at
+            ) VALUES (
+                'gunpowder-exchange', 2, 1, 2, 3, 'Steve', 'minecraft:gunpowder',
+                '火薬', 64, 150, 'gunpowder-token', '2026-08-22T00:00:01+00:00'
+            )
+            """
+        )
+        gunpowder = connection.execute(
+            """
+            SELECT item_id, item_count, cost_xp
+            FROM minecraft_resource_exchange_deliveries
+            WHERE exchange_id = 'gunpowder-exchange'
+            """
+        ).fetchone()
+        assert gunpowder is not None
+        assert tuple(gunpowder) == ("minecraft:gunpowder", 64, 150)
+
+
 def test_imports_existing_whitelist_as_protected_and_unlinked(tmp_path) -> None:
     whitelist = tmp_path / "whitelist.json"
     whitelist.write_text(

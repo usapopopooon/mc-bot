@@ -98,6 +98,7 @@ def test_resource_panel_lists_server_rates_and_is_persistent() -> None:
     packs = (
         MinecraftResourcePack("minecraft:emerald", "エメラルド", 4, 100),
         MinecraftResourcePack("minecraft:emerald", "エメラルド", 16, 360),
+        MinecraftResourcePack("minecraft:gunpowder", "火薬", 8, 100),
         MinecraftResourcePack("minecraft:diamond", "ダイヤモンド", 3, 550),
     )
     embed = minecraft_resource_shop_embed(packs)
@@ -118,8 +119,12 @@ def test_resource_panel_lists_server_rates_and_is_persistent() -> None:
     assert "最大 **64個・1スタック**" in str(embed.description)
     assert "手持ちのエメラルドもダイヤモンドへ交換" in str(embed.description)
     assert "**サーバーXP → 資源**" in str(embed.fields[0].value)
+    assert "**🟢 エメラルド**" in str(embed.fields[0].value)
+    assert "**🧨 火薬**" in str(embed.fields[0].value)
+    assert "**💎 ダイヤモンド**" in str(embed.fields[0].value)
     assert "`サーバーXP 100` → `エメラルド x4`" in str(embed.fields[0].value)
     assert "`サーバーXP 360` → `エメラルド x16`" in str(embed.fields[0].value)
+    assert "`サーバーXP 100` → `火薬 x8`" in str(embed.fields[0].value)
     assert "**手持ち資源 → 資源**" in str(embed.fields[0].value)
     assert "`エメラルド x32` → `ダイヤモンド x1`" in str(embed.fields[0].value)
     assert "`エメラルド x64` → `ダイヤモンド x2`" in str(embed.fields[0].value)
@@ -130,7 +135,7 @@ def test_resource_panel_lists_server_rates_and_is_persistent() -> None:
     assert "エメラルドにも交換" in str(embed.fields[0].value)
     assert embed.fields[1].name == "🎮 ゲーム内コマンド"
     assert "`/exchange`" in str(embed.fields[1].value)
-    assert "`/exchange resource <diamond|emerald> <個数>`" in str(embed.fields[1].value)
+    assert "`/exchange resource <diamond|emerald|gunpowder> <個数>`" in str(embed.fields[1].value)
     assert "`/exchange emerald-diamond <32|64>`" in str(embed.fields[1].value)
     assert "`/exchange buyback <1|2|4|8|16|max|all>`" in str(embed.fields[1].value)
     assert "`/exchange balance`" in str(embed.fields[1].value)
@@ -148,7 +153,19 @@ def test_resource_panel_lists_server_rates_and_is_persistent() -> None:
         "mc-resource-shop:emerald-diamond",
         "mc-resource-shop:balance",
     ]
-    assert [option.value for option in select.children[0].options] == ["0", "1", "2"]
+    assert [option.value for option in select.children[0].options] == ["0", "1", "2", "3"]
+    assert [option.label for option in select.children[0].options] == [
+        "エメラルド x4",
+        "エメラルド x16",
+        "火薬 x8",
+        "ダイヤモンド x3",
+    ]
+    assert [option.description for option in select.children[0].options] == [
+        "必要: 100 サーバーXP",
+        "必要: 360 サーバーXP",
+        "必要: 100 サーバーXP",
+        "必要: 550 サーバーXP",
+    ]
 
 
 def test_emerald_diamond_menu_exposes_only_fixed_safe_rates() -> None:
@@ -228,8 +245,12 @@ def test_open_resource_shop_refreshes_public_panel_and_private_menu_from_same_ra
     interaction.followup.send.assert_awaited_once()
     private_view = interaction.followup.send.await_args.kwargs["view"]
     assert [option.label for option in private_view.children[0].options] == [
-        "エメラルド x4 (サーバーXP 100)",
-        "エメラルド x16 (サーバーXP 360)",
+        "エメラルド x4",
+        "エメラルド x16",
+    ]
+    assert [option.description for option in private_view.children[0].options] == [
+        "必要: 100 サーバーXP",
+        "必要: 360 サーバーXP",
     ]
 
 
@@ -256,6 +277,9 @@ def test_resource_commands_allow_only_fixed_items_and_recipient() -> None:
         resource_give_command("Steve", "minecraft:diamond", 65)
     assert resource_give_command("Steve", "minecraft:emerald", 1).endswith(" 1")
     assert resource_give_command("Steve", "minecraft:emerald", 64).endswith(" 64")
+    assert resource_give_command("Steve", "minecraft:gunpowder", 64) == (
+        "give Steve minecraft:gunpowder 64"
+    )
 
 
 def test_confirmation_preserves_item_count_and_cost_mapping() -> None:
@@ -358,6 +382,39 @@ def test_parses_resource_shop_and_delivery_event() -> None:
         )
 
 
+def test_parses_gunpowder_pack_and_delivery_event() -> None:
+    pack = LevelBotXpClient._parse_resource_pack(
+        {
+            "item_id": "minecraft:gunpowder",
+            "item_name": "火薬",
+            "item_count": 64,
+            "cost_xp": 150,
+        }
+    )
+    event = LevelBotXpClient._parse_resource_exchange(
+        {
+            "id": 8,
+            "event_id": "resource-exchange-8",
+            "guild_id": "456",
+            "user_id": "123",
+            "minecraft_account_id": "mc-bot:1",
+            "item_id": "minecraft:gunpowder",
+            "item_name": "火薬",
+            "item_count": 64,
+            "cost_xp": 150,
+            "status": "pending",
+        }
+    )
+
+    assert (pack.item_name, pack.item_count, pack.cost_xp) == ("火薬", 64, 150)
+    assert (event.item_id, event.item_name, event.item_count, event.cost_xp) == (
+        "minecraft:gunpowder",
+        "火薬",
+        64,
+        150,
+    )
+
+
 def test_sync_grants_resource_once_and_announces_like_xp_exchange(tmp_path) -> None:
     bot, account = _bot(tmp_path)
     rcon = ResourceRcon()
@@ -393,6 +450,45 @@ def test_sync_grants_resource_once_and_announces_like_xp_exchange(tmp_path) -> N
     assert delivery.discord_notified
     send_log.assert_awaited_once()
     assert "ダイヤモンド x3" in str(send_log.await_args.args[0].description)
+
+
+def test_sync_delivers_gunpowder_pack_with_exact_api_values(tmp_path) -> None:
+    bot, account = _bot(tmp_path)
+    rcon = ResourceRcon()
+    bot._rcon = rcon  # type: ignore[assignment]
+    event = replace(
+        _event(),
+        minecraft_account_id=f"mc-bot:{account.id}",
+        item_id="minecraft:gunpowder",
+        item_name="火薬",
+        item_count=64,
+        cost_xp=150,
+    )
+    bot._level_bot_xp.fetch_resource_exchanges = AsyncMock(  # type: ignore[method-assign]
+        return_value=[event]
+    )
+    bot._level_bot_xp.update_resource_exchange = AsyncMock(  # type: ignore[method-assign]
+        return_value=True
+    )
+    bot._send = AsyncMock()  # type: ignore[method-assign]
+
+    asyncio.run(
+        bot._sync_minecraft_resource_exchanges(
+            guild_id=456,
+            online_names={"steve"},
+            linked_accounts=(account,),
+        )
+    )
+
+    assert rcon.commands.count("give Steve minecraft:gunpowder 64") == 1
+    delivery = bot._accounts.get_minecraft_resource_exchange_delivery(event.event_id)
+    assert delivery is not None
+    assert (delivery.item_id, delivery.item_name, delivery.item_count, delivery.cost_xp) == (
+        "minecraft:gunpowder",
+        "火薬",
+        64,
+        150,
+    )
 
 
 def test_sync_refunds_explicit_give_failure(tmp_path) -> None:

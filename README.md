@@ -92,7 +92,8 @@ Minecraft 資源交換所では、既存のサーバーXPから資源への交�
 アイテムは回収しません。買取完了時は、現在のサーバーXPと当日の残り買取枠も表示します。
 スマホ版を含むFloodgate/Bedrockでは選択フォーム、Java版ではチェスト画面と確認画面を
 表示します。画面を表示できない場合は `/exchange xp <50|250|500|5000>`、
-`/exchange resource <diamond|emerald> <個数>`、`/exchange emerald-diamond <32|64>`、
+`/exchange resource <diamond|emerald|gunpowder> <個数>`、
+`/exchange emerald-diamond <32|64>`、
 対象資材をメインハンドに持って `/exchange buyback <1|2|4|8|16|max|all>`、
 `/exchange balance` を使います。画面とコマンドが送る表示価格は、XP消費前に
 level-botの現在の交換内容と再照合し、改定済みなら交換せずメニューの開き直しを案内します。

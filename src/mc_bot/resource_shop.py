@@ -17,6 +17,12 @@ if TYPE_CHECKING:
 _RESOURCE_NAMES = {
     "minecraft:diamond": "ダイヤモンド",
     "minecraft:emerald": "エメラルド",
+    "minecraft:gunpowder": "火薬",
+}
+_RESOURCE_EMOJIS = {
+    "minecraft:diamond": "💎",
+    "minecraft:emerald": "🟢",
+    "minecraft:gunpowder": "🧨",
 }
 EMERALD_DIAMOND_PACKS = ((32, 1), (64, 2))
 
@@ -93,10 +99,7 @@ def minecraft_resource_shop_embed(
         name="交換内容",
         value=(
             "**サーバーXP → 資源**\n"
-            + "\n".join(
-                f"`サーバーXP {pack.cost_xp:,}` → `{pack.item_name} x{pack.item_count:,}`"
-                for pack in packs
-            )
+            + _resource_pack_lines(packs)
             + "\n\n**手持ち資源 → 資源**\n"
             + "\n".join(
                 f"`エメラルド x{emeralds}` → `ダイヤモンド x{diamonds}`"
@@ -117,11 +120,12 @@ def minecraft_resource_shop_embed(
         name="🎮 ゲーム内コマンド",
         value=(
             "Java版・統合版: `/exchange` で交換メニューを開く\n"
-            "XP→資源: `/exchange resource <diamond|emerald> <個数>`\n"
+            "XP→資源: `/exchange resource <diamond|emerald|gunpowder> <個数>`\n"
             "手持ち交換: `/exchange emerald-diamond <32|64>`\n"
             "資材買取: 対象資材を持って `/exchange buyback <1|2|4|8|16|max|all>`\n"
             "XP残高: `/exchange balance`\n"
-            "個数: diamondは `1|3|8|16|32|64`、emeraldは `4|16|32|64`"
+            "個数: diamondは `1|3|8|16|32|64`、emeraldは `4|16|32|64`、"
+            "gunpowderは `8|32|64`"
         ),
         inline=False,
     )
@@ -194,12 +198,14 @@ class MinecraftResourcePackSelect(discord.ui.Select):
         self.owner_id = owner_id
         self.shop = shop
         super().__init__(
-            placeholder="交換する資源を選択",
+            placeholder="交換する資源と数量を選択",
             min_values=1,
             max_values=1,
             options=[
                 discord.SelectOption(
-                    label=(f"{pack.item_name} x{pack.item_count:,} (サーバーXP {pack.cost_xp:,})"),
+                    label=f"{pack.item_name} x{pack.item_count:,}",
+                    description=f"必要: {pack.cost_xp:,} サーバーXP",
+                    emoji=_RESOURCE_EMOJIS[pack.item_id],
                     value=str(index),
                 )
                 for index, pack in enumerate(shop.packs)
@@ -265,6 +271,21 @@ class MinecraftResourcePackSelectView(discord.ui.View):
     ) -> None:
         super().__init__(timeout=180)
         self.add_item(MinecraftResourcePackSelect(bot, owner_id=owner_id, shop=shop))
+
+
+def _resource_pack_lines(packs: tuple[MinecraftResourcePack, ...]) -> str:
+    grouped: dict[str, list[MinecraftResourcePack]] = {}
+    for pack in packs:
+        grouped.setdefault(pack.item_id, []).append(pack)
+    sections = []
+    for item_id, item_packs in grouped.items():
+        item_name = item_packs[0].item_name
+        rates = "\n".join(
+            f"`サーバーXP {pack.cost_xp:,}` → `{pack.item_name} x{pack.item_count:,}`"
+            for pack in item_packs
+        )
+        sections.append(f"**{_RESOURCE_EMOJIS[item_id]} {item_name}**\n{rates}")
+    return "\n\n".join(sections)
 
 
 class MinecraftResourceConfirmView(discord.ui.View):

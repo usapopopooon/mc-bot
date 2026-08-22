@@ -12,7 +12,11 @@ from mc_bot.player_names import is_safe_server_player_name
 ExchangeRequestKind = Literal["balance", "xp", "resource", "emerald_diamond", "material_buyback"]
 
 _PREFIX = "[UsapoEventBridge] USAPO_EXCHANGE_REQUEST|1|"
-_RESOURCE_TARGETS = {"minecraft:diamond", "minecraft:emerald"}
+_RESOURCE_TARGETS = {
+    "minecraft:diamond",
+    "minecraft:emerald",
+    "minecraft:gunpowder",
+}
 _MATERIAL_BUYBACK_TARGETS = {
     "minecraft:dirt",
     "minecraft:sand",
