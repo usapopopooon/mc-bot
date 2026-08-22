@@ -361,24 +361,28 @@ def quest_panel_embed() -> discord.Embed:
 def quest_guide_embed() -> discord.Embed:
     embed = discord.Embed(
         title="ギルド・クエストの使い方",
-        description=("依頼者が報酬を先に預け、受注者が期限内に依頼品を一括納品する仕組みです。"),
+        description=(
+            "依頼者が報酬を先に預け、受注者が期限内に依頼品を一括納品する仕組みです。"
+            "Java版・Bedrock版ともMinecraftの `/quest` から画面で操作できます。"
+        ),
         color=discord.Color.blue(),
     )
     embed.add_field(
         name="依頼を作る",
         value=(
-            "Minecraftで依頼品を手に持ち `/quest create <個数> <期限時間>`、"
-            "次に報酬スタックを持って `/quest confirm` を実行します。"
+            "Minecraftで依頼品を手に持ち、`/quest` の「依頼を作る」から個数と期限を選びます。"
+            "次に報酬スタックを持ち、もう一度 `/quest` を開いて公開内容を確認します。"
         ),
         inline=False,
     )
     embed.add_field(
         name="受注・納品",
         value=(
-            "このチャンネルの「受注」か `/quest accept <番号>` を使います。"
+            "このチャンネルの「受注」か、Minecraftの `/quest` にある"
+            "「募集中の依頼を見る」を使います。"
             "Discordから操作する場合も、連携したMinecraftアカウントで参加してください。"
-            "依頼品をメインハンドにまとめ、`/quest submit <番号>` または"
-            "「自分のクエスト」の「納品」を使います。"
+            "納品時は依頼品をメインハンドにまとめ、`/quest` の「自分の依頼・受注」か"
+            "Discordの「自分のクエスト」から納品します。"
         ),
         inline=False,
     )
@@ -386,7 +390,17 @@ def quest_guide_embed() -> discord.Embed:
         name="安全な受け取り",
         value=(
             "報酬と納品物は直接インベントリへ押し込まず、永続受取箱へ入ります。"
-            "Minecraftで `/quest claim` を実行してください。"
+            "Minecraftの `/quest` で「受取箱を受け取る」を選んでください。"
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="画面を開けないとき",
+        value=(
+            "`/quest create <個数> <期限時間>`、`/quest confirm`、"
+            "`/quest list [ページ]`、`/quest accept <番号>`、`/quest mine`、"
+            "`/quest submit <番号>`、`/quest abandon <番号>`、"
+            "`/quest cancel <番号>`、`/quest claim` も使えます。"
         ),
         inline=False,
     )
@@ -505,7 +519,7 @@ def quest_log_embed(quest: Quest) -> discord.Embed:
     embed = discord.Embed(title=title, description=description, color=color)
     embed.set_footer(
         text=(
-            "アイテムはMinecraftの /quest claim で受け取れます"
+            "アイテムはMinecraftの /quest にある受取箱から受け取れます"
             f" • 記録ID: {quest.last_transition_id}"
         )
     )

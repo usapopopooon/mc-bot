@@ -105,33 +105,49 @@ def market_guide_embed() -> discord.Embed:
         title="Minecraft フリマの使い方",
         description=(
             "取引にはMinecraftの経験値ではなく、**サーバーXP**を使います。"
-            "出品操作はMinecraft内、購入はMinecraft内とDiscordの両方からできます。"
+            "Java版・Bedrock版とも `/market` から画面で操作できます。"
+            "出品はMinecraft内、購入はMinecraft内とDiscordの両方からできます。"
         ),
         color=discord.Color.gold(),
     )
     embed.add_field(
         name="商品一覧を見る",
         value=(
-            "Java版は `/market list [ページ]`、Bedrock版は `/market` の一覧フォームを使います。"
+            "Minecraftで `/market` を開き、「商品を見る」を選びます。"
             "Discordでは、このチャンネルの商品カードが現在の出品一覧です。"
         ),
         inline=False,
     )
     embed.add_field(
         name="出品する",
-        value=("売りたいスタックをメインハンドに持ち、`/market sell <合計価格XP>` を実行します。"),
+        value=(
+            "売りたいスタックをメインハンドに持ち、`/market` の"
+            "「手に持ったスタックを出品」から合計価格を数字ボタンで指定します。"
+        ),
         inline=False,
     )
     embed.add_field(
         name="購入する",
-        value=("商品カードの「購入」、またはMinecraft内の `/market buy <出品番号>` を使います。"),
+        value=(
+            "このチャンネルの商品カードで「購入」を押すか、Minecraftの `/market` で"
+            "「商品を見る」から商品を選びます。"
+        ),
         inline=False,
     )
     embed.add_field(
         name="確認・取り消し",
         value=(
-            "自分の出品は `/market mine`、取り消しは "
-            "`/market cancel <出品番号>`、サーバーXP確認は `/market balance` です。"
+            "Minecraftの `/market` で「自分の出品」または「サーバーXP残高」を選びます。"
+            "Discordでは、このパネルの「サーバーXP確認」も使えます。"
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="画面を開けないとき",
+        value=(
+            "`/market list [ページ]`、`/market sell <合計価格XP>`、"
+            "`/market buy <出品番号>`、`/market mine`、"
+            "`/market cancel <出品番号>`、`/market balance` も使えます。"
         ),
         inline=False,
     )

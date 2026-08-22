@@ -393,6 +393,10 @@ def test_market_panel_keeps_summary_short_and_moves_details_to_guide() -> None:
     )
     assert "サーバーXP" in panel.description
     assert "/market sell" not in panel.description
+    assert "Java版・Bedrock版とも `/market`" in str(guide.to_dict())
+    assert "商品を見る" in str(guide.to_dict())
+    assert "手に持ったスタックを出品" in str(guide.to_dict())
+    assert "サーバーXP残高" in str(guide.to_dict())
     assert "/market sell" in str(guide.to_dict())
     assert "/market list [ページ]" in str(guide.to_dict())
     assert "/market balance" in str(guide.to_dict())
