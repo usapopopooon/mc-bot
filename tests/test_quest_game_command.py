@@ -134,6 +134,54 @@ def test_game_quest_wires_owner_and_worker_to_the_correct_accounts(tmp_path) -> 
     assert bot._refresh_quest_listing.await_count == 2  # type: ignore[attr-defined]
 
 
+def test_conflicting_quest_state_is_reported_without_blocking_later_log_line(tmp_path) -> None:
+    bot = MinecraftDiscordBot(Config(discord_token="test", accounts_path=tmp_path / "accounts.db"))
+    bot._accounts.initialize()
+    bot._quests.initialize()
+    bot._accounts.create_registration(
+        edition="java",
+        minecraft_name="Owner",
+        server_player_name="Owner",
+        discord_user_id=2002,
+        discord_username="owner",
+        source="self",
+        status="active",
+        created_by=2002,
+        player_uuid=OWNER_UUID,
+    )
+    bot._settings = RuntimeSettings(guild_id=1001)
+    bot._refresh_quest_listing = AsyncMock()  # type: ignore[method-assign]
+    error_channel = AsyncMock()
+    bot._channel = error_channel  # type: ignore[assignment]
+    first = _line(offset=100, transition_id=CREATED_ID, kind="created", status="open")
+    conflict_base = _line(
+        offset=200,
+        transition_id="66666666-6666-4666-8666-666666666666",
+        kind="created",
+        status="open",
+    )
+    conflicting = PendingLine(
+        text=conflict_base.text.replace(
+            EVENT_ID,
+            "77777777-7777-4777-8777-777777777777",
+        ),
+        cursor=conflict_base.cursor,
+    )
+    later = PendingLine("ordinary log line", Cursor("log-1", 300))
+    tailer = LineTailer([first, conflicting, later])
+    bot._tailer = tailer  # type: ignore[assignment]
+
+    asyncio.run(bot._forward_logs())
+
+    assert tailer.acknowledged == [first, conflicting, later]
+    quest = bot._quests.get(17)
+    assert quest is not None and quest.event_id == EVENT_ID
+    bot._refresh_quest_listing.assert_awaited_once()  # type: ignore[attr-defined]
+    error_channel.send.assert_awaited_once()
+    embed = error_channel.send.await_args.kwargs["embed"]
+    assert "クエストIDまたは遷移ID" in str(embed.fields[1].value)
+
+
 def test_unlinked_quest_is_audited_and_cancelled_with_owner_uuid(tmp_path) -> None:
     bot = MinecraftDiscordBot(
         Config(

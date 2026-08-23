@@ -8,6 +8,11 @@ from uuid import uuid4
 import discord
 
 from mc_bot.experience import MinecraftResourcePack, MinecraftResourceShop
+from mc_bot.material_buyback import (
+    MATERIAL_BUYBACK_DAILY_LIMIT_XP,
+    MATERIAL_BUYBACK_RATES,
+    MATERIAL_BUYBACK_STACK_SIZE,
+)
 from mc_bot.player_names import is_safe_server_player_name
 from mc_bot.resource_catalog import is_valid_resource_item_id
 from mc_bot.xp_shop import wallet_text
@@ -93,6 +98,29 @@ def _validate_resource_label_and_cost(item_name: str, cost_xp: int) -> None:
         raise ValueError("cost_xp must be positive")
 
 
+def _material_buyback_catalog_text() -> str:
+    entries = list(MATERIAL_BUYBACK_RATES.values())
+    emerald_name, emerald_rate = entries[0]
+    material_lines = [
+        " / ".join(
+            f"`{name} x{MATERIAL_BUYBACK_STACK_SIZE}` → `{rate} サーバーXP`"
+            for name, rate in entries[index : index + 2]
+        )
+        for index in range(1, len(entries), 2)
+    ]
+    return (
+        f"**{emerald_name}**\n"
+        f"`{emerald_name} x{MATERIAL_BUYBACK_STACK_SIZE}` → "
+        f"`{emerald_rate} サーバーXP`\n\n"
+        "**資材**\n"
+        + "\n".join(material_lines)
+        + f"\n1人1日 **{MATERIAL_BUYBACK_DAILY_LIMIT_XP:,} サーバーXP** まで / "
+        "毎日0時・日本時間に更新\n"
+        "本日の残り枠は処理時に確認し、上限超過時は資源を回収しません。\n"
+        "名前や特殊データのない通常アイテムだけが対象です。"
+    )
+
+
 def minecraft_resource_shop_embed(
     packs: tuple[MinecraftResourcePack, ...],
 ) -> discord.Embed:
@@ -123,16 +151,7 @@ def minecraft_resource_shop_embed(
                 for diamonds, emeralds in DIAMOND_EMERALD_PACKS
             )
             + "\n\n**手持ち資源 → サーバーXP / ゲーム内**\n"
-            "**エメラルド**\n"
-            "`エメラルド x64` → `500 サーバーXP`\n\n"
-            "**資材**\n"
-            "`土 x64` → `30 サーバーXP` / `砂 x64` → `40 サーバーXP`\n"
-            "`砂岩 x64` → `50 サーバーXP` / `深層岩 x64` → `35 サーバーXP`\n"
-            "`深層岩の丸石 x64` → `35 サーバーXP` / "
-            "`凝灰岩 x64` → `40 サーバーXP`\n"
-            "1人1日 **3,000 サーバーXP** まで / 毎日0時・日本時間に更新\n"
-            "本日の残り枠は処理時に確認し、上限超過時は資源を回収しません。\n"
-            "名前や特殊データのない通常アイテムだけが対象です。"
+            + _material_buyback_catalog_text()
         ),
     )
     _add_bounded_fields(

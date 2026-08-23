@@ -1,6 +1,8 @@
 import pytest
 
 from mc_bot.material_buyback import (
+    MATERIAL_BUYBACK_ITEM_IDS,
+    MATERIAL_BUYBACK_RATES,
     MaterialBuybackReleaseResult,
     MaterialBuybackResult,
     material_buyback_command,
@@ -11,6 +13,19 @@ from mc_bot.material_buyback import (
 
 PLAYER_UUID = "22222222-2222-4222-8222-222222222222"
 REQUEST_ID = "44444444-4444-4444-8444-444444444444"
+
+
+def test_material_buyback_catalog_is_the_single_complete_contract() -> None:
+    assert MATERIAL_BUYBACK_RATES == {
+        "minecraft:emerald": ("エメラルド", 500),
+        "minecraft:dirt": ("土", 30),
+        "minecraft:sand": ("砂", 40),
+        "minecraft:sandstone": ("砂岩", 50),
+        "minecraft:deepslate": ("深層岩", 35),
+        "minecraft:cobbled_deepslate": ("深層岩の丸石", 35),
+        "minecraft:tuff": ("凝灰岩", 40),
+    }
+    assert frozenset(MATERIAL_BUYBACK_RATES) == MATERIAL_BUYBACK_ITEM_IDS
 
 
 def test_builds_and_parses_bound_material_buyback_command() -> None:

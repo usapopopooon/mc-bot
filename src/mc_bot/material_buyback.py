@@ -5,17 +5,19 @@ from dataclasses import dataclass
 
 _RESULT_PREFIX = "USAPO_MATERIAL_BUYBACK_RESULT|1|"
 _RELEASE_RESULT_PREFIX = "USAPO_MATERIAL_BUYBACK_RELEASE_RESULT|1|"
-_ITEM_IDS = frozenset(
-    {
-        "minecraft:emerald",
-        "minecraft:dirt",
-        "minecraft:sand",
-        "minecraft:sandstone",
-        "minecraft:deepslate",
-        "minecraft:cobbled_deepslate",
-        "minecraft:tuff",
-    }
-)
+MATERIAL_BUYBACK_STACK_SIZE = 64
+MATERIAL_BUYBACK_MAX_ITEM_COUNT = 2_304
+MATERIAL_BUYBACK_DAILY_LIMIT_XP = 3_000
+MATERIAL_BUYBACK_RATES = {
+    "minecraft:emerald": ("エメラルド", 500),
+    "minecraft:dirt": ("土", 30),
+    "minecraft:sand": ("砂", 40),
+    "minecraft:sandstone": ("砂岩", 50),
+    "minecraft:deepslate": ("深層岩", 35),
+    "minecraft:cobbled_deepslate": ("深層岩の丸石", 35),
+    "minecraft:tuff": ("凝灰岩", 40),
+}
+MATERIAL_BUYBACK_ITEM_IDS = frozenset(MATERIAL_BUYBACK_RATES)
 _STATUSES = frozenset({"completed", "insufficient_items", "player_offline", "storage_error"})
 
 
@@ -43,7 +45,7 @@ def material_buyback_command(
 ) -> str:
     normalized_player_uuid = str(uuid.UUID(player_uuid))
     normalized_request_id = str(uuid.UUID(request_id))
-    if item_id not in _ITEM_IDS or not _valid_count(item_count):
+    if item_id not in MATERIAL_BUYBACK_ITEM_IDS or not _valid_count(item_count):
         raise ValueError("invalid material buyback selection")
     return (
         "usapo-event-bridge material-buyback "
@@ -72,7 +74,7 @@ def parse_material_buyback_result(
     if (
         request_id != expected_request
         or status not in _STATUSES
-        or item_id not in _ITEM_IDS
+        or item_id not in MATERIAL_BUYBACK_ITEM_IDS
         or item_id != expected_item_id
         or not _valid_count(item_count)
         or item_count != expected_item_count
@@ -126,10 +128,18 @@ def parse_material_buyback_release_result(
 
 
 def _valid_count(item_count: int) -> bool:
-    return 64 <= item_count <= 2_304 and item_count % 64 == 0
+    return (
+        MATERIAL_BUYBACK_STACK_SIZE <= item_count <= MATERIAL_BUYBACK_MAX_ITEM_COUNT
+        and item_count % MATERIAL_BUYBACK_STACK_SIZE == 0
+    )
 
 
 __all__ = [
+    "MATERIAL_BUYBACK_DAILY_LIMIT_XP",
+    "MATERIAL_BUYBACK_ITEM_IDS",
+    "MATERIAL_BUYBACK_MAX_ITEM_COUNT",
+    "MATERIAL_BUYBACK_RATES",
+    "MATERIAL_BUYBACK_STACK_SIZE",
     "MaterialBuybackReleaseResult",
     "MaterialBuybackResult",
     "material_buyback_command",

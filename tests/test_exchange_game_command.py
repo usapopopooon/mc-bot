@@ -533,6 +533,8 @@ def test_definitive_buyback_rejection_releases_request_and_does_not_block_next_l
     tmp_path,
 ) -> None:
     bot = _bot(tmp_path)
+    error_channel = AsyncMock()
+    bot._channel = error_channel  # type: ignore[assignment]
     request_id = "55555555-5555-4555-8555-555555555555"
     rejected = _line(
         500,
@@ -560,6 +562,73 @@ def test_definitive_buyback_rejection_releases_request_and_does_not_block_next_l
     )
     assert "アイテムは回収していません" in rcon.commands[1]
     assert "現在XP: 49,000 XP" in rcon.commands[2]
+    error_channel.send.assert_awaited_once()
+    embed = error_channel.send.await_args.kwargs["embed"]
+    assert embed.title == "Minecraft連携イベントをスキップしました"
+    assert "後続処理は継続" in str(embed.description)
+    assert "HTTP 422" in str(embed.fields[1].value)
+
+
+def test_malformed_exchange_is_reported_and_does_not_block_next_line(tmp_path) -> None:
+    bot = _bot(tmp_path)
+    error_channel = AsyncMock()
+    bot._channel = error_channel  # type: ignore[assignment]
+    malformed = PendingLine(
+        text=(
+            "[08:24:00] [Server thread/INFO]: [UsapoEventBridge] USAPO_EXCHANGE_REQUEST|1|broken"
+        ),
+        cursor=Cursor("log-1", 500),
+    )
+    balance = _line(
+        600,
+        request_id="66666666-6666-4666-8666-666666666666",
+        selection="balance|balance|0|0|0",
+    )
+    tailer = LineTailer([malformed, balance])
+    bot._tailer = tailer  # type: ignore[assignment]
+
+    asyncio.run(bot._forward_logs())
+
+    assert tailer.acknowledged == [malformed, balance]
+    rcon = bot._rcon
+    assert isinstance(rcon, ExchangeRcon)
+    assert "現在XP: 49,000 XP" in rcon.commands[-1]
+    error_channel.send.assert_awaited_once()
+    embed = error_channel.send.await_args.kwargs["embed"]
+    assert str(embed.fields[0].value) == "USAPO_EXCHANGE_REQUEST v1"
+    assert "invalid field count" in str(embed.fields[1].value)
+    assert str(embed.fields[2].value) == "log-1 / byte 500"
+
+
+def test_unsupported_event_version_and_failed_error_notice_do_not_block_next_line(
+    tmp_path,
+) -> None:
+    bot = _bot(tmp_path)
+    error_channel = AsyncMock()
+    error_channel.send = AsyncMock(side_effect=RuntimeError("Discord unavailable"))
+    bot._channel = error_channel  # type: ignore[assignment]
+    unsupported = PendingLine(
+        text=(
+            "[08:24:00] [Server thread/INFO]: [UsapoEventBridge] "
+            "USAPO_ITEM_GACHA_REQUEST|99|future-format"
+        ),
+        cursor=Cursor("log-1", 500),
+    )
+    balance = _line(
+        600,
+        request_id="66666666-6666-4666-8666-666666666666",
+        selection="balance|balance|0|0|0",
+    )
+    tailer = LineTailer([unsupported, balance])
+    bot._tailer = tailer  # type: ignore[assignment]
+
+    asyncio.run(bot._forward_logs())
+
+    assert tailer.acknowledged == [unsupported, balance]
+    rcon = bot._rcon
+    assert isinstance(rcon, ExchangeRcon)
+    assert "現在XP: 49,000 XP" in rcon.commands[-1]
+    error_channel.send.assert_awaited_once()
 
 
 def test_material_buyback_daily_limit_releases_pending_request_without_item_removal(

@@ -546,3 +546,61 @@ def test_market_listing_log_is_acknowledged_only_after_successful_retry(tmp_path
 
     assert bot._handle_market_listing.await_count == 2  # type: ignore[attr-defined]
     assert tailer.acknowledged == [line]
+
+
+def test_conflicting_market_listing_is_reported_without_blocking_later_listing(tmp_path) -> None:
+    bot = MinecraftDiscordBot(
+        Config(
+            discord_token="test",
+            accounts_path=tmp_path / "accounts.db",
+            rcon_password="test",
+        )
+    )
+    bot._accounts.initialize()
+    bot._market.initialize()
+    bot._accounts.create_registration(
+        edition="java",
+        minecraft_name="Seller",
+        server_player_name="Seller",
+        discord_user_id=2002,
+        discord_username="seller",
+        source="self",
+        status="active",
+        created_by=2002,
+        player_uuid=SELLER_UUID,
+    )
+    bot._settings = RuntimeSettings(guild_id=1001)
+    bot._post_market_listing = AsyncMock()  # type: ignore[method-assign]
+    error_channel = AsyncMock()
+    bot._channel = error_channel  # type: ignore[assignment]
+    milliseconds = int(datetime.now(UTC).timestamp() * 1_000)
+    first = _line(
+        100,
+        f"USAPO_MARKET_LISTING|1|{LISTING_EVENT_ID}|17|{SELLER_UUID}|"
+        f"{_encode('Seller')}|{_encode('minecraft:ancient_debris')}|"
+        f"{_encode('古代の残骸')}|2|3000|{milliseconds}",
+    )
+    conflicting = _line(
+        200,
+        "USAPO_MARKET_LISTING|1|77777777-7777-4777-8777-777777777777|17|"
+        f"{SELLER_UUID}|{_encode('Seller')}|{_encode('minecraft:diamond')}|"
+        f"{_encode('ダイヤモンド')}|1|500|{milliseconds}",
+    )
+    later = _line(
+        300,
+        "USAPO_MARKET_LISTING|1|88888888-8888-4888-8888-888888888888|18|"
+        f"{SELLER_UUID}|{_encode('Seller')}|{_encode('minecraft:diamond')}|"
+        f"{_encode('ダイヤモンド')}|1|500|{milliseconds}",
+    )
+    tailer = LineTailer([first, conflicting, later])
+    bot._tailer = tailer  # type: ignore[assignment]
+
+    asyncio.run(bot._forward_logs())
+
+    assert tailer.acknowledged == [first, conflicting, later]
+    assert bot._market.get(17) is not None
+    assert bot._market.get(18) is not None
+    assert bot._post_market_listing.await_count == 2  # type: ignore[attr-defined]
+    error_channel.send.assert_awaited_once()
+    embed = error_channel.send.await_args.kwargs["embed"]
+    assert "既存データと矛盾" in str(embed.fields[1].value)

@@ -7,6 +7,11 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Literal, cast
 
+from mc_bot.material_buyback import (
+    MATERIAL_BUYBACK_ITEM_IDS,
+    MATERIAL_BUYBACK_MAX_ITEM_COUNT,
+    MATERIAL_BUYBACK_STACK_SIZE,
+)
 from mc_bot.player_names import is_safe_server_player_name
 from mc_bot.resource_catalog import is_valid_resource_item_id
 
@@ -20,15 +25,6 @@ ExchangeRequestKind = Literal[
 ]
 
 _PREFIX = "[UsapoEventBridge] USAPO_EXCHANGE_REQUEST|1|"
-_MATERIAL_BUYBACK_TARGETS = {
-    "minecraft:emerald",
-    "minecraft:dirt",
-    "minecraft:sand",
-    "minecraft:sandstone",
-    "minecraft:deepslate",
-    "minecraft:cobbled_deepslate",
-    "minecraft:tuff",
-}
 
 
 @dataclass(frozen=True, slots=True)
@@ -130,9 +126,9 @@ def _valid_selection(
         )
     if kind == "material_buyback":
         return (
-            target in _MATERIAL_BUYBACK_TARGETS
-            and 64 <= amount <= 2_304
-            and amount % 64 == 0
+            target in MATERIAL_BUYBACK_ITEM_IDS
+            and MATERIAL_BUYBACK_STACK_SIZE <= amount <= MATERIAL_BUYBACK_MAX_ITEM_COUNT
+            and amount % MATERIAL_BUYBACK_STACK_SIZE == 0
             and expected_cost_xp == 0
             and expected_reward > 0
         )

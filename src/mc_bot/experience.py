@@ -14,6 +14,7 @@ from mc_bot.accounts import (
     MinecraftXpOutboxEvent,
     WoodcuttingComboRewardEvent,
 )
+from mc_bot.material_buyback import MATERIAL_BUYBACK_RATES
 from mc_bot.player_names import is_safe_server_player_name
 from mc_bot.resource_catalog import MAX_RESOURCE_PACKS, validate_resource_pack
 
@@ -26,23 +27,16 @@ ADVANCEMENT_REWARD_IN_GAME_XP = 100
 
 LOGGER = logging.getLogger(__name__)
 _QUERY_RESULT = re.compile(r"\bhas\s+(\d+)\s+experience\s+(levels?|points?)\b", re.I)
-_MATERIAL_BUYBACK_RATES = {
-    "minecraft:emerald": ("エメラルド", 500),
-    "minecraft:dirt": ("土", 30),
-    "minecraft:sand": ("砂", 40),
-    "minecraft:sandstone": ("砂岩", 50),
-    "minecraft:deepslate": ("深層岩", 35),
-    "minecraft:cobbled_deepslate": ("深層岩の丸石", 35),
-    "minecraft:tuff": ("凝灰岩", 40),
-}
 
 
 class LevelBotRequestRejectedError(RuntimeError):
     """level-bot が処理前に要求を確定的に拒否したことを表す。"""
 
-    def __init__(self, status: int) -> None:
+    def __init__(self, status: int, detail: str = "") -> None:
         self.status = status
-        super().__init__(f"level-bot rejected request with HTTP {status}")
+        self.detail = detail.strip()[:300]
+        suffix = f": {self.detail}" if self.detail else ""
+        super().__init__(f"level-bot rejected request with HTTP {status}{suffix}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -781,7 +775,7 @@ class LevelBotXpClient:
                         body[:300],
                     )
                     if 400 <= response.status < 500 and response.status not in {408, 429}:
-                        raise LevelBotRequestRejectedError(response.status)
+                        raise LevelBotRequestRejectedError(response.status, body)
                     return None
                 result = self._parse_material_buyback_request(await response.json())
                 if response.status == 200:
@@ -1573,7 +1567,7 @@ class LevelBotXpClient:
         daily_reserved_xp = int(item["daily_reserved_xp"])
         daily_limit_xp = int(item["daily_limit_xp"])
         reward_day = date.fromisoformat(str(item["reward_day"])).isoformat()
-        expected_rate = _MATERIAL_BUYBACK_RATES.get(item_id or "")
+        expected_rate = MATERIAL_BUYBACK_RATES.get(item_id or "")
         item_present = expected_rate is not None
         if (
             item_count < 0

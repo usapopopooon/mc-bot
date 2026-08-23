@@ -216,7 +216,7 @@ from mc_bot.status_panel import (
     parse_server_list_response,
     status_panel_embed,
 )
-from mc_bot.tailer import LogTailer
+from mc_bot.tailer import LogTailer, PendingLine
 from mc_bot.translations import (
     AdvancementTranslator,
     MinecraftItemOption,
@@ -272,6 +272,11 @@ _GAME_REQUEST_MAX_AGE = timedelta(minutes=5)
 _GAME_REQUEST_CLOCK_SKEW = timedelta(minutes=1)
 _MARKET_RECOVERY_INTERVAL_SECONDS = 30.0
 _ACCOUNT_EXCHANGE_CLEANUP_NAMESPACE = uuid.UUID("8135ade1-5c63-4d8a-955b-9ecb73ada3ad")
+_STRUCTURED_EVENT_MARKER = re.compile(r"\[UsapoEventBridge\]\s+(USAPO_[A-Z0-9_]+)\|([^|\s]+)")
+
+
+class InvalidIntegrationEventError(RuntimeError):
+    """再試行しても解消しない不正なMinecraft連携イベントを表す。"""
 
 
 @dataclass(frozen=True, slots=True)
@@ -2507,7 +2512,9 @@ class MinecraftDiscordBot(discord.Client):
                     and existing.price_xp == event.price_xp
                 )
                 if not same_listing:
-                    raise RuntimeError("unlinked market listing conflicts with local state")
+                    raise InvalidIntegrationEventError(
+                        "出品IDが、すでに保存されている別の出品内容と矛盾しています。"
+                    )
                 if existing.status in {"sold", "cancelled"}:
                     # 取引確定後、ログACK直前に停止したケース。異なる返却IDを送ると、
                     # 正常に終わった取引を未確定として延々再処理してしまう。
@@ -2552,20 +2559,25 @@ class MinecraftDiscordBot(discord.Client):
                 "出品アイテムはフリマ返却受取箱へ移しました。",
             )
             return
-        listing, created = await asyncio.to_thread(
-            self._market.add_listing,
-            listing_id=event.listing_id,
-            event_id=event.event_id,
-            seller_account_id=account.id,
-            seller_discord_user_id=account.discord_user_id,
-            seller_uuid=event.seller_uuid,
-            seller_name=event.seller_name,
-            item_id=event.item_id,
-            item_name=event.item_name,
-            item_count=event.item_count,
-            price_xp=event.price_xp,
-            created_at=event.created_at,
-        )
+        try:
+            listing, created = await asyncio.to_thread(
+                self._market.add_listing,
+                listing_id=event.listing_id,
+                event_id=event.event_id,
+                seller_account_id=account.id,
+                seller_discord_user_id=account.discord_user_id,
+                seller_uuid=event.seller_uuid,
+                seller_name=event.seller_name,
+                item_id=event.item_id,
+                item_name=event.item_name,
+                item_count=event.item_count,
+                price_xp=event.price_xp,
+                created_at=event.created_at,
+            )
+        except ValueError as error:
+            raise InvalidIntegrationEventError(
+                "出品イベントが既存データと矛盾しているため安全に適用できません。"
+            ) from error
         if created or listing.discord_message_id is None:
             await self._post_market_listing(listing)
         else:
@@ -3421,18 +3433,23 @@ class MinecraftDiscordBot(discord.Client):
         worker = (
             await self._quest_account(event.worker_uuid) if event.worker_uuid is not None else None
         )
-        quest, applied = await asyncio.to_thread(
-            self._quests.apply_state,
-            event,
-            owner_account_id=owner.id if owner is not None else None,
-            owner_discord_user_id=(
-                self.user.id
-                if system_issued and self.user is not None
-                else (owner.discord_user_id if owner is not None else None)
-            ),
-            worker_account_id=worker.id if worker is not None else None,
-            worker_discord_user_id=(worker.discord_user_id if worker is not None else None),
-        )
+        try:
+            quest, applied = await asyncio.to_thread(
+                self._quests.apply_state,
+                event,
+                owner_account_id=owner.id if owner is not None else None,
+                owner_discord_user_id=(
+                    self.user.id
+                    if system_issued and self.user is not None
+                    else (owner.discord_user_id if owner is not None else None)
+                ),
+                worker_account_id=worker.id if worker is not None else None,
+                worker_discord_user_id=(worker.discord_user_id if worker is not None else None),
+            )
+        except ValueError as error:
+            raise InvalidIntegrationEventError(
+                "クエストIDまたは遷移IDが既存データと矛盾しています。"
+            ) from error
         if event.status == "open" and owner is None and not system_issued:
             await self._undo_unlinked_quest_state(
                 event,
@@ -4048,12 +4065,21 @@ class MinecraftDiscordBot(discord.Client):
         self,
         *,
         description: str,
+        pending_line: PendingLine,
         operation: Callable[[], Awaitable[None]],
     ) -> bool:
         retry_delay = 1
         while not self.is_closed():
             try:
                 await operation()
+            except InvalidIntegrationEventError as error:
+                await self._report_invalid_integration_event(
+                    pending_line,
+                    description=description,
+                    reason=str(error),
+                )
+                self._delivery_healthy = True
+                return True
             except Exception:
                 self._delivery_healthy = False
                 LOGGER.exception(
@@ -4067,6 +4093,62 @@ class MinecraftDiscordBot(discord.Client):
             self._delivery_healthy = True
             return True
         return False
+
+    async def _discard_invalid_integration_line(
+        self,
+        pending_line: PendingLine,
+        *,
+        description: str,
+        reason: str,
+    ) -> None:
+        await self._report_invalid_integration_event(
+            pending_line,
+            description=description,
+            reason=reason,
+        )
+        await asyncio.to_thread(self._tailer.acknowledge, pending_line)
+
+    async def _report_invalid_integration_event(
+        self,
+        pending_line: PendingLine,
+        *,
+        description: str,
+        reason: str,
+    ) -> None:
+        marker = _STRUCTURED_EVENT_MARKER.search(pending_line.text)
+        event_type = f"{marker.group(1)} v{marker.group(2)}" if marker is not None else description
+        location = f"{pending_line.cursor.file_identity} / byte {pending_line.cursor.offset}"
+        normalized_reason = reason.strip() or "不正な値を検出しました。"
+        LOGGER.error(
+            "Skipped invalid Minecraft integration event type=%s location=%s reason=%s",
+            event_type,
+            location,
+            normalized_reason,
+        )
+        if self._channel is None:
+            return
+        embed = discord.Embed(
+            title="Minecraft連携イベントをスキップしました",
+            description=(
+                "Minecraft側から不正または非対応のイベントを受信したため、"
+                "この1件だけをスキップしました。後続処理は継続しています。"
+            ),
+            colour=discord.Colour.orange(),
+            timestamp=datetime.now(UTC),
+        )
+        embed.add_field(name="種類", value=event_type[:1024], inline=False)
+        embed.add_field(name="理由", value=normalized_reason[:1024], inline=False)
+        embed.add_field(name="ログ位置", value=location[:1024], inline=False)
+        try:
+            await self._channel.send(
+                embed=embed,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+        except (OSError, RuntimeError, discord.DiscordException) as error:
+            LOGGER.error(
+                "Could not send invalid Minecraft integration event notice: %s",
+                error,
+            )
 
     async def _handle_minecraft_xp_exchange_request(
         self,
@@ -4266,14 +4348,17 @@ class MinecraftDiscordBot(discord.Client):
                 item_count=request.amount,
                 expected_reward_xp=request.expected_reward,
             )
-        except LevelBotRequestRejectedError:
+        except LevelBotRequestRejectedError as error:
             await self._release_material_buyback_request(request)
             await self._send_minecraft_private_message(
                 request.player_name,
                 "資源売却の内容を受け付けられませんでした。アイテムは回収していません。"
                 "交換内容を開き直して、もう一度お試しください。",
             )
-            return
+            raise InvalidIntegrationEventError(
+                f"level-botが資源売却要求をHTTP {error.status}で拒否しました。"
+                + (f" 応答: {error.detail}" if error.detail else "")
+            ) from error
         if reservation is None:
             raise RuntimeError("material buyback reservation could not be confirmed")
         if reservation.status in {"daily_limit", "unavailable", "conflict"}:
@@ -4289,7 +4374,9 @@ class MinecraftDiscordBot(discord.Client):
             or reservation.item_count != request.amount
             or reservation.reward_xp != request.expected_reward
         ):
-            raise RuntimeError("level-bot returned an unbound material buyback reservation")
+            raise InvalidIntegrationEventError(
+                "level-botの予約応答が元の資源売却要求と一致しません。"
+            )
         if reservation.status == "completed":
             await self._release_material_buyback_request(request)
             message = await self._material_buyback_success_message(
@@ -6832,14 +6919,18 @@ class MinecraftDiscordBot(discord.Client):
             try:
                 quest_state = parse_quest_state(pending_line.text)
             except ValueError as error:
-                LOGGER.warning("Ignored malformed Minecraft quest state: %s", error)
-                await asyncio.to_thread(self._tailer.acknowledge, pending_line)
+                await self._discard_invalid_integration_line(
+                    pending_line,
+                    description="クエスト状態",
+                    reason=str(error),
+                )
                 continue
             if quest_state is not None:
                 processed = await self._retry_integration_log_operation(
                     description=(
                         f"quest={quest_state.quest_id} transition={quest_state.transition_id}"
                     ),
+                    pending_line=pending_line,
                     operation=lambda event=quest_state: self._handle_quest_state(event),
                 )
                 if processed:
@@ -6851,8 +6942,11 @@ class MinecraftDiscordBot(discord.Client):
                     None if market_listing is not None else parse_market_request(pending_line.text)
                 )
             except ValueError as error:
-                LOGGER.warning("Ignored malformed Minecraft market event: %s", error)
-                await asyncio.to_thread(self._tailer.acknowledge, pending_line)
+                await self._discard_invalid_integration_line(
+                    pending_line,
+                    description="フリマイベント",
+                    reason=str(error),
+                )
                 continue
             if market_listing is not None:
                 processed = await self._retry_integration_log_operation(
@@ -6860,6 +6954,7 @@ class MinecraftDiscordBot(discord.Client):
                         f"listing={market_listing.listing_id} "
                         f"seller_uuid={market_listing.seller_uuid}"
                     ),
+                    pending_line=pending_line,
                     operation=lambda event=market_listing: self._handle_market_listing(event),
                 )
                 if processed:
@@ -6871,6 +6966,7 @@ class MinecraftDiscordBot(discord.Client):
                         f"request={market_request.request_id} "
                         f"player_uuid={market_request.player_uuid}"
                     ),
+                    pending_line=pending_line,
                     operation=lambda request=market_request: self._handle_market_request(request),
                 )
                 if processed:
@@ -6879,8 +6975,11 @@ class MinecraftDiscordBot(discord.Client):
             try:
                 exchange_request = parse_exchange_request(pending_line.text)
             except ValueError as error:
-                LOGGER.warning("Ignored malformed Minecraft exchange request: %s", error)
-                await asyncio.to_thread(self._tailer.acknowledge, pending_line)
+                await self._discard_invalid_integration_line(
+                    pending_line,
+                    description="交換要求",
+                    reason=str(error),
+                )
                 continue
             if exchange_request is not None:
                 if exchange_request.kind == "material_buyback":
@@ -6889,6 +6988,7 @@ class MinecraftDiscordBot(discord.Client):
                             f"material-buyback={exchange_request.request_id} "
                             f"player_uuid={exchange_request.player_uuid}"
                         ),
+                        pending_line=pending_line,
                         operation=lambda request=exchange_request: (
                             self._handle_minecraft_exchange_request(request)
                         ),
@@ -6898,36 +6998,52 @@ class MinecraftDiscordBot(discord.Client):
                     continue
                 try:
                     await self._handle_minecraft_exchange_request(exchange_request)
-                except Exception:
+                except Exception as error:
                     LOGGER.exception(
                         "Minecraft exchange request failed request=%s player_uuid=%s",
                         exchange_request.request_id,
                         exchange_request.player_uuid,
+                    )
+                    await self._report_invalid_integration_event(
+                        pending_line,
+                        description=f"交換要求 {exchange_request.request_id}",
+                        reason=f"処理中にエラーが発生しました: {error}",
                     )
                 await asyncio.to_thread(self._tailer.acknowledge, pending_line)
                 continue
             try:
                 item_gacha_request = parse_item_gacha_request(pending_line.text)
             except ValueError as error:
-                LOGGER.warning("Ignored malformed Minecraft item gacha request: %s", error)
-                await asyncio.to_thread(self._tailer.acknowledge, pending_line)
+                await self._discard_invalid_integration_line(
+                    pending_line,
+                    description="アイテムガチャ要求",
+                    reason=str(error),
+                )
                 continue
             if item_gacha_request is not None:
                 try:
                     await self._handle_minecraft_item_gacha_request(item_gacha_request)
-                except Exception:
+                except Exception as error:
                     LOGGER.exception(
                         "Minecraft item gacha request failed request=%s player_uuid=%s",
                         item_gacha_request.request_id,
                         item_gacha_request.player_uuid,
+                    )
+                    await self._report_invalid_integration_event(
+                        pending_line,
+                        description=f"アイテムガチャ要求 {item_gacha_request.request_id}",
+                        reason=f"処理中にエラーが発生しました: {error}",
                     )
                 await asyncio.to_thread(self._tailer.acknowledge, pending_line)
                 continue
             try:
                 diamond_exchange = parse_diamond_emerald_exchange_event(pending_line.text)
             except ValueError as error:
-                LOGGER.warning("Ignored malformed Minecraft diamond exchange event: %s", error)
-                await asyncio.to_thread(self._tailer.acknowledge, pending_line)
+                await self._discard_invalid_integration_line(
+                    pending_line,
+                    description="ダイヤモンド交換結果",
+                    reason=str(error),
+                )
                 continue
             if diamond_exchange is not None:
                 if integration_only and self._channel is None:
@@ -6980,8 +7096,11 @@ class MinecraftDiscordBot(discord.Client):
             try:
                 emerald_exchange = parse_emerald_diamond_exchange_event(pending_line.text)
             except ValueError as error:
-                LOGGER.warning("Ignored malformed Minecraft emerald exchange event: %s", error)
-                await asyncio.to_thread(self._tailer.acknowledge, pending_line)
+                await self._discard_invalid_integration_line(
+                    pending_line,
+                    description="エメラルド交換結果",
+                    reason=str(error),
+                )
                 continue
             if emerald_exchange is not None:
                 if integration_only and self._channel is None:
@@ -7034,8 +7153,11 @@ class MinecraftDiscordBot(discord.Client):
             try:
                 activity_event = parse_activity_event(pending_line.text)
             except ValueError as error:
-                LOGGER.warning("Ignored malformed Minecraft activity event: %s", error)
-                await asyncio.to_thread(self._tailer.acknowledge, pending_line)
+                await self._discard_invalid_integration_line(
+                    pending_line,
+                    description="アクティビティイベント",
+                    reason=str(error),
+                )
                 continue
             if activity_event is not None:
                 recorded = await self._record_activity_event(activity_event)
@@ -7048,6 +7170,13 @@ class MinecraftDiscordBot(discord.Client):
                             "Minecraft activity event was recorded but delivery failed: %s",
                             error,
                         )
+                continue
+            if _STRUCTURED_EVENT_MARKER.search(pending_line.text) is not None:
+                await self._discard_invalid_integration_line(
+                    pending_line,
+                    description="未対応の連携イベント",
+                    reason="イベントの種類またはバージョンに対応していません。",
+                )
                 continue
             event = parse_log_line(pending_line.text)
             if event is None:
