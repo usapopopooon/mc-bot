@@ -89,3 +89,32 @@ def test_reads_new_log_from_start_when_rotation_happened_while_stopped(tmp_path:
     log.write_text("during downtime\n", encoding="utf-8")
     restarted = LogTailer(log, cursor)
     assert [line.text for line in restarted.poll()] == ["during downtime"]
+
+
+def test_drains_lines_appended_while_blocked_before_switching_rotated_log(
+    tmp_path: Path,
+) -> None:
+    log = tmp_path / "latest.log"
+    rotated = tmp_path / "previous.log"
+    cursor = tmp_path / "cursor.json"
+    log.write_text("old line\n", encoding="utf-8")
+    tailer = LogTailer(log, cursor)
+    assert tailer.poll() == []
+
+    with log.open("a", encoding="utf-8") as stream:
+        stream.write("blocking request\n")
+    blocking = tailer.poll()
+    assert [line.text for line in blocking] == ["blocking request"]
+
+    with log.open("a", encoding="utf-8") as stream:
+        stream.write("must not be lost\n")
+    log.rename(rotated)
+    log.write_text("new log line\n", encoding="utf-8")
+
+    tailer.acknowledge(blocking[0])
+    pending_rotated = tailer.poll()
+    assert [line.text for line in pending_rotated] == ["must not be lost"]
+    tailer.acknowledge(pending_rotated[0])
+
+    pending_current = tailer.poll()
+    assert [line.text for line in pending_current] == ["new log line"]

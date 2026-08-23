@@ -49,6 +49,7 @@ from mc_bot.exchange_request import MinecraftExchangeRequest, parse_exchange_req
 from mc_bot.experience import (
     ADVANCEMENT_REWARD_IN_GAME_XP,
     ADVANCEMENT_REWARD_LEVEL_BOT_SOURCE_XP,
+    LevelBotRequestRejectedError,
     LevelBotXpClient,
     MinecraftResourceCatalog,
     MinecraftResourceExchangeRequest,
@@ -680,6 +681,7 @@ class MinecraftDiscordBot(discord.Client):
             self._tailer_task.cancel()
             await asyncio.gather(self._tailer_task, return_exceptions=True)
             self._tailer_task = None
+        self._tailer.close()
         await self._voice_player.close()
         await self._level_bot_xp.close()
         await super().close()
@@ -4254,15 +4256,24 @@ class MinecraftDiscordBot(discord.Client):
         user_id: int,
         account_id: int,
     ) -> None:
-        reservation = await self._level_bot_xp.request_material_buyback(
-            request_id=request.request_id,
-            guild_id=guild_id,
-            user_id=user_id,
-            account_id=account_id,
-            item_id=request.target,
-            item_count=request.amount,
-            expected_reward_xp=request.expected_reward,
-        )
+        try:
+            reservation = await self._level_bot_xp.request_material_buyback(
+                request_id=request.request_id,
+                guild_id=guild_id,
+                user_id=user_id,
+                account_id=account_id,
+                item_id=request.target,
+                item_count=request.amount,
+                expected_reward_xp=request.expected_reward,
+            )
+        except LevelBotRequestRejectedError:
+            await self._release_material_buyback_request(request)
+            await self._send_minecraft_private_message(
+                request.player_name,
+                "資源売却の内容を受け付けられませんでした。アイテムは回収していません。"
+                "交換内容を開き直して、もう一度お試しください。",
+            )
+            return
         if reservation is None:
             raise RuntimeError("material buyback reservation could not be confirmed")
         if reservation.status in {"daily_limit", "unavailable", "conflict"}:

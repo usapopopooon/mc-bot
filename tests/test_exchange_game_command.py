@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, patch
 from mc_bot.bot import MinecraftDiscordBot
 from mc_bot.config import Config
 from mc_bot.experience import (
+    LevelBotRequestRejectedError,
     MinecraftMaterialBuybackRequest,
     MinecraftResourceExchangeRequest,
     MinecraftResourcePack,
@@ -475,6 +476,34 @@ def test_material_buyback_retries_completion_without_double_removal(tmp_path) ->
     assert "売却完了（処理済み）: 通常の砂岩 x256" in rcon.commands[-1]  # noqa: RUF001
 
 
+def test_ambiguous_buyback_reservation_retries_before_acknowledging(tmp_path) -> None:
+    bot = _bot(tmp_path)
+    request_id = "55555555-5555-4555-8555-555555555555"
+    line = _line(
+        500,
+        request_id=request_id,
+        selection="material_buyback|minecraft:sandstone|256|0|200",
+    )
+    tailer = LineTailer([line])
+    bot._tailer = tailer  # type: ignore[assignment]
+    confirmed = bot._level_bot_xp.request_material_buyback.return_value  # type: ignore[attr-defined]
+    bot._level_bot_xp.request_material_buyback = AsyncMock(  # type: ignore[method-assign]
+        side_effect=[None, confirmed]
+    )
+
+    with patch("mc_bot.bot.asyncio.sleep", new=AsyncMock()):
+        asyncio.run(bot._forward_logs())
+
+    assert bot._level_bot_xp.request_material_buyback.await_count == 2  # type: ignore[attr-defined]
+    assert tailer.acknowledged == [line]
+    rcon = bot._rcon
+    assert isinstance(rcon, ExchangeRcon)
+    assert (
+        sum(command.startswith("usapo-event-bridge material-buyback ") for command in rcon.commands)
+        == 1
+    )
+
+
 def test_material_buyback_resumes_after_delay_instead_of_leaving_a_reserved_slot(
     tmp_path,
 ) -> None:
@@ -498,6 +527,39 @@ def test_material_buyback_resumes_after_delay_instead_of_leaving_a_reserved_slot
     assert isinstance(rcon, ExchangeRcon)
     assert rcon.commands[0].startswith("usapo-event-bridge material-buyback ")
     assert rcon.commands[1].startswith("usapo-event-bridge material-buyback-release ")
+
+
+def test_definitive_buyback_rejection_releases_request_and_does_not_block_next_line(
+    tmp_path,
+) -> None:
+    bot = _bot(tmp_path)
+    request_id = "55555555-5555-4555-8555-555555555555"
+    rejected = _line(
+        500,
+        request_id=request_id,
+        selection="material_buyback|minecraft:emerald|64|0|500",
+    )
+    balance = _line(
+        600,
+        request_id="66666666-6666-4666-8666-666666666666",
+        selection="balance|balance|0|0|0",
+    )
+    tailer = LineTailer([rejected, balance])
+    bot._tailer = tailer  # type: ignore[assignment]
+    bot._level_bot_xp.request_material_buyback = AsyncMock(  # type: ignore[method-assign]
+        side_effect=LevelBotRequestRejectedError(422)
+    )
+
+    asyncio.run(bot._forward_logs())
+
+    assert tailer.acknowledged == [rejected, balance]
+    rcon = bot._rcon
+    assert isinstance(rcon, ExchangeRcon)
+    assert rcon.commands[0] == (
+        f"usapo-event-bridge material-buyback-release {PLAYER_UUID} {request_id}"
+    )
+    assert "アイテムは回収していません" in rcon.commands[1]
+    assert "現在XP: 49,000 XP" in rcon.commands[2]
 
 
 def test_material_buyback_daily_limit_releases_pending_request_without_item_removal(

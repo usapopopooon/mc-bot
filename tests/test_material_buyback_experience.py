@@ -1,7 +1,9 @@
 import asyncio
 from typing import Any
 
-from mc_bot.experience import LevelBotXpClient
+import pytest
+
+from mc_bot.experience import LevelBotRequestRejectedError, LevelBotXpClient
 
 REQUEST_ID = "55555555-5555-4555-8555-555555555555"
 
@@ -114,5 +116,25 @@ def test_material_buyback_api_accepts_only_identified_duplicate_conflict() -> No
         assert result is not None
         assert result.request_id == REQUEST_ID
         assert result.duplicate is True
+
+    asyncio.run(exercise())
+
+
+def test_material_buyback_api_marks_definitive_client_rejection() -> None:
+    async def exercise() -> None:
+        client = LevelBotXpClient("https://levels.example.test", "secret")
+        session = FakeSession(reserve_status=422)
+        client._session = session  # type: ignore[assignment]
+
+        with pytest.raises(LevelBotRequestRejectedError, match="HTTP 422"):
+            await client.request_material_buyback(
+                request_id=REQUEST_ID,
+                guild_id=1001,
+                user_id=2003,
+                account_id=17,
+                item_id="minecraft:emerald",
+                item_count=64,
+                expected_reward_xp=500,
+            )
 
     asyncio.run(exercise())

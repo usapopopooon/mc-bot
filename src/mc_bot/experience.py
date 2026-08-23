@@ -37,6 +37,14 @@ _MATERIAL_BUYBACK_RATES = {
 }
 
 
+class LevelBotRequestRejectedError(RuntimeError):
+    """level-bot が処理前に要求を確定的に拒否したことを表す。"""
+
+    def __init__(self, status: int) -> None:
+        self.status = status
+        super().__init__(f"level-bot rejected request with HTTP {status}")
+
+
 @dataclass(frozen=True, slots=True)
 class MinecraftLevelUpEvent:
     id: int
@@ -772,6 +780,8 @@ class LevelBotXpClient:
                         response.status,
                         body[:300],
                     )
+                    if 400 <= response.status < 500 and response.status not in {408, 429}:
+                        raise LevelBotRequestRejectedError(response.status)
                     return None
                 result = self._parse_material_buyback_request(await response.json())
                 if response.status == 200:

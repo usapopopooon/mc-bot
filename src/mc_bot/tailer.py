@@ -7,7 +7,7 @@ import stat
 from collections.abc import AsyncIterator
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
 
 _POLL_INTERVAL_SECONDS = 0.5
 _MAX_READ_BYTES = 1024 * 1024
@@ -30,6 +30,8 @@ class LogTailer:
         self._log_path = log_path
         self._cursor_path = cursor_path
         self._cursor: Cursor | None = None
+        self._stream: BinaryIO | None = None
+        self._stream_identity: str | None = None
 
     async def lines(self) -> AsyncIterator[PendingLine]:
         while True:
@@ -64,22 +66,59 @@ class LogTailer:
         if self._cursor is None:
             self._cursor = self._initial_cursor(identity, log_stat.st_size)
             self._save_cursor(self._cursor)
-            if self._cursor.offset >= log_stat.st_size:
-                return []
 
-        if self._cursor.file_identity != identity or log_stat.st_size < self._cursor.offset:
+        if self._stream is not None and self._stream_identity != self._cursor.file_identity:
+            self._close_stream()
+
+        if self._stream is not None and self._cursor.file_identity != identity:
+            pending = self._read_pending(self._stream, self._cursor)
+            if pending:
+                return pending
+            self._close_stream()
             self._cursor = Cursor(identity, 0)
             self._save_cursor(self._cursor)
 
-        with self._log_path.open("rb") as stream:
-            stream.seek(self._cursor.offset)
-            data = stream.read(_MAX_READ_BYTES)
+        if self._cursor.file_identity != identity or log_stat.st_size < self._cursor.offset:
+            self._close_stream()
+            self._cursor = Cursor(identity, 0)
+            self._save_cursor(self._cursor)
+
+        if self._stream is None and not self._open_current_stream(identity):
+            return []
+        if self._stream is None:
+            return []
+        return self._read_pending(self._stream, self._cursor)
+
+    def close(self) -> None:
+        self._close_stream()
+
+    def _open_current_stream(self, expected_identity: str) -> bool:
+        stream = self._log_path.open("rb")
+        stream_stat = os.fstat(stream.fileno())
+        identity = f"{stream_stat.st_dev}:{stream_stat.st_ino}"
+        if identity != expected_identity:
+            stream.close()
+            return False
+        self._stream = stream
+        self._stream_identity = identity
+        return True
+
+    def _close_stream(self) -> None:
+        if self._stream is not None:
+            self._stream.close()
+        self._stream = None
+        self._stream_identity = None
+
+    @staticmethod
+    def _read_pending(stream: BinaryIO, cursor: Cursor) -> list[PendingLine]:
+        stream.seek(cursor.offset)
+        data = stream.read(_MAX_READ_BYTES)
         if not data or b"\n" not in data:
             return []
 
         complete_end = data.rfind(b"\n") + 1
         complete = data[:complete_end]
-        return self._pending_lines(complete, identity, self._cursor.offset)
+        return LogTailer._pending_lines(complete, cursor.file_identity, cursor.offset)
 
     def acknowledge(self, pending_line: PendingLine) -> None:
         if self._cursor is None:
