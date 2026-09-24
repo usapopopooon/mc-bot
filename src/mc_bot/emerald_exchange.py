@@ -18,10 +18,10 @@ _DIAMOND_RESULT_PREFIX = "USAPO_DIAMOND_EXCHANGE_RESULT|1|"
 _ALLOWED_EMERALD_COUNTS = frozenset({32, 64})
 _ALLOWED_DIAMOND_COUNTS = frozenset({1, 4})
 _RESULT_STATUSES = frozenset(
-    {"completed", "insufficient_emeralds", "inventory_full", "player_offline"}
+    {"completed", "insufficient_emeralds", "inventory_full", "player_offline", "world_restricted"}
 )
 _DIAMOND_RESULT_STATUSES = frozenset(
-    {"completed", "insufficient_diamonds", "inventory_full", "player_offline"}
+    {"completed", "insufficient_diamonds", "inventory_full", "player_offline", "world_restricted"}
 )
 
 

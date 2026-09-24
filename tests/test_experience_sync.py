@@ -2,6 +2,7 @@ import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from economy_test_support import allowed_economy_response, unwrap_guarded_delivery
 
 from mc_bot.activity import ActivityKind, MinecraftActivityEvent
 from mc_bot.bot import MinecraftDiscordBot
@@ -26,6 +27,9 @@ class ExperienceRcon:
         self.commands: list[str] = []
 
     def execute(self, command: str) -> str:
+        if response := allowed_economy_response(command):
+            return response
+        command = unwrap_guarded_delivery(command)
         self.commands.append(command)
         if command.startswith("usapo-event-bridge voice-bonus "):
             return "Voice XP bonus state updated"
@@ -512,6 +516,7 @@ def test_sync_delivers_online_minecraft_xp_exchange_once(tmp_path) -> None:
         source="self",
         status="active",
         created_by=123,
+        player_uuid=PLAYER_UUID,
     )
     bot._settings = RuntimeSettings(guild_id=456)
     rcon = ExperienceRcon()
@@ -626,6 +631,7 @@ def test_sync_retries_lost_claim_response_with_same_owner_token(tmp_path) -> Non
         source="self",
         status="active",
         created_by=123,
+        player_uuid=PLAYER_UUID,
     )
     bot._rcon = ExperienceRcon()  # type: ignore[assignment]
     pending = MinecraftXpExchangeEvent(
@@ -695,6 +701,7 @@ def test_sync_retries_completion_and_each_notification(tmp_path) -> None:
         source="self",
         status="active",
         created_by=123,
+        player_uuid=PLAYER_UUID,
     )
     rcon = ExperienceRcon()
     rcon.tellraw_failures = 1
@@ -757,6 +764,7 @@ def test_sync_does_not_charge_ambiguous_rcon_delivery(tmp_path) -> None:
         source="self",
         status="active",
         created_by=123,
+        player_uuid=PLAYER_UUID,
     )
     rcon = ExperienceRcon()
     rcon.add_exception = OSError("RCON response lost")

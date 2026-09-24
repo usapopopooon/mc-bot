@@ -7,6 +7,7 @@ from uuid import uuid4
 
 import discord
 
+from mc_bot.economy_access import WORLD_RESTRICTED_MESSAGE
 from mc_bot.experience import MinecraftResourcePack, MinecraftResourceShop
 from mc_bot.material_buyback import (
     MATERIAL_BUYBACK_DAILY_LIMIT_XP,
@@ -280,6 +281,8 @@ class MinecraftResourcePackSelect(discord.ui.Select):
                 "この交換メニューを使えるのは開いた本人だけです。", ephemeral=True
             )
             return
+        if await self.bot._deny_economy_interaction(interaction):
+            return
         try:
             pack = self.shop.packs[int(self.values[0])]
         except IndexError, ValueError:
@@ -430,6 +433,11 @@ class MinecraftResourceConfirmView(discord.ui.View):
                 item_count=self.pack.item_count,
                 expected_cost_xp=self.pack.cost_xp,
             )
+            if isinstance(result, str):
+                self._enable_retry()
+                await interaction.edit_original_response(view=self)
+                await interaction.followup.send(result, ephemeral=True)
+                return
             if result is None:
                 self._enable_retry()
                 await interaction.edit_original_response(view=self)
@@ -484,6 +492,8 @@ class EmeraldDiamondPackSelect(discord.ui.Select):
             await interaction.response.send_message(
                 "この交換メニューを使えるのは開いた本人だけです。", ephemeral=True
             )
+            return
+        if await self.bot._deny_economy_interaction(interaction):
             return
         try:
             emerald_count = int(self.values[0])
@@ -551,6 +561,8 @@ class DiamondEmeraldPackSelect(discord.ui.Select):
             await interaction.response.send_message(
                 "この交換メニューを使えるのは開いた本人だけです。", ephemeral=True
             )
+            return
+        if await self.bot._deny_economy_interaction(interaction):
             return
         try:
             diamond_count = int(self.values[0])
@@ -661,6 +673,7 @@ class EmeraldDiamondConfirmView(discord.ui.View):
                         "連携したMinecraftアカウントがオンラインではありません。"
                         "サーバーに参加してから再試行してください。"
                     ),
+                    "world_restricted": WORLD_RESTRICTED_MESSAGE,
                     "account_ambiguous": (
                         "連携したMinecraftアカウントが複数同時にオンラインです。"
                         "交換に使う1アカウントだけで参加してから再試行してください。"
@@ -756,6 +769,7 @@ class DiamondEmeraldConfirmView(discord.ui.View):
                         "連携したMinecraftアカウントがオンラインではありません。"
                         "サーバーに参加してから再試行してください。"
                     ),
+                    "world_restricted": WORLD_RESTRICTED_MESSAGE,
                     "account_ambiguous": (
                         "連携したMinecraftアカウントが複数同時にオンラインです。"
                         "交換に使う1アカウントだけで参加してから再試行してください。"

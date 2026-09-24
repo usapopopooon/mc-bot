@@ -267,6 +267,7 @@ def test_server_manager_can_open_cancellation_for_a_bot_issued_quest() -> None:
 def test_public_accept_confirmation_is_private_and_owner_locked() -> None:
     async def exercise() -> None:
         bot = MinecraftDiscordBot(Config(discord_token="secret"))
+        bot._accounts.list_for_discord_user = Mock(return_value=[])  # type: ignore[method-assign]
         bot._quests.get = Mock(return_value=_quest(status="open", message_id=901))  # type: ignore[method-assign]
         interaction = Mock(spec=discord.Interaction)
         interaction.user.id = 2003
@@ -287,6 +288,7 @@ def test_public_accept_confirmation_is_private_and_owner_locked() -> None:
 def test_my_quests_uses_one_item_per_page_without_silent_truncation() -> None:
     async def exercise() -> None:
         bot = MinecraftDiscordBot(Config(discord_token="secret"))
+        bot._accounts.list_for_discord_user = Mock(return_value=[])  # type: ignore[method-assign]
         quests = [
             replace(_quest(status="open", message_id=None), quest_id=value)
             for value in range(30, 18, -1)
@@ -339,6 +341,7 @@ def test_my_quest_action_preserves_the_current_page_for_confirmation_back() -> N
 def test_empty_my_quests_is_private_and_has_back_navigation() -> None:
     async def exercise() -> None:
         bot = MinecraftDiscordBot(Config(discord_token="secret"))
+        bot._accounts.list_for_discord_user = Mock(return_value=[])  # type: ignore[method-assign]
         bot._quests.list_active_for_discord_user = Mock(return_value=[])  # type: ignore[method-assign]
         interaction = Mock(spec=discord.Interaction)
         interaction.user.id = 2002
@@ -358,6 +361,7 @@ def test_empty_my_quests_is_private_and_has_back_navigation() -> None:
 def test_quest_guide_and_claim_guide_are_private_and_have_back_navigation() -> None:
     async def exercise() -> None:
         bot = MinecraftDiscordBot(Config(discord_token="secret"))
+        bot._accounts.list_for_discord_user = Mock(return_value=[])  # type: ignore[method-assign]
 
         for show in (bot.show_quest_guide, bot.show_quest_claim_guide):
             interaction = Mock(spec=discord.Interaction)
@@ -376,6 +380,7 @@ def test_quest_guide_and_claim_guide_are_private_and_have_back_navigation() -> N
 def test_private_quest_guide_navigation_edits_the_existing_private_message() -> None:
     async def exercise() -> None:
         bot = MinecraftDiscordBot(Config(discord_token="secret"))
+        bot._accounts.list_for_discord_user = Mock(return_value=[])  # type: ignore[method-assign]
         interaction = Mock(spec=discord.Interaction)
         interaction.user.id = 2002
         interaction.response.edit_message = AsyncMock()
@@ -454,6 +459,7 @@ def test_my_quests_pagination_stays_on_the_private_response() -> None:
 def test_my_quests_page_update_edits_the_existing_private_response() -> None:
     async def exercise() -> None:
         bot = MinecraftDiscordBot(Config(discord_token="secret"))
+        bot._accounts.list_for_discord_user = Mock(return_value=[])  # type: ignore[method-assign]
         quests = [
             replace(_quest(status="open", message_id=None), quest_id=30),
             replace(_quest(status="open", message_id=None), quest_id=29),

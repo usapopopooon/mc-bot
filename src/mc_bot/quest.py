@@ -29,6 +29,7 @@ type QuestActionStatus = Literal[
     "pending_recovered",
     "storage_error",
     "invalid_request",
+    "world_restricted",
 ]
 type AdminQuestCreateStatus = Literal[
     "completed",
@@ -423,7 +424,10 @@ def quest_action_command(
     *,
     player_name: str | None = None,
 ) -> str:
-    if action not in {"accept", "submit", "abandon", "cancel", "invalidate"} or quest_id <= 0:
+    if (
+        action not in {"accept", "submit", "abandon", "user-abandon", "cancel", "invalidate"}
+        or quest_id <= 0
+    ):
         raise ValueError("invalid quest action")
     player = str(uuid.UUID(player_uuid))
     request = str(uuid.UUID(request_id))
@@ -501,6 +505,7 @@ def parse_quest_action_result(
         "pending_recovered",
         "storage_error",
         "invalid_request",
+        "world_restricted",
     }
     quest_statuses = {"open", "accepted", "completed", "cancelled", "unknown"}
     duplicates = {"new": False, "duplicate": True}

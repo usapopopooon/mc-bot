@@ -22,6 +22,7 @@ type MarketTransferStatus = Literal[
     "player_offline",
     "inventory_full",
     "storage_error",
+    "world_restricted",
 ]
 type MarketTransferListingStatus = Literal["active", "delivering", "sold", "cancelled", "unknown"]
 
@@ -538,6 +539,7 @@ def parse_market_transfer_result(
         "player_offline",
         "inventory_full",
         "storage_error",
+        "world_restricted",
     }
     listing_statuses = {"active", "delivering", "sold", "cancelled", "unknown"}
     duplicate_values = {"new": False, "duplicate": True}

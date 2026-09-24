@@ -136,6 +136,8 @@ class MinecraftXpPackSelect(discord.ui.Select):
                 ephemeral=True,
             )
             return
+        if await self.bot._deny_economy_interaction(interaction):
+            return
         cost_xp = int(self.values[0])
         pack = next(
             (pack for pack in self.shop.packs if pack.cost_xp == cost_xp),
@@ -238,6 +240,11 @@ class MinecraftXpConfirmView(discord.ui.View):
                 cost_xp=self.cost_xp,
                 expected_reward_xp=self.expected_reward_xp,
             )
+            if isinstance(result, str):
+                self._enable_retry()
+                await interaction.edit_original_response(view=self)
+                await interaction.followup.send(result, ephemeral=True)
+                return
             if result is None:
                 self._enable_retry()
                 await interaction.edit_original_response(view=self)

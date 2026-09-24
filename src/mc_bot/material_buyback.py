@@ -18,7 +18,9 @@ MATERIAL_BUYBACK_RATES = {
     "minecraft:tuff": ("凝灰岩", 40),
 }
 MATERIAL_BUYBACK_ITEM_IDS = frozenset(MATERIAL_BUYBACK_RATES)
-_STATUSES = frozenset({"completed", "insufficient_items", "player_offline", "storage_error"})
+_STATUSES = frozenset(
+    {"completed", "insufficient_items", "player_offline", "storage_error", "world_restricted"}
+)
 
 
 @dataclass(frozen=True, slots=True)

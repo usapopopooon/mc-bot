@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, call, patch
 
 import pytest
+from economy_test_support import allowed_economy_response, unwrap_guarded_delivery
 
 from mc_bot.accounts import AccountStore, MinecraftItemGachaDailyLimitReached
 from mc_bot.bot import MinecraftDiscordBot
@@ -47,6 +48,9 @@ class GachaRcon:
         self.commands: list[str] = []
 
     def execute(self, command: str) -> str:
+        if response := allowed_economy_response(command):
+            return response
+        command = unwrap_guarded_delivery(command)
         self.commands.append(command)
         if command.startswith("give Steve "):
             result = self.give_results.pop(0)
@@ -127,6 +131,7 @@ def _bot_with_account(tmp_path):
     )
     bot._settings = RuntimeSettings(guild_id=456)
     bot._online_exchange_account = AsyncMock(return_value=(account, None))  # type: ignore[method-assign]
+    bot._economy_access_status = AsyncMock(return_value="allowed")  # type: ignore[method-assign]
     wallet_before = MinecraftXpWallet(total_xp=250, spent_xp=50, available_xp=200)
     wallet_after = MinecraftXpWallet(total_xp=250, spent_xp=150, available_xp=100)
     bot._level_bot_xp.fetch_item_gacha_offer = AsyncMock(  # type: ignore[method-assign]
@@ -1426,6 +1431,7 @@ def test_draw_is_retryable_while_payment_is_requested_and_reserved_before_rcon(
         return spend
 
     async def execute(command: str) -> str:
+        command = unwrap_guarded_delivery(command)
         if command.startswith("give Steve "):
             draw = bot._accounts.get_minecraft_item_gacha_draw(
                 guild_id=456,
@@ -1433,6 +1439,7 @@ def test_draw_is_retryable_while_payment_is_requested_and_reserved_before_rcon(
                 draw_day=item_gacha_day(datetime.now(UTC)),
             )
             assert draw is not None and draw.status == "reserved"
+            return "Gave 64 [Iron Ingot] to Steve"
         return ""
 
     bot._level_bot_xp.request_item_gacha_spend = AsyncMock(  # type: ignore[method-assign]

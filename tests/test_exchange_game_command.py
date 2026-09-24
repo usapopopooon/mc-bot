@@ -3,6 +3,8 @@ import base64
 from datetime import UTC, datetime
 from unittest.mock import AsyncMock, patch
 
+from economy_test_support import allowed_economy_response
+
 from mc_bot.bot import MinecraftDiscordBot
 from mc_bot.config import Config
 from mc_bot.experience import (
@@ -42,6 +44,8 @@ class ExchangeRcon:
         self.release_status = release_status
 
     def execute(self, command: str) -> str:
+        if response := allowed_economy_response(command):
+            return response
         self.commands.append(command)
         if command.startswith("tellraw "):
             return ""

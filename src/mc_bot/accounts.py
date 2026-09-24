@@ -1948,6 +1948,14 @@ class AccountStore:
             ).fetchone()
         return _minecraft_item_gacha_draw(row) if row is not None else None
 
+    def get_minecraft_item_gacha_draw_by_id(self, draw_id: str) -> MinecraftItemGachaDraw | None:
+        normalized = str(uuid.UUID(draw_id))
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM minecraft_item_gacha_draws WHERE draw_id = ?", (normalized,)
+            ).fetchone()
+        return _minecraft_item_gacha_draw(row) if row is not None else None
+
     def count_minecraft_item_gacha_draws(
         self, *, guild_id: int, discord_user_id: int, draw_day: str
     ) -> int:

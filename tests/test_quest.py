@@ -273,6 +273,17 @@ def test_quest_rcon_protocol_requires_name_only_for_accept() -> None:
     assert 0 <= quest_log_nonce(ACCEPTED_ID) < 2**64
 
 
+def test_user_abandon_and_cleanup_abandon_use_distinct_protocol_commands() -> None:
+    assert quest_action_command("user-abandon", 17, WORKER_UUID, ACCEPTED_ID) == (
+        f"usapo-event-bridge quest-user-abandon 17 {WORKER_UUID} {ACCEPTED_ID}"
+    )
+    assert quest_action_command("abandon", 17, WORKER_UUID, ACCEPTED_ID) == (
+        f"usapo-event-bridge quest-abandon 17 {WORKER_UUID} {ACCEPTED_ID}"
+    )
+    with pytest.raises(ValueError):
+        quest_action_command("user-abandon", 17, WORKER_UUID, ACCEPTED_ID, player_name="Worker")
+
+
 def test_admin_quest_create_protocol_binds_all_items_counts_and_request_id() -> None:
     command = admin_quest_create_command(
         "minecraft:stone",

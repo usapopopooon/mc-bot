@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from economy_test_support import allowed_economy_response, unwrap_guarded_delivery
 
 from mc_bot.bot import MinecraftDiscordBot
 from mc_bot.config import Config
@@ -34,6 +35,9 @@ class GameCommandRcon:
         self.commands: list[str] = []
 
     def execute(self, command: str) -> str:
+        if response := allowed_economy_response(command):
+            return response
+        command = unwrap_guarded_delivery(command)
         self.commands.append(command)
         if command.startswith("give Steve "):
             return "Gave 3 [Diamond] to Steve"

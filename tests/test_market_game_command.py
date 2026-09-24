@@ -3,6 +3,8 @@ import base64
 from datetime import UTC, datetime
 from unittest.mock import AsyncMock, patch
 
+from economy_test_support import allowed_economy_response
+
 from mc_bot.bot import MinecraftDiscordBot
 from mc_bot.config import Config
 from mc_bot.experience import MinecraftMarketPurchaseRequest, MinecraftXpWallet
@@ -35,6 +37,8 @@ class MarketRcon:
         self.commands: list[str] = []
 
     def execute(self, command: str) -> str:
+        if response := allowed_economy_response(command):
+            return response
         self.commands.append(command)
         if command.startswith("usapo-event-bridge market-deliver "):
             fields = command.split()
@@ -54,6 +58,8 @@ class MarketRcon:
 
 class AmbiguousMarketRcon(MarketRcon):
     def execute(self, command: str) -> str:
+        if response := allowed_economy_response(command):
+            return response
         self.commands.append(command)
         if command.startswith("usapo-event-bridge market-deliver "):
             fields = command.split()

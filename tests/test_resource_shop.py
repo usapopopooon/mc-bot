@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from economy_test_support import allowed_economy_response, unwrap_guarded_delivery
 
 from mc_bot.accounts import MinecraftAccount
 from mc_bot.bot import MinecraftDiscordBot
@@ -50,6 +51,9 @@ class ResourceRcon:
         self.commands: list[str] = []
 
     def execute(self, command: str) -> str:
+        if response := allowed_economy_response(command):
+            return response
+        command = unwrap_guarded_delivery(command)
         self.commands.append(command)
         if command.startswith("give Steve "):
             if self.exception is not None:
@@ -108,6 +112,7 @@ def _bot(tmp_path) -> tuple[MinecraftDiscordBot, MinecraftAccount]:
         source="self",
         status="active",
         created_by=123,
+        player_uuid="11111111-1111-4111-8111-111111111111",
     )
     return bot, account
 
@@ -312,6 +317,7 @@ def test_open_resource_shop_refreshes_public_panel_and_private_menu_from_same_ra
     tmp_path,
 ) -> None:
     bot, _ = _bot(tmp_path)
+    bot._economy_access_status = AsyncMock(return_value="allowed")  # type: ignore[method-assign]
     packs = (
         MinecraftResourcePack("minecraft:emerald", "エメラルド", 4, 100),
         MinecraftResourcePack("minecraft:emerald", "エメラルド", 16, 360),

@@ -34,6 +34,13 @@ from mc_bot.admin_quest import (
     AdminQuestSuggestionView,
 )
 from mc_bot.config import Config
+from mc_bot.economy_access import (
+    ECONOMY_UNAVAILABLE_MESSAGE,
+    WORLD_RESTRICTED_MESSAGE,
+    economy_access_command,
+    guarded_economy_delivery_command,
+    parse_economy_access_result,
+)
 from mc_bot.emerald_exchange import (
     DiamondEmeraldExchangeResult,
     EmeraldDiamondExchangeResult,
@@ -1640,6 +1647,8 @@ class MinecraftDiscordBot(discord.Client):
         return True
 
     async def show_minecraft_xp_shop(self, interaction: discord.Interaction) -> None:
+        if await self._deny_economy_interaction(interaction):
+            return
         if interaction.guild_id is None:
             await interaction.response.send_message(
                 "Discordサーバー内で利用してください。", ephemeral=True
@@ -1664,6 +1673,8 @@ class MinecraftDiscordBot(discord.Client):
         )
 
     async def show_minecraft_xp_balance(self, interaction: discord.Interaction) -> None:
+        if await self._deny_economy_interaction(interaction):
+            return
         if interaction.guild_id is None:
             await interaction.response.send_message(
                 "Discordサーバー内で利用してください。", ephemeral=True
@@ -1686,9 +1697,11 @@ class MinecraftDiscordBot(discord.Client):
         request_id: str,
         cost_xp: int,
         expected_reward_xp: int,
-    ) -> MinecraftXpExchangeRequest | None:
+    ) -> MinecraftXpExchangeRequest | str | None:
         if interaction.guild_id is None:
             return None
+        if error := await self._discord_economy_error(interaction.user.id):
+            return error
         return await self._level_bot_xp.request_xp_exchange(
             interaction.guild_id,
             interaction.user.id,
@@ -1746,6 +1759,8 @@ class MinecraftDiscordBot(discord.Client):
         interaction: discord.Interaction,
         category: ItemGachaCategory,
     ) -> None:
+        if await self._deny_economy_interaction(interaction):
+            return
         await interaction.response.send_message(
             embed=discord.Embed(
                 title=f"{item_gacha_category_label(category)}ガチャ",
@@ -1769,6 +1784,8 @@ class MinecraftDiscordBot(discord.Client):
         draw_kind: ItemGachaKind,
         draw_category: ItemGachaCategory = "all",
     ) -> None:
+        if await self._deny_economy_interaction(interaction):
+            return
         if interaction.guild_id is None:
             await interaction.response.send_message(
                 "Discordサーバー内で利用してください。", ephemeral=True
@@ -1988,6 +2005,22 @@ class MinecraftDiscordBot(discord.Client):
                 await interaction.followup.send(message, ephemeral=True)
                 return
 
+            prior = (
+                await asyncio.to_thread(
+                    self._accounts.get_minecraft_item_gacha_draw_by_id, request_id
+                )
+                if request_id is not None
+                else None
+            )
+            reconciling = (
+                prior is not None
+                and prior.guild_id == interaction.guild_id
+                and prior.discord_user_id == interaction.user.id
+                and prior.status in {"delivered", "ambiguous", "reserved"}
+            )
+            if not reconciling and (error := await self._economy_account_error(account)):
+                await interaction.followup.send(error, ephemeral=True)
+                return
             reward = draw_item_gacha_reward(draw_kind, category=draw_category)
             draw_day = item_gacha_day(draw_time or datetime.now(UTC))
             try:
@@ -2212,8 +2245,8 @@ class MinecraftDiscordBot(discord.Client):
             )
 
             try:
-                await self._execute_checked_rcon(
-                    item_gacha_give_command(draw.player_name, draw.reward_key)
+                await self._execute_economy_delivery(
+                    account, item_gacha_give_command(draw.player_name, draw.reward_key)
                 )
             except ValueError as error:
                 cancelled = await self._level_bot_xp.update_item_gacha_spend(
@@ -2234,7 +2267,12 @@ class MinecraftDiscordBot(discord.Client):
                     error,
                 )
                 await interaction.followup.send(
-                    "景品は確定しましたが、Minecraftが配布を受け付けませんでした。"
+                    (
+                        WORLD_RESTRICTED_MESSAGE + "\n"
+                        if str(error) == WORLD_RESTRICTED_MESSAGE
+                        else ""
+                    )
+                    + "景品は確定しましたが、Minecraftが配布を受け付けませんでした。"
                     "本日の同じ景品で再試行できます。少し待ってからもう一度押してください。",
                     ephemeral=True,
                 )
@@ -2418,6 +2456,14 @@ class MinecraftDiscordBot(discord.Client):
                 request.player_name,
                 "交換所の利用にはDiscordアカウントとの連携が必要です。",
             )
+            return
+
+        # Buyback replays must still reconcile an already removed inventory stack;
+        # its Paper endpoint checks the world immediately before a new removal.
+        if request.kind != "material_buyback" and (
+            error := await self._economy_account_error(account)
+        ):
+            await self._send_minecraft_private_message(request.player_name, error)
             return
 
         # Paperが記録したUUIDを本人確認に使い、非同期配布でも現在の実名を参照できるようにする。
@@ -2615,6 +2661,9 @@ class MinecraftDiscordBot(discord.Client):
                 "マーケット利用にはDiscordアカウントとの連携が必要です。",
             )
             return
+        if error := await self._economy_account_error(account):
+            await self._send_minecraft_private_message(request.player_name, error)
+            return
         if request.kind == "balance":
             wallet = await self._level_bot_xp.fetch_market_wallet(guild_id, account.discord_user_id)
             message = (
@@ -2647,6 +2696,8 @@ class MinecraftDiscordBot(discord.Client):
         await self._send_minecraft_private_message(request.player_name, message)
 
     async def show_market_balance(self, interaction: discord.Interaction) -> None:
+        if await self._deny_economy_interaction(interaction):
+            return
         if interaction.guild_id is None:
             await interaction.response.send_message(
                 "Discordサーバー内で利用してください。", ephemeral=True
@@ -2664,6 +2715,8 @@ class MinecraftDiscordBot(discord.Client):
         )
 
     async def show_market_guide(self, interaction: discord.Interaction) -> None:
+        if await self._deny_economy_interaction(interaction):
+            return
         await interaction.response.send_message(
             embed=market_guide_embed(),
             ephemeral=True,
@@ -2673,6 +2726,8 @@ class MinecraftDiscordBot(discord.Client):
     async def show_market_purchase_confirmation(
         self, interaction: discord.Interaction, listing_id: int
     ) -> None:
+        if await self._deny_economy_interaction(interaction):
+            return
         if interaction.guild_id is None:
             await interaction.response.send_message(
                 "Discordサーバー内で利用してください。", ephemeral=True
@@ -2752,6 +2807,8 @@ class MinecraftDiscordBot(discord.Client):
     async def cancel_market_listing(
         self, interaction: discord.Interaction, listing_id: int
     ) -> None:
+        if await self._deny_economy_interaction(interaction):
+            return
         if interaction.guild_id is None:
             await interaction.response.send_message(
                 "Discordサーバー内で利用してください。", ephemeral=True
@@ -2790,6 +2847,13 @@ class MinecraftDiscordBot(discord.Client):
         if buyer.discord_user_id is None or buyer.player_uuid is None:
             return "購入アカウントを確認できませんでした。"
         async with self._market_lock:
+            current = await asyncio.to_thread(self._market.get, listing_id)
+            if (
+                current is not None
+                and current.status == "active"
+                and (error := await self._economy_account_error(buyer))
+            ):
+                return error
             listing = await asyncio.to_thread(
                 self._market.reserve_purchase,
                 listing_id=listing_id,
@@ -2856,6 +2920,7 @@ class MinecraftDiscordBot(discord.Client):
                     "recipient_mismatch",
                     "player_offline",
                     "inventory_full",
+                    "world_restricted",
                 }:
                     return None
                 cancelled = await self._level_bot_xp.update_market_purchase(
@@ -2880,6 +2945,7 @@ class MinecraftDiscordBot(discord.Client):
                 if local_status == "cancelled":
                     await self._try_deliver_market_cancellation_logs()
                 return {
+                    "world_restricted": WORLD_RESTRICTED_MESSAGE + "XPは消費していません。",
                     "player_offline": (
                         "Minecraftへ参加してから購入してください。XPは消費していません。"
                     ),
@@ -2964,6 +3030,7 @@ class MinecraftDiscordBot(discord.Client):
                 if local_status == "cancelled":
                     await self._try_deliver_market_cancellation_logs()
                 return {
+                    "world_restricted": WORLD_RESTRICTED_MESSAGE,
                     "player_offline": "Minecraftへ参加してから取り消してください。",
                     "inventory_full": "インベントリを空けてから取り消してください。",
                 }.get(transfer.status, "アイテムを返却できませんでした。")
@@ -3529,6 +3596,8 @@ class MinecraftDiscordBot(discord.Client):
             await self._send_minecraft_private_message(player_name, reason)
 
     async def accept_quest(self, interaction: discord.Interaction, quest_id: int) -> None:
+        if await self._deny_economy_interaction(interaction):
+            return
         await interaction.response.defer(ephemeral=True, thinking=True)
         quest = await asyncio.to_thread(self._quests.get, quest_id)
         if quest is None or quest.status != "open":
@@ -3612,6 +3681,10 @@ class MinecraftDiscordBot(discord.Client):
         if invalid_message is not None or quest is None:
             await interaction.followup.send(invalid_message, ephemeral=True)
             return
+        if not (quest.is_system_issued and action == "cancel") and (
+            await self._deny_economy_interaction(interaction, response_ready=True)
+        ):
+            return
         await interaction.followup.send(
             embed=quest_action_confirmation_embed(quest, action),
             view=QuestActionConfirmationView(
@@ -3637,6 +3710,10 @@ class MinecraftDiscordBot(discord.Client):
                 "取り消せるのは募集中の自分の依頼だけです。", ephemeral=True
             )
             return
+        if not quest.is_system_issued and await self._deny_economy_interaction(
+            interaction, response_ready=True
+        ):
+            return
         result = await self._run_quest_action("cancel", quest, quest.owner_uuid)
         if result is not None and result.status == "completed":
             await self._delete_quest_card(quest)
@@ -3656,6 +3733,8 @@ class MinecraftDiscordBot(discord.Client):
         )
 
     async def submit_quest(self, interaction: discord.Interaction, quest_id: int) -> None:
+        if await self._deny_economy_interaction(interaction):
+            return
         await interaction.response.defer(ephemeral=True, thinking=True)
         quest = await asyncio.to_thread(self._quests.get, quest_id)
         if (
@@ -3695,6 +3774,8 @@ class MinecraftDiscordBot(discord.Client):
         )
 
     async def abandon_quest(self, interaction: discord.Interaction, quest_id: int) -> None:
+        if await self._deny_economy_interaction(interaction):
+            return
         await interaction.response.defer(ephemeral=True, thinking=True)
         quest = await asyncio.to_thread(self._quests.get, quest_id)
         if (
@@ -3705,7 +3786,7 @@ class MinecraftDiscordBot(discord.Client):
         ):
             await interaction.followup.send("このクエストの担当者ではありません。", ephemeral=True)
             return
-        result = await self._run_quest_action("abandon", quest, quest.worker_uuid)
+        result = await self._run_quest_action("user-abandon", quest, quest.worker_uuid)
         if result is not None and result.status == "completed":
             await interaction.followup.send(
                 "クエストを辞退しました。依頼は掲示板で再募集されます。", ephemeral=True
@@ -3767,6 +3848,7 @@ class MinecraftDiscordBot(discord.Client):
     @staticmethod
     def _quest_action_error(status: str) -> str:
         return {
+            "world_restricted": WORLD_RESTRICTED_MESSAGE,
             "unavailable": "そのクエストは募集を終了しました。",
             "own_quest": "自分の依頼は受注できません。",
             "not_assignee": "そのクエストの担当者ではありません。",
@@ -3788,6 +3870,8 @@ class MinecraftDiscordBot(discord.Client):
         *,
         update_message: bool = False,
     ) -> None:
+        if await self._deny_economy_interaction(interaction):
+            return
         options = {
             "content": None,
             "embed": quest_guide_embed(),
@@ -3805,6 +3889,8 @@ class MinecraftDiscordBot(discord.Client):
         *,
         update_message: bool = False,
     ) -> None:
+        if await self._deny_economy_interaction(interaction):
+            return
         options = {
             "content": (
                 "報酬・返却品・納品物はMinecraftの永続受取箱に入ります。"
@@ -3826,6 +3912,8 @@ class MinecraftDiscordBot(discord.Client):
         page: int = 0,
         update_message: bool = False,
     ) -> None:
+        if await self._deny_economy_interaction(interaction):
+            return
         if update_message:
             await interaction.response.defer()
         else:
@@ -4275,6 +4363,7 @@ class MinecraftDiscordBot(discord.Client):
                 )
             ),
             "insufficient_emeralds": "手持ちのエメラルドが不足しています。",
+            "world_restricted": WORLD_RESTRICTED_MESSAGE,
             "inventory_full": "ダイヤモンドを受け取る空きがありません。",
             "player_offline": "プレイヤーのオンライン状態を確認できませんでした。",
         }
@@ -4322,6 +4411,7 @@ class MinecraftDiscordBot(discord.Client):
                 )
             ),
             "insufficient_diamonds": "手持ちのダイヤモンドが不足しています。",
+            "world_restricted": WORLD_RESTRICTED_MESSAGE,
             "inventory_full": "エメラルドを受け取る空きがありません。",
             "player_offline": "プレイヤーのオンライン状態を確認できませんでした。",
         }
@@ -4447,6 +4537,7 @@ class MinecraftDiscordBot(discord.Client):
                 f"通常の{reservation.item_name}が不足しています。"
                 "名前や特殊データのない通常アイテムを64個単位で入れてください。"
             ),
+            "world_restricted": WORLD_RESTRICTED_MESSAGE,
             "player_offline": "プレイヤーのオンライン状態を確認できませんでした。",
             "storage_error": (
                 "資源の保存処理を完了できませんでした。アイテム数を確認し、"
@@ -4563,6 +4654,8 @@ class MinecraftDiscordBot(discord.Client):
         )
 
     async def show_minecraft_resource_shop(self, interaction: discord.Interaction) -> None:
+        if await self._deny_economy_interaction(interaction):
+            return
         if interaction.guild_id is None:
             await interaction.response.send_message(
                 "Discordサーバー内で利用してください。", ephemeral=True
@@ -4600,6 +4693,8 @@ class MinecraftDiscordBot(discord.Client):
         )
 
     async def show_minecraft_resource_balance(self, interaction: discord.Interaction) -> None:
+        if await self._deny_economy_interaction(interaction):
+            return
         if interaction.guild_id is None:
             await interaction.response.send_message(
                 "Discordサーバー内で利用してください。", ephemeral=True
@@ -4618,6 +4713,8 @@ class MinecraftDiscordBot(discord.Client):
         await interaction.followup.send(wallet_text(shop.wallet), ephemeral=True)
 
     async def show_emerald_diamond_exchange(self, interaction: discord.Interaction) -> None:
+        if await self._deny_economy_interaction(interaction):
+            return
         if interaction.guild_id is None:
             await interaction.response.send_message(
                 "Discordサーバー内で利用してください。", ephemeral=True
@@ -4658,9 +4755,11 @@ class MinecraftDiscordBot(discord.Client):
         item_id: str,
         item_count: int,
         expected_cost_xp: int,
-    ) -> MinecraftResourceExchangeRequest | None:
+    ) -> MinecraftResourceExchangeRequest | str | None:
         if interaction.guild_id is None:
             return None
+        if error := await self._discord_economy_error(interaction.user.id):
+            return error
         return await self._level_bot_xp.request_resource_exchange(
             interaction.guild_id,
             interaction.user.id,
@@ -6047,6 +6146,76 @@ class MinecraftDiscordBot(discord.Client):
 
     async def _execute_checked_rcon(self, command: str) -> str:
         return validate_rcon_response(await self._execute_rcon(command))
+
+    async def _economy_access_status(self, player_uuid: str) -> str:
+        request_id = str(uuid.uuid4())
+        response = await self._execute_rcon(economy_access_command(player_uuid, request_id))
+        return parse_economy_access_result(response, request_id=request_id)
+
+    async def _economy_account_error(
+        self, account: MinecraftAccount, *, require_online: bool = True
+    ) -> str | None:
+        if account.player_uuid is None:
+            return ECONOMY_UNAVAILABLE_MESSAGE
+        try:
+            status = await self._economy_access_status(account.player_uuid)
+        except (OSError, RconError, RuntimeError, ValueError) as error:
+            LOGGER.warning(
+                "Could not verify economy world access account=%d: %s", account.id, error
+            )
+            return ECONOMY_UNAVAILABLE_MESSAGE
+        if status == "world_restricted":
+            return WORLD_RESTRICTED_MESSAGE
+        if status == "player_offline" and require_online:
+            return "連携したMinecraftアカウントでサーバーに参加してからご利用ください。"
+        return None
+
+    async def _discord_economy_error(self, discord_user_id: int) -> str | None:
+        # Offline browsing / quest cancellation keeps its existing behavior. Check every
+        # linked account so an online creative account cannot bypass the rule via Discord.
+        accounts = await asyncio.to_thread(self._accounts.list_for_discord_user, discord_user_id)
+        for account in accounts:
+            if (
+                account.status == "active"
+                and account.player_uuid is not None
+                and (error := await self._economy_account_error(account, require_online=False))
+            ):
+                return error
+        return None
+
+    async def _deny_economy_interaction(
+        self, interaction: discord.Interaction, *, response_ready: bool = False
+    ) -> bool:
+        if interaction.guild_id is None:
+            return False
+        try:
+            # Discord requires an initial response within three seconds. A slow
+            # read-only world check must return a denial, not an expired button.
+            async with asyncio.timeout(2):
+                error = await self._discord_economy_error(interaction.user.id)
+        except TimeoutError:
+            error = ECONOMY_UNAVAILABLE_MESSAGE
+        if error:
+            sender = (
+                interaction.followup.send if response_ready else interaction.response.send_message
+            )
+            await sender(error, ephemeral=True)
+            return True
+        return False
+
+    async def _execute_economy_delivery(self, account: MinecraftAccount, command: str) -> str:
+        if account.player_uuid is None:
+            raise ValueError(ECONOMY_UNAVAILABLE_MESSAGE)
+        response = await self._execute_checked_rcon(
+            guarded_economy_delivery_command(account.player_uuid, command)
+        )
+        if not response.strip() or response.startswith("Test failed"):
+            # A failed execute condition does not run the reward command. Existing
+            # callers release their reservations on a definite refusal (ValueError).
+            raise ValueError(WORLD_RESTRICTED_MESSAGE)
+        if not response.startswith(("Gave ", "Added ")):
+            raise RuntimeError("Minecraft economy delivery returned an unrecognized result")
+        return response
 
     async def _read_whitelist_enabled(self) -> bool:
         return await asyncio.to_thread(
@@ -8168,6 +8337,12 @@ class MinecraftDiscordBot(discord.Client):
                     claim_token=claim_token,
                 )
                 continue
+            if error := await self._economy_account_error(account):
+                await self._level_bot_xp.update_xp_exchange(
+                    event.id, guild_id, "cancel", claim_token=claim_token
+                )
+                await self._send_minecraft_private_message(account.server_player_name, error)
+                continue
             if event.status == "pending":
                 claim_token = await asyncio.to_thread(
                     self._accounts.get_or_create_minecraft_xp_exchange_claim_token,
@@ -8212,8 +8387,9 @@ class MinecraftDiscordBot(discord.Client):
                 if not reserved:
                     continue
                 try:
-                    await self._execute_checked_rcon(
-                        experience_add_points_command(account.server_player_name, event.reward_xp)
+                    await self._execute_economy_delivery(
+                        account,
+                        experience_add_points_command(account.server_player_name, event.reward_xp),
                     )
                 except ValueError:
                     await asyncio.to_thread(
@@ -8367,6 +8543,12 @@ class MinecraftDiscordBot(discord.Client):
                     claim_token=claim_token,
                 )
                 continue
+            if error := await self._economy_account_error(account):
+                await self._level_bot_xp.update_resource_exchange(
+                    event.id, guild_id, "cancel", claim_token=claim_token
+                )
+                await self._send_minecraft_private_message(account.server_player_name, error)
+                continue
             if event.status == "pending":
                 claim_token = await asyncio.to_thread(
                     self._accounts.get_or_create_minecraft_resource_exchange_claim_token,
@@ -8399,12 +8581,13 @@ class MinecraftDiscordBot(discord.Client):
             if not reserved:
                 continue
             try:
-                await self._execute_checked_rcon(
+                await self._execute_economy_delivery(
+                    account,
                     resource_give_command(
                         account.server_player_name,
                         event.item_id,
                         event.item_count,
-                    )
+                    ),
                 )
             except ValueError:
                 await asyncio.to_thread(
